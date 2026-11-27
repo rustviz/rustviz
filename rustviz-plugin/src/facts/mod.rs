@@ -34,7 +34,7 @@ use rustc_hir::def::DefKind;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
 pub use schema::*;
-pub(crate) use body::after_diverging_closure;
+pub(crate) use body::{after_diverging_closure, dropped_on_residual};
 
 pub(crate) fn is_vec_expansion(tcx: TyCtxt<'_>, expansion: rustc_span::hygiene::ExpnId) -> bool {
     expansion.expn_data().macro_def_id.is_some_and(|id| tcx.is_diagnostic_item(rustc_span::Symbol::intern("vec_macro"), id))

@@ -6173,14 +6173,21 @@ pub fn event_dot_break_alt_move_to_caller(my_name: &String, alt: &crate::svg_gen
 pub fn event_dot_closure_call_once(
     my_name: &String,
     fates: Option<&[crate::svg_generator::data::CapturedFate]>,
+    timing: crate::svg_generator::data::CallTiming,
 ) -> String {
     use crate::svg_generator::data::CapturedEnd;
     let f = styled_name_html(my_name);
+    use crate::svg_generator::data::CallTiming;
+    let prefix = match timing {
+        CallTiming::Never => return format!("{f} is moved before the arguments are evaluated. The call never starts."),
+        CallTiming::AfterArguments => format!("{f} is moved before the arguments are evaluated. If they finish, "),
+        CallTiming::Direct => String::new(),
+    };
     let Some(fates) = fates else {
-        return format!("{} is moved into the call (FnOnce::call_once takes its receiver by value)", f);
+        return format!("{prefix}{f} is moved into the call (FnOnce::call_once takes its receiver by value)");
     };
     let mut msg = format!(
-        "{0} is moved into the call (an FnOnce closure can only be called once)", f);
+        "{prefix}{f} is moved into the call (an FnOnce closure can only be called once)");
     for fate in fates {
         let s = styled_name_html(&fate.name);
         let tail = match fate.end {
@@ -6193,7 +6200,8 @@ pub fn event_dot_closure_call_once(
             CapturedEnd::Moved =>
                 "is moved on or dropped by the call",
         };
-        msg.push_str(&format!(". {0}, which {1} captured, {2}", s, f, tail));
+        let during = if matches!(timing, CallTiming::AfterArguments) { "If the call starts, " } else { "" };
+        msg.push_str(&format!(". {during}{s}, which {f} captured, {tail}"));
     }
     msg
 }

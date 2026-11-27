@@ -777,6 +777,7 @@ mod tests {
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
+            evaluated_spans: Vec::new(),
             constructed_vecs: Default::default(),
             func: func.into(),
             kind: "fn",

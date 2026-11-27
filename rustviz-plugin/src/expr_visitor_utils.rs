@@ -1807,6 +1807,12 @@ pub fn rc_call_of_expr(call: &Expr, tcx: &TyCtxt) -> Option<RcCall> {
 /// The function RAP for `call`'s result, with `Rc` clone / downgrade
 /// calls marked as such.
 pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt) -> ResourceAccessPoint {
+  let mut rap = rap;
+  if let ResourceAccessPoint::Function(f) = &mut rap {
+    let typeck = tcx.typeck(call.hir_id.owner);
+    f.callable_result = typeck.type_dependent_def_id(call.hir_id)
+      .is_some_and(|method| tcx.trait_of_assoc(method) == tcx.lang_items().fn_once_trait());
+  }
   let rap = match rc_call_of_expr(call, tcx) {
     Some(rc_call) => rap.with_rc_call(rc_call),
     None => rap,

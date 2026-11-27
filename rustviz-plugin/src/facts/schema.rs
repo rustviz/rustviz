@@ -31,6 +31,8 @@ pub struct CrateFacts {
 
 #[derive(Serialize)]
 pub struct BodyFacts {
+    #[serde(skip)]
+    pub evaluated_spans: Vec<rustc_span::Span>,
     /// Standard vec! constructions that can complete on the body's normal CFG.
     #[serde(skip)]
     pub constructed_vecs: std::collections::HashMap<rustc_span::hygiene::ExpnId, usize>,

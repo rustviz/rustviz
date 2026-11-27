@@ -334,7 +334,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub hir_body: &'a rustc_hir::Body<'tcx>,
   // Exact MIR effects at the source expression being rendered. The same span
   // on another expansion or in another body has its own effects.
-  pub pattern_loans: HashMap<u64, &'a crate::facts::LoanInfo>,
+  pub pattern_loans: BTreeMap<u64, &'a crate::facts::LoanInfo>,
   body_facts: Option<&'a crate::facts::BodyFacts>,
   effects: HashMap<rustc_span::Span, Vec<(usize, &'a crate::facts::Ev)>>,
   pub bwf: &'a BodyWithBorrowckFacts<'tcx>,
@@ -1154,7 +1154,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
     }
     ExprVisitor {
-      pattern_loans: HashMap::new(),
+      pattern_loans: BTreeMap::new(),
       body_facts,
       effects,
       tcx,
@@ -1844,7 +1844,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds a function RAP
   pub fn add_fn(&mut self, name: String) {
-    self.add_rap(ResourceAccessPoint::Function(Function { name: name, hash: self.rap_hashes as u64, drops_arg: Default::default(), rc_call: None, cast_to: None, inside: None }), self.current_scope, true);
+    self.add_rap(ResourceAccessPoint::Function(Function { callable_result: false, name: name, hash: self.rap_hashes as u64, drops_arg: Default::default(), rc_call: None, cast_to: None, inside: None }), self.current_scope, true);
   }
 
   // Adds a struct RAP
@@ -3691,7 +3691,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ResourceTy::Anonymous => ref_data.static_lender.clone(),
       _ => None,
     };
-    let of_ref_var = (to == ref_data.lender
+    let returned_pattern_loan = from.is_ref() && to.is_ref() && self.body_facts.is_some_and(|body|
+      body.rows.iter().filter(|r| r.line == line_num).flat_map(|r| &r.facts).any(|ev|
+        matches!(&ev.fact, crate::facts::Fact::BorrowEnd { loan, holder, lender, .. }
+          if holder == &from.real_name() && lender == &to.real_name()
+            && self.pattern_loans.values().any(|p| p.loan == *loan))));
+    let of_ref_var = returned_pattern_loan || (to == ref_data.lender
       && ref_data.borrow_span.is_some_and(|sp| self.ref_var_borrows.contains(&sp)))
       || matches!((&from, &to), (ResourceTy::Value(h), ResourceTy::Value(l))
         if self.stored_ref_var_lends.contains(&(h.name().to_owned(), l.name().to_owned())));
@@ -3883,7 +3888,51 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       .is_some_and(|d| self.tcx.trait_of_assoc(d) == self.tcx.lang_items().fn_once_trait()) {
       return;
     }
-    let Some(Transfer { row: line_num, kind, path, .. }) = self.transfer_at(callee) else { return };
+    if let ExprKind::Closure(literal) = callee.kind {
+      // The aggregate initializes the callable. Its operands are captures,
+      // each with its own MIR transfer, even if they share a source span.
+      let captures = self.effects.get(&callee.span.with_parent(None)).cloned().unwrap_or_default();
+      for (row, effect) in captures {
+        let loc = effect.location;
+        let Some(st) = self.mir_body.basic_blocks[loc.block].statements.get(loc.statement_index) else { continue };
+        if !matches!(&st.kind, StatementKind::Assign(a) if matches!(&a.1, Rvalue::Aggregate(k, _)
+          if matches!(&**k, rustc_middle::mir::AggregateKind::Closure(d, _) if *d == literal.def_id.to_def_id()))) { continue; }
+        let (path, kind) = match &effect.fact {
+          crate::facts::Fact::Move { path, .. } => (path, Evt::Move),
+          crate::facts::Fact::Copy { path, .. } => (path, Evt::Copy),
+          _ => continue,
+        };
+        let Some(src) = self.raps.get(path).map(|r| ResourceTy::Value(r.rap.clone())) else { continue };
+        let mut event = self.ext_ev_of_evt(kind, ResourceTy::Anonymous, src, *self.unique_id, false);
+        if let ExternalEvent::Move { into_closure, .. } | ExternalEvent::Copy { into_closure, .. } = &mut event {
+          *into_closure = true;
+        }
+        self.add_external_event(row, event);
+        *self.unique_id += 1;
+      }
+      return;
+    }
+    let Some(Transfer { row: line_num, kind, path, location, .. }) = self.transfer_at(callee) else { return };
+    // A closure aggregate can have the same span as the capture it moves.
+    // Only a use of a place of the callable type stages the receiver.
+    use rustc_middle::mir::{Rvalue, StatementKind, TerminatorKind};
+    let body = self.mir_body;
+    let block = &body.basic_blocks[location.block];
+    let Some(StatementKind::Assign(assignment)) = block.statements.get(location.statement_index).map(|s| &s.kind) else { return };
+    let Rvalue::Use(operand) = &assignment.1 else { return };
+    let erase = |ty| self.tcx.erase_and_anonymize_regions(ty);
+    if erase(operand.ty(&body.local_decls, self.tcx)) != erase(typeck.expr_ty(callee)) { return; }
+    let invocation = body.basic_blocks.iter_enumerated().find_map(|(bb, b)| {
+      let TerminatorKind::Call { func, args, .. } = &b.terminator().kind else { return None };
+      let (method, _) = func.const_fn_def()?;
+      (self.tcx.trait_of_assoc(method) == self.tcx.lang_items().fn_once_trait()
+        && args.first()?.node.place() == Some(assignment.0)).then_some(bb)
+    });
+    let timing = match invocation {
+      None => CallTiming::Never,
+      Some(bb) if bb != location.block => CallTiming::AfterArguments,
+      Some(_) => CallTiming::Direct,
+    };
     let Some(closure_rap) = self.raps.get(path).map(|r| r.rap.clone()) else { return };
     if matches!(kind, Evt::Copy) {
       self.add_ev(line_num, Evt::Copy, ResourceTy::Anonymous, ResourceTy::Value(closure_rap), false);
@@ -3896,7 +3945,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     };
     let id = *self.unique_id;
     *self.unique_id += 1;
-    self.add_external_event(line_num, ExternalEvent::ClosureCall { closure: ResourceTy::Value(closure_rap), fates, id });
+    self.add_external_event(line_num, ExternalEvent::ClosureCall { closure: ResourceTy::Value(closure_rap), fates, timing, id });
   }
 
   fn call_capture_fates(&self, callee: &Expr<'_>, closure_local: rustc_hir::def_id::LocalDefId) -> Vec<CapturedFate> {
@@ -3929,6 +3978,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       });
     }
     fates
+  }
+
+  fn nested_reference_place(&self, expr: &Expr<'_>, write: bool) -> Option<ResourceTy> {
+    use crate::facts::Fact;
+    // Box payloads and ordinary field writes have their own drop events.
+    // This path represents a projection through references only.
+    let span = expr.span.with_parent(None);
+    // rustc gives compound assignment's read and write the whole operator span.
+    let parent = self.tcx.parent_hir_node(expr.hir_id);
+    let effect_span = match parent {
+      rustc_hir::Node::Expr(e) if matches!(e.kind, ExprKind::AssignOp(_, lhs, _) if lhs.hir_id == expr.hir_id) => e.span.with_parent(None),
+      _ => span,
+    };
+    use rustc_middle::mir::{Operand, ProjectionElem, Rvalue, StatementKind};
+    let mut places = self.effects.get(&effect_span)?.iter().filter_map(|(_, e)| {
+      let loc = e.location;
+      let st = self.mir_body.basic_blocks[loc.block].statements.get(loc.statement_index)?;
+      let StatementKind::Assign(a) = &st.kind else { return None };
+      match (&e.fact, &a.1) {
+        (Fact::Init { path, .. }, _) if write => Some((a.0, path)),
+        (Fact::Copy { path, .. }, Rvalue::Use(Operand::Copy(p))) if !write => Some((*p, path)),
+        _ => None,
+      }
+    }).filter(|(p, _)| p.projection.len() >= 2 && p.projection.iter().all(|e| e == ProjectionElem::Deref));
+    let (place, path) = places.next()?;
+    if places.any(|(other, _)| other != place) { return None; }
+    let var = self.body_facts?.vars.iter().find(|v| v.local == place.local.index())?;
+    let r = self.raps.get(&var.name)?.rap.clone();
+    let mut ty = self.mir_body.local_decls[place.local].ty;
+    for _ in place.projection {
+      let TyKind::Ref(_, inner, _) = ty.kind() else { return None };
+      ty = *inner;
+    }
+    Some(ResourceTy::DerefField(r, path.clone(), PlaceWrite::Update, self.field_holds(ty, expr.hir_id.owner)))
   }
 
   // Return the ResourceTy that corresponds to the LHS of an assignment.
@@ -3991,6 +4074,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             return None;
           }
           return self.deref_of_element(expr);
+        }
+        if let Some(place) = self.nested_reference_place(expr, true) {
+          return Some(place);
         }
         let rhs_rap = fetch_rap(&expr, &self.tcx, &self.raps);
         match rhs_rap {
@@ -5589,10 +5675,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// The outgoing value of an assignment drops after its RHS has finished.
+  /// rustc attributes this terminator to the LHS, even for a multiline RHS.
+  pub(crate) fn reassign_drop_at(&self, lhs: &Expr<'_>, target: &ResourceAccessPoint) -> Option<(usize, bool)> {
+    let mut drops = self.effects.get(&lhs.span.with_parent(None))?.iter().filter(|(_, e)|
+      matches!(&e.fact, crate::facts::Fact::Drop { path, at_reassign: true, .. } if path == target.name()));
+    let &(row, e) = drops.next()?;
+    if drops.next().is_some() { return None; }
+    Some((row, !crate::facts::after_diverging_closure(self.tcx, self.mir_body, e.location)))
+  }
+
   pub(crate) fn unfinished_vec(&self, expr: &'tcx Expr<'tcx>) -> bool {
     crate::facts::is_vec_expansion(self.tcx, expr.span.ctxt().outer_expn())
       && vec_macro_elems(self.tcx, expr).is_some()
       && self.body_facts.is_some_and(|b| !b.constructed_vecs.contains_key(&expr.span.ctxt().outer_expn()))
+  }
+
+  pub(crate) fn vec_element_reached(&self, elem: &Expr<'_>, expansion: rustc_span::hygiene::ExpnId) -> bool {
+    let site = elem.span.source_callsite();
+    self.body_facts.is_none_or(|facts| facts.constructed_vecs.contains_key(&expansion)
+      || facts.evaluated_spans.iter().any(|span| site.contains(span.source_callsite())))
   }
 
   /// The actual transfer for an element that names a column. A temp is all
@@ -5614,7 +5716,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ResourceTy::Value(r) if dest == r.name() || (r.is_fn() && dest.strip_suffix("()") == Some(r.name())) => receiver.clone(),
       _ => ResourceTy::Anonymous,
     };
-    let moved_whole = matches!(kind, Evt::Move) && matches!(src, ResourceTy::Value(_));
+    // add_ev propagates moves to fields for anonymous, function and
+    // caller destinations. A named vector has no columns for its elements.
+    let moved_whole = matches!(kind, Evt::Move) && matches!(src, ResourceTy::Value(_))
+      && matches!(&to, ResourceTy::Value(r) if !r.is_fn() && !r.is_temporary() && !r.is_closure());
     if let Some(rap) = src.extract_rap() { self.update_rap(&rap, row); }
     if crate::facts::after_diverging_closure(self.tcx, self.mir_body, location) {
       let endpoints: Vec<_> = [src.extract_rap(), to.extract_rap()].into_iter().flatten().collect();
@@ -5629,9 +5734,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           }
         }
       }
-      let columns = endpoints.iter().map(|r| *r.hash()).collect();
-      self.approx_notes.push(ApproxNote::UnreachedTransfer { id: *self.unique_id, columns, line: row, scope_ends });
+      self.approx_notes.push(ApproxNote::UnreachedTransfer { id: *self.unique_id, scope_ends });
     }
+    let staged = dest == "<temp>";
+    let drops_on_exit = staged && self.body_facts.is_some_and(|b|
+      crate::facts::dropped_on_residual(self.tcx, self.mir_body, b, location));
+    let mut expansions = self.tcx.hir_parent_iter(elem.hir_id).filter_map(|(_, n)| match n {
+      rustc_hir::Node::Expr(e) => Some(e),
+      _ => None,
+    }).take_while(|e| crate::facts::is_vec_expansion(self.tcx, e.span.ctxt().outer_expn()));
+    let first = expansions.next();
+    let repeat = first.is_some_and(|e| matches!(e.kind, ExprKind::Call(_, args) if args.first().is_some_and(|a| a.hir_id == elem.hir_id)));
+    let nested = first.is_some_and(|inner| expansions.any(|outer| inner.span.ctxt() != outer.span.ctxt()));
+    self.approx_notes.push(ApproxNote::VecElement { id: *self.unique_id, staged, drops_on_exit, repeat, nested });
     self.add_ev(row, kind, to.clone(), src, false);
     if moved_whole {
       self.move_struct_fields_away(row, path);
@@ -6063,10 +6178,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // `take(vec![B { name: r }])`, `take([(r, 1)])`: what the
         // literal element is built from goes into the call (#1143).
         let is_literal = matches!(elem.kind, ExprKind::Struct(..) | ExprKind::Tup(_)) && !elem.span.from_expansion();
+        if arg.span.from_expansion() && !self.vec_element_reached(elem, arg.span.ctxt().outer_expn()) { continue; }
         if vec_macro_elems(self.tcx, elem).is_some() {
           self.match_arg(elem, fn_name.clone());
-        } else if arg.span.from_expansion() && matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..))
-            && !self.tcx.typeck(elem.hir_id.owner).expr_ty(elem).is_ref() {
+        } else if arg.span.from_expansion() && (matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..)) || self.box_contents_of(elem).is_some())
+            && !(self.tcx.typeck(elem.hir_id.owner).expr_ty(elem).is_ref()
+              && self.body_facts.is_some_and(|b| b.constructed_vecs.contains_key(&arg.span.ctxt().outer_expn()))
+              && self.transfer_at(elem).is_none_or(|t| !matches!(t.kind, Evt::Move))) {
           let to = ResourceTy::Value(self.raps[&fn_key(&fn_name)].rap.clone());
           self.draw_vec_place(elem, Some(&to));
         } else if is_var || is_literal {
@@ -9742,6 +9860,7 @@ pub fn addr_of_scrutinee_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, pat: &'t
     rd.borrow_span = Some(span);
     self.ref_var_borrows.insert(span);
     self.pattern_loans.insert(*binding.hash(), loan);
+    self.approx_notes.push(ApproxNote::PatternReference { holder: *binding.hash() });
   }
   Some(if loan.kind == "mut" { Evt::MBorrow } else { Evt::SBorrow })
 }
@@ -10223,6 +10342,14 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // Earlier elements may already have moved into MIR temporaries. The
       // assignment itself never happens if an element returns or diverges.
       let Some(row) = self.body_facts.and_then(|b| b.constructed_vecs.get(&rhs.span.ctxt().outer_expn())) else { return };
+      if let Some(rap) = lhs.extract_rap().filter(|rap| self.body_facts.is_some_and(|b|
+        b.vars.iter().any(|v| v.name == *rap.name() && v.local > self.mir_body.arg_count && v.capture.is_none()))) {
+        let mut inits = self.body_facts.into_iter().flat_map(|b| &b.rows).flat_map(|r| &r.facts)
+          .filter(|e| matches!(&e.fact, crate::facts::Fact::Init { path, .. } if path == rap.name())).peekable();
+        if inits.peek().is_some() && inits.all(|e| crate::facts::after_diverging_closure(self.tcx, self.mir_body, e.location)) {
+          self.approx_notes.push(ApproxNote::UnreachedValue { hash: *rap.hash() });
+        }
+      }
       self.draw_literal_parts(lhs, elems.iter().collect(), *row, true);
       return;
     }
@@ -10389,6 +10516,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
               self.add_ev(line_num, evt, lhs, src, false);
               return;
             }
+          }
+          if let Some(src) = self.nested_reference_place(rhs, false) {
+            self.add_ev(line_num, evt, lhs, src, false);
+            return;
           }
           let rhs_rap = fetch_rap(&expr, &self.tcx, &self.raps);
           let res = match rhs_rap {
@@ -11221,7 +11352,7 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
         }
       }
       let from = self.raps.get(&key)
-        .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
+        .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.clone(), &self.tcx)))
         .unwrap_or(ResourceTy::Anonymous);
       self.add_ev(line_num, evt, lhs, from, false);
       return;
@@ -12063,6 +12194,14 @@ pub fn print_out_of_scope(&mut self){
         // its last use (Q7).
         let all_static = mine.iter().all(|id| info(id).is_some_and(|f| f.source == "static"));
         let (end, own) = match (e.last_end, e.gives_back, e.stops) {
+          // A reference copied out of a collection can point to static data.
+          // The collection can hold it for longer than this binding is live.
+          _ if all_static && matches!(l, ResourceTy::Anonymous)
+            && self.raps.get(&slot.key).is_some_and(|r| r.rap.is_ref())
+            && mine.iter().all(|id| info(id).is_some_and(|f| !f.direct_holders.contains(&slot.key))) => {
+            let last = self.last_live_line(&slot.key, (slot.rd.assigned_at, slot.rows.1));
+            (End::Arrow(last.unwrap_or(slot.rd.assigned_at)), None)
+          }
           (_, _, Some(_)) if all_static => (End::Own(e.last_held.unwrap_or(slot.rd.lifetime)), None),
           // (A local's loan with no end on any path: the path that still
           // holds it diverges, `panic!("{}", r)`; the lender is dropped

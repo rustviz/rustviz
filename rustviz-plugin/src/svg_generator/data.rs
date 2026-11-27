@@ -494,6 +494,7 @@ pub struct StaticRef {                // let (mut) r1 = & a;
 
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct Function {
+    pub callable_result: bool,
     pub name: String,
     pub hash: u64,
     /// Set only on the copy a move event carries when the callee is
@@ -2515,6 +2516,7 @@ pub enum ExternalEvent {
     // capture, in capture order. No arrow; the event is a dot on `f`.
     ClosureCall {
         closure: ResourceTy,
+        timing: CallTiming,
         fates: Option<Vec<CapturedFate>>,
         id: usize
     },
@@ -2962,10 +2964,14 @@ pub enum Event {
     // (ExternalEvent::ClosureCall).
     ClosureCall {
         is: ResourceTy,
+        timing: CallTiming,
         fates: Option<Vec<CapturedFate>>,
         id: usize
     },
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CallTiming { Direct, AfterArguments, Never }
 
 /// What a fn parameter's pattern leaves of the argument (#1181).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -3878,8 +3884,8 @@ impl Event {
     pub fn print_message_with_name(&self, my_name: &mut String) -> String {
         match self {
             // no arrow involved
-            Event::ClosureCall { fates, .. } => {
-                hover_messages::event_dot_closure_call_once(my_name, fates.as_deref())
+            Event::ClosureCall { fates, timing, .. } => {
+                hover_messages::event_dot_closure_call_once(my_name, fates.as_deref(), *timing)
             }
             Event::OwnerGoOutOfScope { .. } => {
                 hover_messages::event_dot_owner_go_out_of_scope(my_name)
@@ -4083,6 +4089,11 @@ impl Event {
             Event::Move{ to: ResourceTy::Caller, is, into_closure: true, ..} => {
                 hover_messages::event_dot_move_into_returned_closure(&self.deref_name(my_name), is_plain(is))
             }
+            Event::Move { to: ResourceTy::Anonymous, into_closure: true, .. }
+            | Event::Duplicate { to: ResourceTy::Anonymous, into_closure: true, .. } => {
+                let action = if matches!(self, Event::Move { .. }) { "moved" } else { "copied" };
+                format!("{} is {action} into the closure when it is created", hover_messages::styled_name_html(&self.deref_name(my_name)))
+            }
             Event::Duplicate{ to, into_closure: true, ..} => {
                 hover_messages::event_dot_copy_into_closure_arg(&self.deref_name(my_name), &to.name())
             }
@@ -4108,6 +4119,10 @@ impl Event {
                 hover_messages::event_dot_copy_out_of_element(r.name(), place, r.is_ref(), if r.is_ref() { r.points_to_copy() } else { r.holds_value() })
             }
             // `&self.s` returned: a reborrow through `self` (#784).
+            Event::Duplicate { to, is: ResourceTy::DerefField(_, place, _, _), .. } if !matches!(to, ResourceTy::Caller) && place.starts_with("**") =>
+                format!("{}'s value is copied", hover_messages::styled_name_html(place)),
+            Event::Acquire { is: ResourceTy::DerefField(_, place, PlaceWrite::Update, _), .. } if place.starts_with("**") =>
+                format!("the value at {} is modified", hover_messages::styled_name_html(place)),
             Event::Duplicate{ to: ResourceTy::Caller, is: ResourceTy::DerefField(r, place, _, _), ..} if place.starts_with('&') => {
                 hover_messages::event_dot_reborrow_to_caller(r.name(), place)
             }
@@ -4825,7 +4840,11 @@ pub enum ApproxNote {
     /// in `lines` (inclusive).
     At { hash: u64, lines: (usize, usize), text: String },
     /// rustc checks this transfer after a closure call whose body cannot return.
-    UnreachedTransfer { id: usize, columns: Vec<u64>, line: usize, scope_ends: Vec<(u64, usize)> },
+    UnreachedTransfer { id: usize, scope_ends: Vec<(u64, usize)> },
+    UnreachedValue { hash: u64 },
+    VecElement { id: usize, staged: bool, drops_on_exit: bool, repeat: bool, nested: bool },
+    IteratorElement { id: usize },
+    PatternReference { holder: u64 },
     /// A loop whose first line is `head`. It gets one note, on its
     /// first event dot in source order (then leftmost) that is drawn for
     /// a pass: on a line in `pass` (inclusive), or on `head` for a
@@ -4856,8 +4875,8 @@ impl ApproxNote {
     /// the figure removed before it).
     pub fn map_lines(&mut self, f: impl Fn(usize) -> usize) {
         match self {
-            ApproxNote::UnreachedTransfer { line, scope_ends, .. } => {
-                *line = f(*line);
+            ApproxNote::PatternReference { .. } | ApproxNote::VecElement { .. } | ApproxNote::IteratorElement { .. } | ApproxNote::UnreachedValue { .. } => {}
+            ApproxNote::UnreachedTransfer { scope_ends, .. } => {
                 for (_, end) in scope_ends { *end = f(*end); }
             }
             ApproxNote::At { lines, .. } => *lines = (f(lines.0), f(lines.1)),
@@ -6190,9 +6209,9 @@ impl Visualizable for VisualizationData {
                     b_history.extend(borrow.map(|e| (line_number, e)));
                 }
             }
-            ExternalEvent::ClosureCall { closure, fates, id } => {
+            ExternalEvent::ClosureCall { closure, fates, timing, id } => {
                 if closure.extract_rap() == Some(rap) {
-                    b_history.push((line_number, Event::ClosureCall { is: closure.clone(), fates: fates.clone(), id: *id }));
+                    b_history.push((line_number, Event::ClosureCall { is: closure.clone(), fates: fates.clone(), timing: *timing, id: *id }));
                 }
             }
             _ => {
@@ -6526,8 +6545,8 @@ impl Visualizable for VisualizationData {
                 }
                 maybe_append_event(self, &to_ro.clone(), Event::MutableDie{to : from_ro.to_owned(), is: to_ro, id: id}, line_number);
             },
-            ExternalEvent::ClosureCall { closure, fates, id } => {
-                maybe_append_event(self, &closure, Event::ClosureCall { is: closure.clone(), fates, id }, line_number);
+            ExternalEvent::ClosureCall { closure, fates, timing, id } => {
+                maybe_append_event(self, &closure, Event::ClosureCall { is: closure.clone(), timing, fates, id }, line_number);
             },
             ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
                 maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern, rest}, line_number);

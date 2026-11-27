@@ -42,17 +42,33 @@ struct Cx<'a, 'tcx> {
 /// A transfer on the normal return edge of a call to a local closure can
 /// be checked by rustc even when the closure has no path to a return.
 pub(crate) fn after_diverging_closure<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, loc: Location) -> bool {
+    after_call(body, loc, |f| closure_has_no_return(tcx, f))
+}
+
+fn after_call<'tcx>(body: &Body<'tcx>, loc: Location, predicate: impl Fn(&Operand<'tcx>) -> bool) -> bool {
     let dom = body.basic_blocks.dominators();
     let mut block = loc.block;
     while let Some(pred) = dom.immediate_dominator(block) {
         if let TerminatorKind::Call { func, target: Some(target), .. } = &body.basic_blocks[pred].terminator().kind {
-            if dom.dominates(*target, loc.block) && closure_has_no_return(tcx, func) {
+            if dom.dominates(*target, loc.block) && predicate(func) {
                 return true;
             }
         }
         block = pred;
     }
     false
+}
+
+/// A staged operand is destroyed on the early-return edge of `?` when
+/// the residual conversion dominates the drop of that exact MIR temporary.
+pub(crate) fn dropped_on_residual<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, facts: &BodyFacts, assignment: Location) -> bool {
+    let Some(st) = body.basic_blocks[assignment.block].statements.get(assignment.statement_index) else { return false };
+    let StatementKind::Assign(a) = &st.kind else { return false };
+    facts.rows.iter().flat_map(|row| &row.facts).any(|event| {
+        matches!(event.fact, Fact::TempDrop { .. }) &&
+            matches!(body.basic_blocks[event.location.block].terminator().kind, TerminatorKind::Drop { place, .. } if place == a.0) &&
+            after_call(body, event.location, |f| f.const_fn_def().is_some_and(|(d, _)| tcx.is_lang_item(d, rustc_hir::LangItem::TryTraitFromResidual)))
+    })
 }
 
 fn closure_has_no_return<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> bool {
@@ -253,7 +269,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
                 // the array (e.g. `?`), only the move into a temp is certain.
                 if matches!(rv, Rvalue::Aggregate(k, _) if matches!(**k, AggregateKind::Array(_))) {
                     if let Some(&(call, result)) = self.vec_results.get(&st.source_info.span.ctxt().outer_expn()) {
-                        return if self.reaches_without_branch(loc, here) {
+                        return if self.row_of(loc) == self.row_of(call) && !self.replaces_after_call(call) && self.reaches_without_branch(loc, here) {
                             (self.dest_name(result, call, depth + 1), true)
                         } else {
                             ("<temp>".into(), false)
@@ -274,7 +290,16 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
                     let expansion = data.terminator().source_info.span.ctxt().outer_expn();
                     best = Some(if self.vec_results.get(&expansion).is_some_and(|(call, _)| *call == at)
                         && args.first().is_some_and(|a| a.node.place().is_some_and(|p| p.as_local() == Some(tmp))) {
-                        (self.dest_name(*destination, at, depth + 1), true)
+                        // from_elem takes the staged first argument even when
+                        // it returns an empty vector; count evaluation can exit.
+                        let repeat = func.const_fn_def().is_some_and(|(d, _)| self.tcx.is_diagnostic_item(rustc_span::Symbol::intern("vec_from_elem"), d));
+                        let count = args.get(1).and_then(|a| a.node.constant()).and_then(|c|
+                            c.const_.try_eval_target_usize(self.tcx, self.body.typing_env(self.tcx)));
+                        if repeat && (count.is_none_or(|n| n == 0) || self.row_of(loc) != self.row_of(at) || self.replaces_after_call(at) || !self.reaches_without_branch(loc, at)) {
+                            ("<temp>".into(), false)
+                        } else {
+                            (self.dest_name(*destination, at, depth + 1), true)
+                        }
                     } else {
                         (format!("{}()", self.call_name(*fn_span, func, at)), false)
                     });
@@ -282,6 +307,13 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
             }
         }
         best.unwrap_or_else(|| ("<temp>".into(), false))
+    }
+
+    fn replaces_after_call(&self, call: Location) -> bool {
+        let TerminatorKind::Call { destination, target: Some(next), .. } = self.body.basic_blocks[call.block].terminator().kind else { return false };
+        let TerminatorKind::Drop { place, target, .. } = self.body.basic_blocks[next].terminator().kind else { return false };
+        self.body.basic_blocks[target].statements.iter().any(|s| matches!(&s.kind,
+            StatementKind::Assign(a) if a.0 == place && matches!(&a.1, Rvalue::Use(Operand::Move(p)) if *p == destination)))
     }
 
     fn reaches_without_branch(&self, mut at: Location, target: Location) -> bool {
@@ -304,7 +336,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
             if at.block == target.block {
                 return at.statement_index <= stop;
             }
-            if matches!(&data.terminator().kind, TerminatorKind::Call { destination, .. } if overwrites(*destination)) {
+            if matches!(&data.terminator().kind, TerminatorKind::Call { destination, func, .. } if overwrites(*destination) || closure_has_no_return(self.tcx, func)) {
                 return false;
             }
             start = 0;
@@ -3217,7 +3249,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let &(call, _) = cx.vec_results.get(&expansion)?;
         (bb == call.block).then(|| (expansion, cx.row_of(call)))
     }).collect();
+    let evaluated_spans = cx.rows.row.keys().filter(|loc| runs.contains(&loc.block) && !body.basic_blocks[loc.block].is_cleanup)
+        .map(|loc| body.source_info(*loc).span.with_parent(None)).collect();
     BodyFacts {
+        evaluated_spans,
         constructed_vecs,
         func,
         kind: if tcx.is_closure_like(def_id) { "closure" } else { "fn" },

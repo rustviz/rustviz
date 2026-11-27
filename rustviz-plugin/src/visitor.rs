@@ -30,7 +30,7 @@ fn is_let_chain(expr: &Expr) -> bool {
 /// True if `pat` matches every value of its type. Conservative: only
 /// bindings, `_`, tuples, references / boxes, and struct patterns (not
 /// enum variants) of such patterns count.
-fn pat_is_irrefutable(pat: &Pat, typeck: &rustc_middle::ty::TypeckResults) -> bool {
+pub(crate) fn pat_is_irrefutable(pat: &Pat, typeck: &rustc_middle::ty::TypeckResults) -> bool {
   let is_struct = |qpath: &QPath| matches!(typeck.qpath_res(qpath, pat.hir_id),
     Res::Def(DefKind::Struct | DefKind::Ctor(CtorOf::Struct, _), _));
   match pat.kind {
@@ -1614,7 +1614,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.visit_expr(tail);
       }
       ExprKind::Call(_, args) => {
+        let repeated = vec_macro_elems(self.tcx, expr).and_then(|elems| elems.first())
+          .filter(|first| args.first().is_some_and(|a| a.hir_id == first.hir_id));
         for a in args {
+          if repeated.is_some_and(|first| a.hir_id == first.hir_id) {
+            self.draw_vec_place(a, None);
+          }
           self.descend_through_expansion(a);
         }
         // A panic macro unwinds once its message's arguments have
@@ -1671,6 +1676,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let vec = vec_macro_elems(self.tcx, expr).is_some();
         for i in items {
           if vec {
+            if !self.vec_element_reached(i, expr.span.ctxt().outer_expn()) { continue; }
             self.draw_vec_place(i, None);
           }
           self.descend_through_expansion(i);
@@ -8089,6 +8095,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let n_before_drops = self.preprocessed_events.len();
     let payload_target = drop_target.as_ref().map(|r| *r.hash());
     for ((((rap, maybe_moved), parts), loop_head), by_cond) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts).zip(loop_head).zip(by_conds) {
+      let drop_line = if crate::facts::is_vec_expansion(self.tcx, rhs_expr.span.ctxt().outer_expn()) {
+        match self.reassign_drop_at(lhs_expr, &rap) {
+          Some((row, true)) => row,
+          Some((_, false)) => continue,
+          None => drop_line,
+        }
+      } else { drop_line };
       let hash = *rap.hash();
       let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
         || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
@@ -9667,7 +9680,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // that value's last use ends it, after the branches join: as for
       // `if let Some(x) = &o { x } else { &t }`, `emit_borrow_ends`
       // ends it, not the arm.
-      if value_uses_binding && region_end.is_none_or(|l| l > end) {
+      if (value_uses_binding || pattern_loan.is_some()) && region_end.is_none_or(|l| l > end) {
         continue;
       }
       self.borrow_map.remove(&name);
@@ -11135,7 +11148,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let let_else_literal = matches!(part, Some(TempPart::LetElse(None)))
       && matches!(expr.kind, ExprKind::Tup(_) | ExprKind::Struct(..) | ExprKind::Array(_));
-    let tmp = self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into, part);
+    let tmp = self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into, part, false);
     if let (true, Some(t)) = (let_else_literal, &tmp) {
       self.note_let_else_literal_temp(expr, t.clone());
     }
@@ -11526,6 +11539,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     owner: Option<HirId>,
     into: Vec<(ResourceAccessPoint, usize)>,
     part: Option<TempPart>,
+    iterator_elements: bool,
   ) -> Option<ResourceAccessPoint> {
     // Branch events are sliced out by line, so a one-line `match` / `if`
     // can't hold a column of its own (the same limit as #354 / #459).
@@ -11591,6 +11605,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Variables moved into the temporary (`vec![s];`, #570; the fields
     // `P { n: 1, ..p }` takes from p, #574).
     for (src, src_line) in into {
+      if iterator_elements { self.approx_notes.push(ApproxNote::IteratorElement { id: *self.unique_id }); }
       self.update_rap(&src, line);
       self.add_ev(src_line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(src), false);
     }
@@ -11671,7 +11686,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let shown = strip_module_paths(&ty.to_string());
     let shown = if shown.contains('{') { "iterator".to_owned() } else { shown };
     let elements = vec_macro_elems(self.tcx, head).and_then(|_| self.literal_moved_places(head)).unwrap_or_default();
-    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, elements, None)
+    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, elements, None, true)
   }
 
   /// True iff `expr` sits inside an `if` / `match` that starts and ends
