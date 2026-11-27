@@ -8602,6 +8602,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // get all the 'parents' ie things being matched on and their types
     // (A constructor scrutinee `Some(f)` that a pattern takes apart is
     // split like a tuple literal, #807.)
+    // Overloaded indexing takes a real receiver loan before control
+    // reaches any pattern. An empty slice pattern has no binding of
+    // its own that could start that loan.
+    let indexed_loan = || {
+      let operand = match guard_expr.kind { ExprKind::AddrOf(_, _, e) => e, _ => guard_expr };
+      let ExprKind::Index(base, ..) = operand.kind else { return None };
+      typeck_res.type_dependent_def_id(operand.hir_id)?;
+      let loan = self.loan_at_span(base.span)?;
+      let local = self.bwf.borrow_set.location_map().get(&loan.issue?)?.borrowed_place().local;
+      let lender = self.raps.get(&loan.lender)?;
+      (loan.source == "borrow" && loan.implicit && lender.rap.owner_local().or(lender.local) == Some(local))
+        .then(|| (loan.line, loan.kind, ResourceTy::Value(lender.rap.clone())))
+    };
+    if let Some((line, kind, lender)) = indexed_loan() {
+      self.add_ev(line, if kind == "mut" { Evt::MBorrow } else { Evt::SBorrow }, ResourceTy::Anonymous, lender, false);
+    }
     let split = match guard_expr.kind {
       ExprKind::Tup(fields) => Some(fields),
       _ => self.literal_elems(guard_expr),

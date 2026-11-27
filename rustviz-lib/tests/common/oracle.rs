@@ -1196,7 +1196,7 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                     // title explains why borrowck rejects a read (Q5).
                     if PARTLY_MOVED.iter().any(|m| s.tip.contains(m)) {
                         Drawn::PartlyMoved
-                    } else if s.tip.contains("may have been moved out") || s.tip.contains(IMAGINARY_MOVE) {
+                    } else if s.tip.contains("may have been moved out") || s.tip.contains("value was moved out") || s.tip.contains(IMAGINARY_MOVE) {
                         Drawn::Moved
                     } else {
                         Drawn::Unassigned
@@ -1259,8 +1259,11 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                     *skips.entry("a dot that both moves and gives a value").or_default() += 1;
                     continue;
                 }
+                // A join can explain the old value's conditional drop on the
+                // same dot that acquires its replacement.
                 let moved = has(MOVE_EVENTS)
-                    || (last.events.iter().any(|e| e == "branch_join") && MAYBE_MOVED.iter().any(|m| last.tip.contains(m)));
+                    || (!has(VALUE_EVENTS) && last.events.iter().any(|e| e == "branch_join")
+                        && MAYBE_MOVED.iter().any(|m| last.tip.contains(m)));
                 if !moved {
                     continue;
                 }

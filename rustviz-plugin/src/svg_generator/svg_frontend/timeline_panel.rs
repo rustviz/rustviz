@@ -1,5 +1,6 @@
 extern crate handlebars;
 use crate::facts::table::{FunctionStart, Init, JoinCell};
+use crate::facts::SharedReferenceJoin;
 use crate::svg_generator::data::{state_after_loop_exits, AltRuntime};
 use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
@@ -1808,7 +1809,13 @@ fn render_branch_dots(
             matches!(b.states.last().map(|s| &s.2),
                 Some(State::OutOfScope | State::FullPrivilege { s: LineState::Uninit }))
         }) {
-            join_has_line.then(hover_messages::event_dot_branch_merge_conditional_ends)
+            join_has_line.then(|| {
+                if join.is_some_and(|j| j.shared_ref_unchanged.is_some()) {
+                    hover_messages::event_dot_unchanged_shared_reference(rap.name())
+                } else {
+                    hover_messages::event_dot_branch_merge_conditional_ends()
+                }
+            })
         } else if all_moved {
             // Every branch ends without the resource, by a move
             // or a drop (or an implicit drop at a nested merge):
@@ -1983,7 +1990,8 @@ fn scope_end_message(
                 // flag decides whether its captures are dropped.
                 let title = if maybe_moved {
                     let (called, moved) = closure_used_up_in_branches(history);
-                    hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, moved_by_chain_condition(history), move_count, called, moved)
+                    let moved = moved || (!called && moved_by_chain_condition(history));
+                    hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, move_count, called, moved)
                 } else if effect == Some(ScopeDrop::Remaining) {
                     format!("{} goes out of scope. Any captured resources it still holds are dropped.",
                         styled_name_html(&name))
@@ -2692,6 +2700,11 @@ fn render_dot(
                                     &format!("it does not drop {}'s resource.", hover_messages::styled_name_html(&name)));
                             }
                         }
+                    }
+                    if matches!(event, Event::OwnerDropAtReassign { .. }) && visualization_data.fn_source_lines.get(hash)
+                        .zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines))
+                        .is_some_and(|(&f, src)| visualization_data.state_table.assigned_none(f, &name, src)) {
+                        title = hover_messages::reassign_to_none(&name, title);
                     }
                     if conditional_drop.is_some() {
                         title = format!("{}. This assignment runs on only some paths through this expression.", title.trim_end_matches('.'));
@@ -3433,9 +3446,6 @@ fn closure_used_up_in_branches(history: &[(usize, Event)]) -> (bool, bool) {
     }
     let mut out = (false, false);
     walk(history, false, &mut out);
-    if !out.0 && !out.1 {
-        out.1 = true;
-    }
     out
 }
 
@@ -3995,7 +4005,12 @@ fn branch_join_message(
                 hover_messages::event_dot_branch_merge_reassigned_after_move(var_name, &leavers)
             } else if leavers.is_empty() {
                 // #179: this used to be an empty tooltip.
-                hover_messages::event_dot_branch_merge_unchanged(var_name)
+                let moved = hover_messages::event_dot_branch_merge_unchanged(var_name);
+                if join.is_some_and(|j| j.shared_ref_unchanged == Some(SharedReferenceJoin::LoanEnded)) {
+                    format!("{moved}&lt;br&gt;{}", hover_messages::event_dot_unchanged_shared_reference(var_name))
+                } else {
+                    moved
+                }
             } else {
                 let is_ref = is.extract_rap().filter(|r| r.is_ref()).map(|r| r.is_mutref());
                 hover_messages::event_dot_branch_merge_kept(
@@ -4339,6 +4354,12 @@ fn closure_move_capture_count(
     visualization_data: &VisualizationData,
     closure_hash: u64,
 ) -> usize {
+    if let Some(count) = visualization_data.fn_source_lines.get(&closure_hash).and_then(|&f| {
+        let rap = &visualization_data.timelines.get(&closure_hash)?.resource_access_point;
+        visualization_data.state_table.closure_captures(f, rap.name())
+    }) {
+        return count;
+    }
     let events = all_external_events(visualization_data);
     // A capture by move brings a resource along only if what is moved
     // needs drop: not a reference (`move || r.push('!')` with `r: &mut
@@ -10781,6 +10802,7 @@ fn leg_table_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationDa
     if rl.get(split..).and_then(|v| v.iter().find_map(|l| *l)).is_none_or(|split_src| src <= split_src) {
         return None;
     }
+    if table.completed_let(fn_line, src) { return Some(row); }
     let text = code_text(visualization_data.source_lines.get(src.wrapping_sub(1))?);
     // A row the column's state can be read after on this path: it has a
     // state of its own and, if it branches (`if d {` inside the arm, the
@@ -10917,6 +10939,16 @@ fn leg_lent_state_of(state: &State, rap: &ResourceAccessPoint, visualization_dat
     // No value yet on the arm's path (`let y = Some(if c { .. } else { ..
     // });` is assigned after the arms): an arm's leg is dashed then, as
     // 2.x draws a `let s;` local in an arm.
+    if let Some(cell) = cell.as_ref() {
+        use crate::facts::table::Init;
+        let dashed = State::FullPrivilege { s: LineState::Uninit };
+        let func = *visualization_data.fn_source_lines.get(rap.hash())?;
+        let src = rv_attrs::line_of(at, &visualization_data.row_lines)?;
+        if cell.init == Init::Partly && trunk_ends_at_fields(visualization_data, func, rap.name(), at, src) {
+            let title = table_partly_moved_title(rap, &visualization_data.state_table, func, src, cell)?;
+            return Some((dashed, Some(title)));
+        }
+    }
     let unassigned = cell.as_ref().is_some_and(|c| c.init == crate::facts::table::Init::Unassigned);
     owner_segment_of(rap, visualization_data, at, state, cell, None).map(|(st, title)| {
         (if unassigned { State::FullPrivilege { s: LineState::Uninit } } else { st }, Some(title))
@@ -11515,6 +11547,15 @@ fn render_timeline(
             ) { continue; }
             bounds.extend(seg_start + 1..*seg_end);
         } else {
+            if rap.is_closure() {
+                if matches!(state, State::OutOfScope) && history.iter().any(|(_, e)| matches!(e,
+                    Event::Branch { split_point, merge_point, .. } if split_point == seg_start && merge_point == seg_end)) {
+                    continue; // The legs already draw this interval on their own paths.
+                }
+                if let Some(&f) = visualization_data.fn_source_lines.get(hash) {
+                    bounds.extend((seg_start + 1..*seg_end).filter(|r| line(*r).is_some_and(|s| visualization_data.state_table.completed_let(f, s))));
+                }
+            }
             bounds.extend(cuts.iter().copied().filter(|l| l > seg_start && l < seg_end));
             if matches!(state, State::RevokedPrivilege { .. }) {
                 bounds.extend(ref_move_rows(visualization_data, *seg_start, *seg_end));
@@ -11547,6 +11588,18 @@ fn render_timeline(
                     continue;
                 }
                 (state.clone(), timeline_segment_title(state, rap, visualization_data, Some(w[0])))
+            } else if rap.is_closure() && visualization_data.fn_source_lines.get(hash)
+                .and_then(|&f| Some((f, line(w[0])?)))
+                .filter(|(f, src)| visualization_data.state_table.completed_let(*f, *src))
+                .and_then(|(f, src)| visualization_data.state_table.cell(f, rap.name(), src, src))
+                .is_some_and(|cell| cell.init == crate::facts::table::Init::Maybe && cell.cause == Some("moved")) {
+                let count = closure_move_capture_count(visualization_data, *hash);
+                let mut title = hover_messages::state_maybe(rap.name(), Some("moved"));
+                if count > 0 {
+                    let capture = hover_messages::state_closure_full_privilege_with_resource(rap.name(), count);
+                    title.push_str(&format!(". On a path where it still holds the closure, {capture}"));
+                }
+                (State::FullPrivilege { s: LineState::Uninit }, title)
             } else if owner {
                 let piece = owner_segment(rap, visualization_data, w[0], state, between_own_dots);
                 if piece.is_none() && matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: false, .. })) {
