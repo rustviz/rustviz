@@ -243,7 +243,7 @@ impl Order<'_, '_> {
                 // generations even when there is no BorrowEnd here.
                 let mut stores = row.facts.iter().filter(|f| {
                     matches!(&f.fact, Fact::Repoint {
-                    holder: path, old, new } if *path == holder && old.iter().any(|id|
+                    holder: path, old, new, .. } if *path == holder && old.iter().any(|id|
                         !new.contains(id) && self.ends.get(&ev.get_id()).is_none_or(|ids| ids.contains(id)) && self.loan(*id).is_some_and(|l| names_lender(lender,l))))
                 });
                 if let Some(store) = stores.next().filter(|_| stores.next().is_none()) {
@@ -832,7 +832,7 @@ impl Order<'_, '_> {
             .facts
             .iter()
             .filter_map(|f| match &f.fact {
-                Fact::Repoint { holder, old, new } if holder == field.name() => Some((f, old, new)),
+                Fact::Repoint { holder, old, new, .. } if holder == field.name() => Some((f, old, new)),
                 _ => None,
             })
             .filter(|(f, _, _)| {
@@ -844,7 +844,16 @@ impl Order<'_, '_> {
             })
             .filter_map(|(f, old, new)| {
                 if let Some(ids) = self.ends.get(&ev.get_id()).filter(|_| end(ev)) {
-                    return ids.iter().all(|id| new.contains(id)).then_some((f, new.as_slice()));
+                    if ids.is_empty() { return None; }
+                    if ids.iter().all(|id| new.contains(id)) { return Some((f, new.as_slice())); }
+                    // The first store can replace a reference made on an
+                    // earlier row (including a call with several inputs).
+                    // Later stores' incoming values already have a generation
+                    // here, at the store which produced them.
+                    let Fact::Repoint { reaching: Some(incoming), .. } = &f.fact else { return None };
+                    let issued_here = row.facts.iter().any(|other| matches!(&other.fact,
+                        Fact::Repoint { holder, new, .. } if holder == field.name() && ids.iter().any(|id| new.contains(id))));
+                    return (!issued_here && ids.iter().all(|id| incoming.contains(id))).then_some((f, incoming.as_slice()));
                 }
                 let hir = rustc_utils::BodyExt::location_to_hir_id(self.body, self.location(f));
                 let rustc_hir::Node::Expr(expr) = self.tcx.hir_node(hir) else {
@@ -865,8 +874,8 @@ impl Order<'_, '_> {
 
     fn distinguish_field_writes(&self, ev: &E, row: &Row, layout: &mut RowLayout) {
         if let Some((store, ids)) = self.field_generation(ev, row) {
-            let Fact::Repoint { holder, old, .. } = &store.fact else { unreachable!() };
-            let slot = FieldGeneration { block: store.order.0, statement: store.order.1, replaced: old == ids };
+            let Fact::Repoint { holder, new, .. } = &store.fact else { unreachable!() };
+            let slot = FieldGeneration { block: store.order.0, statement: store.order.1, replaced: new != ids };
             layout.field_generations.insert(ev.get_id(), slot);
             let effect = if end(ev) { self.point(ev, row, false) } else { Some(fact_point(store)) };
             // Release arrows go below the first store only when the loan
@@ -902,7 +911,7 @@ impl Order<'_, '_> {
             .collect();
         if ended.len() > 1
             && self.facts.rows.iter().flat_map(|r| &r.facts).any(|e| {
-                matches!(&e.fact,Fact::Repoint {holder,old,new} if holder == field.name()
+                matches!(&e.fact,Fact::Repoint {holder,old,new,..} if holder == field.name()
                 && old.iter().any(|id| ended.contains(id) && !new.contains(id))
                 && new.iter().any(|id| ended.contains(id) && !old.contains(id)))
             })
@@ -1256,7 +1265,7 @@ fn related(a: &E, b: &E) -> bool {
 pub(crate) struct FieldGeneration {
     block: usize,
     statement: usize,
-    replaced: bool,
+    pub(crate) replaced: bool,
 }
 
 /// Coincident effects on one column can include a dot without an arrow.
@@ -1266,6 +1275,8 @@ pub struct RowLayout {
     pub(crate) ended_at_fork: BTreeSet<(usize, u64)>,
     pub(crate) after_destructor: BTreeMap<usize, String>,
     pub(crate) copied_ends: BTreeSet<usize>,
+    /// Write event to the proven reference slot and its referent (`**s += 1`).
+    pub(crate) retained_references: BTreeMap<usize, (String, String)>,
     pub(crate) reassigned_receivers: BTreeSet<usize>,
     arm_points: BTreeMap<usize, Point>,
     pub(crate) closure_captures: BTreeMap<usize, Vec<usize>>,
@@ -1284,6 +1295,7 @@ impl RowLayout {
         self.ended_at_fork.append(&mut other.ended_at_fork);
         self.after_destructor.append(&mut other.after_destructor);
         self.copied_ends.append(&mut other.copied_ends);
+        self.retained_references.append(&mut other.retained_references);
         self.reassigned_receivers.append(&mut other.reassigned_receivers);
         self.closure_captures.append(&mut other.closure_captures);
         self.field_generations.append(&mut other.field_generations);

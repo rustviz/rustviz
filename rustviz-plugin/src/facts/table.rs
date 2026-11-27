@@ -170,6 +170,12 @@ struct BodyTable {
 /// asks.
 #[derive(Debug, Default)]
 pub struct StateTable {
+    /// Borrow-end event IDs are unique across the drawing. Loan indices
+    /// are local to the event's body.
+    pub end_loans: BTreeMap<usize, Vec<usize>>,
+    /// For consecutive stores on one source row, event ID to group and
+    /// execution rank. Alternative lenders of one store share its rank.
+    pub store_order: BTreeMap<usize, (usize, usize)>,
     /// fn bodies by first source line (several fns may start on one line);
     /// closure bodies are not drawn as columns of their own and are left
     /// out.
@@ -182,7 +188,7 @@ impl StateTable {
         for b in facts.bodies.iter().filter(|b| b.kind == "fn") {
             bodies.entry(b.first_line).or_default().push(body_table(b));
         }
-        StateTable { bodies }
+        StateTable { bodies, ..Default::default() }
     }
 
     /// The body starting on `fn_line` that has `column`.
@@ -470,6 +476,11 @@ impl StateTable {
             for (j, s) in spans.iter().enumerate() {
                 let Some(s) = s else { continue };
                 let mut m: Vec<usize> = idx.iter().copied().filter(|&i| inside(s, &r.arms[i].0)).collect();
+                // The empty successor can coincide with a non-empty arm's
+                // closing brace. It belongs to the implicit else.
+                if spans.iter().any(Option::is_none) && m.iter().any(|&i| r.arms[i].0.col_lo < r.arms[i].0.col_hi) {
+                    m.retain(|&i| r.arms[i].0.col_lo < r.arms[i].0.col_hi);
+                }
                 // (Best fit first: all the arm's code in the span, else where
                 // it ends, else where it starts.)
                 if m.len() > 1 && m.iter().any(|&i| whole(s, &r.arms[i].0)) {
@@ -859,6 +870,7 @@ mod tests {
         BodyFacts {
             evaluated_spans: Vec::new(),
             constructed_vecs: Default::default(),
+            def_id: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(),
             func: func.into(),
             kind: "fn",
             parent: None,
@@ -867,6 +879,8 @@ mod tests {
             vars: Vec::new(),
             columns: cols.iter().map(|c| col(c)).collect(),
             uniform_option_refs: Default::default(),
+            binding_loans: BTreeMap::new(),
+            inline_holder_ends: Vec::new(),
             loans: vec![LoanInfo {
                 loan: 0,
                 line: 3,
@@ -875,6 +889,7 @@ mod tests {
                 columns: vec!["s".into()],
                 whole: BTreeSet::from(["s".into()]),
                 direct_holder: Some("r".into()),
+                holds_ref_slot: false,
                 part_of: Vec::new(),
                 runs: true,
                 kind: "shared",

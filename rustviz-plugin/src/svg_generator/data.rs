@@ -730,8 +730,7 @@ fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &Plac
 /// "v's resource is no longer mutably borrowed", as one event), and x
 /// in `*x += 1` as x's last use.
 /// A borrow end with no arrow (`RefDie`) of a reference declared in
-/// an arm, which the renderer moved into that arm (`nest_arm_ref_ends`,
-/// #1277): on the reference's column, as at the top level.
+/// an arm belongs on the reference's column there, as at the top level (#1277).
 /// `append_branch_event` leaves RefDies out (`ResourceAccessPoint_extract`
 /// names neither side of one).
 /// Its kind comes from the borrow recorded for it in this arm so far,
@@ -4384,6 +4383,8 @@ impl Event {
                         // The old value has nothing to drop (that's what
                         // makes it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),
+                        PlaceWrite::Update | PlaceWrite::UpdateValue if matches!(is, ResourceTy::DerefField(_, place, ..) if place.starts_with("**")) =>
+                            format!("the value at {} is modified", hover_messages::styled_name_html(&self.deref_name(my_name))),
                         PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_through_deref(r.name(), &self.deref_name(my_name), r.points_to_copy()),
                     }
                 } else if let Some(call) = rc_call_of(from) {
@@ -6130,8 +6131,7 @@ impl Visualizable for VisualizationData {
                 }
                 // rap has no column in this conditional, but the end of
                 // a borrow of it may have moved into one of its arms,
-                // the one declaring the reference (`nest_arm_ref_ends`,
-                // #1277): `if let Some(_x) = v.first() { .. }` nested in
+                // the one declaring the reference (#1277): `if let Some(_x) = v.first() { .. }` nested in
                 // an arm where v is live. It is rap's "no longer
                 // borrowed" on its column here, as for a conditional at
                 // the top level (`append_processed_external_event`);
@@ -6406,8 +6406,7 @@ impl Visualizable for VisualizationData {
                     self.append_decl_branch_events(&branch.e_data);
                 }
 
-                // A borrow end the renderer moved into the arm declaring
-                // its reference (`nest_arm_ref_ends`, #1277) whose lender
+                // A borrow end in the arm declaring its reference (#1277) whose lender
                 // has no column in the conditional: the lender gets its
                 // "no longer borrowed" on its own column, at the end's row.
                 let mut decls: Vec<ResourceAccessPoint> = Vec::new();

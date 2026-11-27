@@ -59,6 +59,56 @@ fn after_call<'tcx>(body: &Body<'tcx>, loc: Location, predicate: impl Fn(&Operan
     false
 }
 
+impl BodyFacts {
+    /// For a store through two references, follow the reaching MIR values
+    /// back to the two address-of operations. A join, call, or intervening
+    /// indirect store can change the referent; leave its name out then.
+    pub(crate) fn reference_slot_write(&self, body: &Body<'_>, at: Location) -> Option<(String, String)> {
+        let mut block = at.block;
+        let mut index = at.statement_index;
+        let StatementKind::Assign(write) = &body.basic_blocks[block].statements.get(index)?.kind else { return None };
+        if write.0.projection.as_slice() != [ProjectionElem::Deref, ProjectionElem::Deref] { return None; }
+        let mut local = write.0.local;
+        let mut slot = None;
+        let mut seen = BTreeSet::new();
+        while seen.insert(block) {
+            for stmt in body.basic_blocks[block].statements[..index].iter().rev() {
+                match &stmt.kind {
+                    StatementKind::Assign(assign) => {
+                        let (dst, rhs) = &**assign;
+                        if dst.is_indirect() { return None; }
+                        if dst.local != local { continue; }
+                        if !dst.projection.is_empty() { return None; }
+                        local = match rhs {
+                            Rvalue::Use(Operand::Move(p) | Operand::Copy(p)) => p.as_local()?,
+                            Rvalue::Ref(_, _, p) => {
+                                let borrowed = p.as_local()?;
+                                let name = &self.vars.iter().find(|v| v.local == borrowed.index() && v.capture.is_none())?.name;
+                                if let Some(slot) = slot { return Some((slot, name.clone())); }
+                                slot = Some(name.clone());
+                                borrowed
+                            }
+                            _ => return None,
+                        };
+                    }
+                    StatementKind::StorageLive(_) | StatementKind::StorageDead(_) |
+                    StatementKind::PlaceMention(_) | StatementKind::FakeRead(_) |
+                    StatementKind::AscribeUserType(..) | StatementKind::Nop => {}
+                    _ => return None,
+                }
+            }
+            let &[pred] = body.basic_blocks.predecessors()[block].as_slice() else { return None };
+            let data = &body.basic_blocks[pred];
+            if !matches!(data.terminator().kind, TerminatorKind::Goto { target } | TerminatorKind::Assert { target, .. } if target == block) {
+                return None;
+            }
+            block = pred;
+            index = data.statements.len();
+        }
+        None
+    }
+}
+
 /// A staged operand is destroyed on the early-return edge of `?` when
 /// the residual conversion dominates the drop of that exact MIR temporary.
 pub(crate) fn dropped_on_residual<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, facts: &BodyFacts, assignment: Location) -> bool {
@@ -1299,7 +1349,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }
 
     // ---- loans ------------------------------------------------------------------
+    let mut inline_holder_ends = Vec::new();
     let mut loans: Vec<LoanInfo> = Vec::new();
+    let mut binding_loans = BTreeMap::new();
     let mut evs: BTreeMap<usize, Vec<Ev>> = BTreeMap::new();
     let push = |evs: &mut BTreeMap<usize, Vec<Ev>>, (row, ev): (usize, Ev)| evs.entry(row).or_default().push(ev);
     // Where each two-phase loan is activated.
@@ -1424,6 +1476,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             columns: cols,
             whole,
             direct_holder: cx.name(bd.assigned_place()),
+            holds_ref_slot: bp.ty(body, tcx).ty.is_ref() && columns.iter().any(|(_, place, name)| {
+                name == &direct && matches!(place.ty(body, tcx).ty.kind(), TyKind::Ref(_, target, _) if target.is_ref())
+            }),
             runs: runs.contains(&loc.block),
             part_of,
             kind,
@@ -1490,6 +1545,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             columns: Vec::new(),
             whole: BTreeSet::new(),
             direct_holder: None,
+            holds_ref_slot: false,
             runs: u.at.is_none_or(|loc| runs.contains(&loc.block)),
             part_of: Vec::new(),
             kind: u.kind,
@@ -1685,6 +1741,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 ev.0 = r;
                 ev.1.col = cx.rows.col.get(&at).copied().unwrap_or(0);
                 ev.1.arm = cx.rows.arm_of(at);
+                ev.1.location = at;
                 ev.1.site = Some(cx.rows.order(at));
                 if !li.end_lines.contains(&r) {
                     li.end_lines.push(r);
@@ -2109,7 +2166,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         let mut f = cx.ev(loc, Fact::HoldEnd { loan: l.loan, holder: h.clone(), to_line, to_col });
                         f.1.end_successor = Some(s);
                         f.1.order.2 = 1;
-                        if !ends_on_row(s, row, l.loan) {
+                        if ends_on_row(s, row, l.loan) {
+                            inline_holder_ends.push(f);
+                        } else {
                             push(&mut evs, f);
                         }
                     }
@@ -2535,7 +2594,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 let held = |p: Point| -> Vec<usize> {
                                     held_by(lhs.local, p).into_iter().filter(|l| published.contains(l)).collect()
                                 };
-                                let f = Fact::Repoint { holder: path.clone(), old: held(t.start_index(loc)), new: held(t.mid_index(loc)) };
+                                let f = Fact::Repoint { reaching: None, holder: path.clone(), old: held(t.start_index(loc)), new: held(t.mid_index(loc)) };
                                 push(&mut evs, cx.ev(loc, f));
                             }
                         }
@@ -2556,7 +2615,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 .collect();
                             old.sort();
                             old.dedup();
-                            push(&mut evs, cx.ev(loc, Fact::Repoint { holder: path.clone(), old, new: this.1.clone() }));
+                            push(&mut evs, cx.ev(loc, Fact::Repoint { reaching: None, holder: path.clone(), old, new: this.1.clone() }));
+                        }
+                        if !reassign && lhs.projection.is_empty() && body.local_decls[lhs.local].ty.is_ref() {
+                            if let Some(t) = table {
+                                let ids = held_by(lhs.local, t.mid_index(loc)).into_iter()
+                                    .filter(|l| published.contains(l)).collect();
+                                binding_loans.insert(loc, ids);
+                            }
                         }
                         push(&mut evs, cx.ev(loc, Fact::Init { path, from, reassign, maybe_had }));
                     } else if cx.is_user(*lhs) {
@@ -3576,11 +3642,67 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
     }
+    // NLL may have already released the old value at a later reassignment.
+    // Find the stores that actually reach the write, stopping on each path
+    // at its first definition. Record the loans at that definition, when
+    // the value was produced, rather than their liveness at the overwrite.
+    let has_repoints = out_rows.iter().flat_map(|r| &r.facts).any(|e| matches!(e.fact, Fact::Repoint { .. }));
+    if let Some(t) = table.filter(|_| has_repoints) {
+        let mut stores: BTreeMap<String, BTreeMap<Location, Vec<usize>>> = field_stores.iter()
+            .map(|(path, v)| (path.clone(), v.iter().cloned().collect())).collect();
+        let mut preds: BTreeMap<Location, Vec<Location>> = BTreeMap::new();
+        for &loc in cx.rows.row.keys().filter(|l| runs.contains(&l.block)) {
+            for next in cx.r.real_succs(loc) { preds.entry(next).or_default().push(loc); }
+            let data = &body.basic_blocks[loc.block];
+            let Some(st) = data.statements.get(loc.statement_index) else {
+                // Only the normal return edge writes the destination. The
+                // reaching-store graph excludes unwinding and cleanup.
+                if let TerminatorKind::Call { destination, target: Some(target), .. } = data.terminator().kind {
+                    if destination.projection.is_empty() && body.local_decls[destination.local].ty.is_ref() {
+                        if let Some(name) = cx.name(destination) {
+                            let returned = Location { block: target, statement_index: 0 };
+                            let ids = held_by_place(destination, t.start_index(returned)).into_iter()
+                                .filter(|l| published.contains(l)).collect();
+                            stores.entry(name).or_default().insert(loc, ids);
+                        }
+                    }
+                }
+                continue;
+            };
+            let StatementKind::Assign(asg) = &st.kind else { continue };
+            let (dst, rv) = &**asg;
+            if !dst.projection.is_empty() || !body.local_decls[dst.local].ty.is_ref() { continue; }
+            let Some(name) = cx.name(*dst) else { continue };
+            let issued = loans.iter().find(|l| taken_at(l.loan) == Some(loc));
+            let ids = match rv {
+                Rvalue::Ref(..) => issued.map(|l| vec![l.loan]).unwrap_or_default(),
+                Rvalue::Use(Operand::Copy(src) | Operand::Move(src)) =>
+                    held_by_place(*src, t.start_index(loc)).into_iter().filter(|l| published.contains(l)).collect(),
+                _ => held_by(dst.local, t.mid_index(loc)).into_iter().filter(|l| published.contains(l)).collect(),
+            };
+            stores.entry(name).or_default().insert(loc, ids);
+        }
+        for e in out_rows.iter_mut().flat_map(|r| &mut r.facts) {
+            let Fact::Repoint { holder, reaching, .. } = &mut e.fact else { continue };
+            let loc = e.location;
+            let Some(defs) = stores.get(holder) else { continue };
+            let mut work = preds.get(&loc).cloned().unwrap_or_default();
+            let mut seen = BTreeSet::new();
+            let mut ids = BTreeSet::new();
+            while let Some(at) = work.pop() {
+                if !seen.insert(at) { continue; }
+                if let Some(ls) = defs.get(&at) { ids.extend(ls); }
+                else if let Some(prev) = preds.get(&at) { work.extend(prev); }
+            }
+            *reaching = Some(ids.into_iter().copied().collect());
+        }
+    }
     BodyFacts {
         evaluated_spans,
         constructed_vecs,
         binding_sources,
         joins,
+        def_id,
         func,
         kind: if tcx.is_closure_like(def_id) { "closure" } else { "fn" },
         parent: tcx.is_closure_like(def_id).then(|| tcx.def_path_str(tcx.parent(def_id))),
@@ -3590,6 +3712,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         columns: column_info,
         uniform_option_refs,
         loans,
+        binding_loans,
+        inline_holder_ends,
         rows: out_rows,
         temps,
         notes,

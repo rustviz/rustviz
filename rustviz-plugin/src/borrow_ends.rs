@@ -124,7 +124,7 @@ impl<'a> BodyEnds<'a> {
     let mut renewed: BTreeSet<usize> = BTreeSet::new();
     for r in &self.facts.rows {
       for e in &r.facts {
-        if let Fact::Repoint { holder, old, new } = &e.fact {
+        if let Fact::Repoint { holder, old, new, .. } = &e.fact {
           if names_match(k, holder) {
             replaced.extend(old.iter().copied());
             renewed.extend(new.iter().copied());
