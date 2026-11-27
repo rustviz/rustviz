@@ -1169,7 +1169,13 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                         skip = Some("a reference's dashed line (borrow ended on a path)");
                         continue;
                     }
-                    Drawn::Unassigned
+                    // A dashed owner line can mean E0382 or E0381. Its
+                    // title explains why borrowck rejects a read (Q5).
+                    if s.tip.contains("may have been moved out") || s.tip.contains("considers a move on an unreachable path") {
+                        Drawn::Moved
+                    } else {
+                        Drawn::Unassigned
+                    }
                 } else if PARTLY_MOVED.iter().any(|m| s.tip.contains(m)) {
                     // A struct with a field moved out: its line goes on
                     // (the other fields can be used), and says so.
@@ -1853,7 +1859,7 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
             // can only be shown wrong: no E0381/E0382 means x has its
             // value on every path.
             (Drawn::Moved | Drawn::PartlyMoved, _) => {
-                let maybe = MAYBE_MOVED.iter().chain(["may have been moved", "may have no value"].iter()).any(|m| c.tip.contains(m));
+                let maybe = MAYBE_MOVED.iter().chain(["may have been moved", "may have no value", "considers a move on an unreachable path"].iter()).any(|m| c.tip.contains(m));
                 let partly = c.drawn == Drawn::PartlyMoved;
                 match (&e0382, &e0381) {
                     (Some(e), _) if maybe && partly_msg(&e.1, &c.var) == partly => Ok(()),
@@ -1871,7 +1877,7 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
             // "has no value yet" is E0381 isn't initialized, on every
             // path; "may have no value" is any E0381 / E0382.
             (Drawn::Unassigned, _) => {
-                let maybe = c.tip.contains("may have no value");
+                let maybe = c.tip.contains("may have no value") || c.tip.contains("unreachable path that skips the assignment");
                 match (&e0381, &e0382) {
                     // A fact that it may have no value: rustc must say so
                     // (possibly-uninitialized), not that it was moved.

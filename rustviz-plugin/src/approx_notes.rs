@@ -345,7 +345,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // An irrefutable while-let has no pattern-failure path on which
       // to skip the body. Its scrutinee can still exit during evaluation.
       let always_matches = block.expr.is_some_and(|e| matches!(e.kind, ExprKind::If(cond, ..)
-        if matches!(cond.kind, ExprKind::Let(l) if crate::visitor::pat_is_irrefutable(l.pat, self.tcx.typeck(l.pat.hir_id.owner)))));
+        if matches!(cond.kind, ExprKind::Let(binding) if crate::visitor::pat_is_irrefutable(binding.pat, self.tcx.typeck(binding.pat.hir_id.owner))
+          || self.facts.is_some_and(|facts| crate::facts::loop_enters_pattern(self.tcx, &self.bwf.body, facts, l.span, binding.pat.span)))));
       if at_most_once && (matches!(source, LoopSource::Loop) || always_matches) {
         continue;
       }

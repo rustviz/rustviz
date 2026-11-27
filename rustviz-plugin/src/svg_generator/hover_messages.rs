@@ -1199,8 +1199,14 @@ pub fn try_drop_then_reassign(drop_text: &str, reassign: &str) -> Option<String>
 // dropped as the function returns. The dot sits on p's column.
 // `value`: p holds a value with nothing to drop. `note`: see
 // event_dot_owner_drop_if_try_returns.
-pub fn event_dot_owner_drop_unless_returned(my_name: &String, value: bool, note: &str) -> String {
+pub fn event_dot_owner_drop_unless_returned(my_name: &String, value: bool, note: &str, is_break: bool) -> String {
     let my_name_fmt = styled_name_html(my_name);
+    if is_break {
+        let (holds, rest) = split_drop_note(note);
+        let other = if value { format!("{my_name_fmt} goes out of scope with nothing to drop") }
+            else { format!("{my_name_fmt}'s resource{holds} is dropped here{rest}") };
+        return format!("If the break selects {my_name_fmt}, its value moves out with the break. If it selects another value, {other}.");
+    }
     if value {
         return format!(
             "The `return` here hands the caller one of the values its `if` / `match` chooses between. \
@@ -3382,6 +3388,12 @@ pub fn state_arm_join(label: &str) -> String {
 // rejects using the struct as a whole after it.
 
 
+pub fn event_dot_assignment_join(name: &str, drops: bool) -> String {
+    let me = styled_name_html(name);
+    let scope_end = if drops { format!(" If {me} still holds the assigned value at scope end, it is dropped there.") } else { String::new() };
+    format!("{me} may have no value when this block ends. The borrow checker considers the break as well as fallthrough. It can't prove that {me} holds an assigned value on both, so {me} can't be used here.{scope_end}")
+}
+
 pub fn state_maybe(name: &str, cause: Option<&str>) -> String {
     let me = styled_name_html(name);
     match cause {
@@ -4586,16 +4598,24 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &str, mutable: bool) -
     format!("{0}'s contents may have been moved out above, so {0} can't be used from here on{1}.", name, until)
 }
 
+// The first later write may be mandatory, optional, or absent.
+fn drop_time(name: &str, reassigned: Option<bool>) -> String {
+    match reassigned {
+        Some(true) => format!("when {name} is assigned again"),
+        Some(false) => format!("when {name} is assigned again (or, if {name} is never assigned again, when {name} goes out of scope)"),
+        None => format!("when {name} goes out of scope"),
+    }
+}
+
 // `event_dot_branch_merge_moved_with_drop` when the variable is assigned
 // again before it goes out of scope: the old value, if it's still there,
 // is dropped at that assignment instead (#335). `in_loop`: that
 // assignment is in a loop's body, which may end before it runs (#1012).
-pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: Option<&str>, in_loop: bool) -> String {
+pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: Option<&str>, may_skip_assignment: bool) -> String {
     let name = styled_name_html(my_name);
     format!(
-        "{} until it's assigned again. {}, its resource is dropped when {} is assigned again{}.",
-        branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond.is_some()), name,
-        if in_loop { " (or, if it isn't, when it goes out of scope)" } else { "" }
+        "{} until it's assigned again. {}, its resource is dropped {}.",
+        branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond.is_some()), drop_time(&name, Some(!may_skip_assignment))
     )
 }
 
@@ -4617,13 +4637,8 @@ pub fn event_dot_branch_merge_maybe_held(my_name: &String, value: bool, mutable:
     );
     if !value {
         out.push_str(&format!(
-            " If it has one, its resource is dropped when {0} {1}.",
-            my_name_fmt,
-            match reassigned {
-                Some(true) => "is assigned again",
-                Some(false) => "is assigned again (or, if it isn't, when it goes out of scope)",
-                None => "goes out of scope",
-            },
+            " If it has one, its resource is dropped {}.",
+            drop_time(&my_name_fmt, reassigned),
         ));
     }
     out
@@ -4708,9 +4723,9 @@ pub fn event_dot_branch_merge_maybe_init_then_reassigned(my_name: &String, maybe
     format!(
         "{0} was assigned a value in only some of the branches above, so it can't be used after \
          the branches until it's assigned again. If the branch that ran {2}, its resource \
-         is dropped when {0} is assigned again{1}.",
+         is dropped {1}.",
         styled_name_html(my_name),
-        if maybe { " (or, if it isn't, when it goes out of scope)" } else { "" },
+        drop_time(&styled_name_html(my_name), Some(!maybe)),
         assigned_in_branch_that_ran(moved)
     )
 }
@@ -4800,13 +4815,8 @@ pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, r
     );
     if !value {
         out.push_str(&format!(
-            " If the loop assigned it{2}, its resource is dropped when {0} {1}.",
-            my_name_fmt,
-            match reassigned {
-                Some(true) => "is assigned again",
-                Some(false) => "is assigned again (or, if it isn't, when it goes out of scope)",
-                None => "goes out of scope",
-            },
+            " If the loop assigned it{1}, its resource is dropped {0}.",
+            drop_time(&my_name_fmt, reassigned),
             or_not_moved_above(before_loop)
         ));
     }
@@ -4831,9 +4841,8 @@ pub fn event_dot_loop_maybe_init_nested(my_name: &String, value: bool, mutable: 
     );
     if !value {
         out.push_str(&format!(
-            " If it has one, its resource is dropped when {0} is assigned again (or, if it isn't, when \
-             it goes out of scope).",
-            my_name_fmt
+            " If it has one, its resource is dropped {}.",
+            drop_time(&my_name_fmt, Some(false))
         ));
     }
     out
@@ -5572,20 +5581,10 @@ pub fn event_dot_go_out_of_scope_chain_new_value(my_name: &String, note: &str) -
     )
 }
 
-// Its next assignment:
-pub fn event_dot_owner_drop_at_reassign_chain_new_value(my_name: &String, note: &str) -> String {
-    let (holds, rest) = split_drop_note(note);
-    format!(
-        "{0} acquires ownership of a new resource. Its previous resource{1} is dropped{2} here only if \
-         {0} still holds it (Rust tracks this with a runtime drop flag).",
-        styled_name_html(my_name), holds, rest
-    )
-}
-
 // The join of the conditional whose condition it was (`kw`: "if" or
 // "match"). `value`: what it holds has nothing to drop. `mutable`: it
 // can be assigned again. `reassigned`: it is, before its scope ends.
-pub fn event_dot_branch_merge_chain_new_value(my_name: &String, kw: &str, value: bool, mutable: bool, reassigned: bool, note: &str) -> String {
+pub fn event_dot_branch_merge_chain_new_value(my_name: &String, kw: &str, value: bool, mutable: bool, reassigned: Option<bool>, note: &str) -> String {
     let name = styled_name_html(my_name);
     let kw = styled_name_html(&kw.to_owned());
     let mut out = format!(
@@ -5594,8 +5593,8 @@ pub fn event_dot_branch_merge_chain_new_value(my_name: &String, kw: &str, value:
     if !value {
         let (holds, rest) = split_drop_note(note);
         out.push_str(&format!(
-            " If it has one, its resource{0} is dropped{1} when {2} {3}.",
-            holds, rest, name, if reassigned { "is assigned again" } else { "goes out of scope" }));
+            " If it has one, its resource{0} is dropped{1} {2}.",
+            holds, rest, drop_time(&name, reassigned)));
     }
     out
 }
@@ -5722,44 +5721,64 @@ fn or_list(sources: &[String]) -> String {
     }
 }
 
-// An or-pattern arm (`(x, _) | (_, x) =>`) binds `into` from a different
-// place in each alternative, and `my_name` is one of them (#533). Which
-// alternative matches is decided at run time, so this place's resource
-// is moved into `into` only on some runs; the rest of the time it stays
-// here, and the drop flag decides whether it's dropped at scope end.
-// `tuple`: `my_name` is a variable a tuple-literal scrutinee (`match (a,
-// b)`) moved into its temporary tuple (#327). Then it's that value in
-// the tuple which may move into `into`, and what it doesn't take stays
-// in the tuple, which the tuple's own drop dot says is dropped: no drop
-// flag on `my_name`, which owns nothing either way.
-// `part_of`: `Some((x, p))` when `my_name` is a field of the place `p`
-// that may move as a whole into the struct or tuple `x`, and `into` is
-// `x`'s matching field (#565). `value`: what's moved has nothing to
-// drop, so there's no drop flag either (#484).
-pub fn event_dot_or_alt_move(my_name: &String, into: &String, sources: &[String], tuple: Option<&str>, part_of: Option<&(String, String)>, value: bool) -> String {
+// The binding can take a field, its enclosing aggregate, or an element
+// of the tuple temporary. Only describe a sibling or a retained field
+// when a successful MIR alternative supplies that outcome.
+pub fn event_dot_or_alt_move(my_name: &str, into: &String, sources: &[String], tuple: Option<&str>, part_of: Option<&(String, String)>, value: bool, others: &crate::facts::OtherBindings) -> String {
     let me = styled_name_html(my_name);
+    let dest = styled_name_html(into);
     let (bound, bound_from) = match part_of {
         Some((x, p)) => (styled_name_html(x), styled_name_html(p)),
-        None => (styled_name_html(into), me.clone()),
+        None => (dest.clone(), me.clone()),
     };
-    if let Some(tuple) = tuple {
-        return format!(
-            "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
-             that binds {1} from {3}, {0}'s {4} is moved out of {5} into {6} here; otherwise it stays \
-             in the {7}",
-            me, bound, or_list(sources), bound_from, held(value), temporary_tuple(&tuple.to_owned()), styled_name_html(into), tuple_noun(tuple)
-        );
+    let temp = tuple.map(|t| temporary_tuple(&t.to_owned()));
+    if sources.len() == 1 {
+        if let Some(temp) = temp {
+            if part_of.is_some() {
+                return format!("{me} travels with {bound_from} when it moves out of {temp} into {bound}, becoming {dest}.");
+            }
+            return format!("{me}'s {} moves out of {temp} into {dest} when the pattern matches.", held(value));
+        }
+        return format!("{me} moves into {dest} when the pattern matches.");
     }
-    let otherwise = if value {
-        format!("otherwise {} still holds it", me)
-    } else {
-        format!("otherwise {} still owns it (Rust tracks this with a runtime drop flag)", me)
-    };
-    format!(
-        "{1} is bound from {2}, whichever alternative of the pattern matches. If it's the alternative \
-         that binds {1} from {3}, {0}'s {4} is moved into {5} here; {6}.",
-        me, bound, or_list(sources), bound_from, held(value), styled_name_html(into), otherwise
-    )
+    let binding = format!("{bound} is bound from {}, whichever alternative of the pattern matches.", or_list(sources));
+    if let (Some(t), Some(temp)) = (tuple, &temp) {
+        if !others.moves.is_empty() && others.moves.iter().all(|(from, _)| from == my_name) {
+            let takers: Vec<_> = others.moves.iter().map(|(_, into)| into.clone()).collect();
+            let left = if others.retained { format!(" or stay in the {} until it is dropped", tuple_noun(t)) } else { String::new() };
+            return format!("{binding} In {temp}, {me}'s {} can move into {dest} or {}{left}.", held(value), or_list(&takers));
+        }
+    }
+    let out_of = temp.as_ref().map_or(String::new(), |t| format!(" out of {t}"));
+    let mut title = format!("{binding} If it's the alternative that binds {bound} from {bound_from}, {me}'s {} is moved{out_of} into {dest} here", held(value));
+    if !others.moves.is_empty() {
+        let destinations: Vec<_> = others.moves.iter().map(|(from, to)| format!("{} into {}", styled_name_html(from), styled_name_html(to))).collect();
+        title.push_str(&format!("; a different alternative can move {}", destinations.join(" or ")));
+        if others.retained {
+            if let Some(t) = tuple {
+                title.push_str(&format!(" or leave it in the {} until it is dropped", tuple_noun(t)));
+            } else if value {
+                title.push_str(&format!(" or leave {me} holding its value"));
+            } else {
+                title.push_str(&format!(" or leave {me} in place. If it still holds that resource at scope end, it is dropped then (Rust tracks this with a runtime drop flag)"));
+            }
+        }
+    } else if others.unpictured_move {
+        title.push_str("; a sibling binding can also take a value from this place");
+        if others.retained {
+            title.push_str(" and another alternative leaves it in place");
+        }
+    } else if others.retained {
+        if let Some(t) = tuple {
+            return format!("{title}; otherwise it stays in the {}", tuple_noun(t));
+        } else if value {
+            title.push_str(&format!("; otherwise {me} still holds it"));
+        } else {
+            title.push_str(&format!("; otherwise {me} still owns it (Rust tracks this with a runtime drop flag)"));
+        }
+    }
+    title.push('.');
+    title
 }
 
 // An or-pattern arm (`(ref x, _) | (_, ref x) =>`) binds the reference
@@ -5783,6 +5802,15 @@ pub fn event_dot_or_alt_lend(my_name: &String, into: &String, sources: &[String]
     )
 }
 
+pub fn event_dot_single_pattern_lend(place: &str, binding: &str, source: &str, mutable: bool, end: bool) -> String {
+    let me = styled_name_html(place);
+    let x = styled_name_html(binding);
+    if end { return format!("{x}'s borrow ends here. The borrow checker releases its restriction on {me}."); }
+    let kind = if mutable { "mutably" } else { "immutably" };
+    let restriction = if mutable { "can't be used" } else { "is read-only" };
+    format!("{x} {kind} borrows {}. The borrow checker also checks the unreachable pattern path, so {me} {restriction} while the borrow is live.", styled_name_html(source))
+}
+
 // The end of the borrow `event_dot_or_alt_lend` started (#565).
 pub fn event_dot_or_alt_reacquire(my_name: &String, into: &String, mutable: bool, holds_value: bool) -> String {
     format!(
@@ -5795,6 +5823,7 @@ pub fn event_dot_or_alt_reacquire(my_name: &String, into: &String, mutable: bool
 // The reference's own dot where `event_dot_or_alt_lend`'s borrow starts
 // (#565).
 pub fn event_dot_or_alt_borrow(my_name: &String, sources: &[String], mutable: bool) -> String {
+    if let [one] = sources { return format!("{} {} borrows {}", styled_name_html(my_name), if mutable { "mutably" } else { "immutably" }, styled_name_html(one)); }
     format!(
         "{0} {1} borrows {2}, whichever alternative of the pattern matches",
         styled_name_html(my_name), if mutable { "mutably" } else { "immutably" }, or_list(sources)
@@ -6333,11 +6362,19 @@ pub fn arrow_fn_return_title(copy: bool, named_call: bool, styled_fn: &str) -> S
     }
 }
 
+pub fn field_carried_with(field: &str, into: &str, parent: &str, dest: &str) -> String {
+    format!("{} travels with {} when the whole value moves into {}, becoming {}",
+        styled_name_html(field), styled_name_html(parent), styled_name_html(dest), styled_name_html(into))
+}
+
 /// The full title of an arrow between two columns: `arrow_title`, then
 /// where it comes from and goes to, then the special cases (a returned
 /// call result, an `Rc` call, a borrow ending, a `break` alternative, a
 /// borrow a call result keeps).
 pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy) -> String {
+    if let ExternalEvent::Move { carried_with: Some((parent, dest)), .. } = external_event {
+        return field_carried_with(&from.name(), &to.name(), parent, dest);
+    }
     let mut title = arrow_title(external_event);
     // complete title
     let styled_from_string = styled_name_html(&from.name());

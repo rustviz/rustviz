@@ -2037,6 +2037,7 @@ pub enum ExternalEvent {
     // `via_try`: the move is made by the `?` operator (`let n = r?;`,
     // #652); see TryMove.
     Move {
+        carried_with: Option<(String, String)>,
         from: ResourceTy,
         to: ResourceTy,
         is_partial: bool,
@@ -2188,11 +2189,6 @@ pub enum ExternalEvent {
     // this scope end (#1020).
     GoOutOfScope {
         ro: ResourceAccessPoint,
-        // What rustc's move data says the variable holds at this `}`,
-        // on the paths that get there through the code before it
-        // (`ownership_at_scope_ends`, #1036, #1037); `None` when it
-        // doesn't say. Set once the body has been visited.
-        holds: Option<ScopeEndHolds>,
         id: usize,
         early: Option<EarlyReturns>,
     },
@@ -2333,6 +2329,7 @@ pub enum ExternalEvent {
     // here on the paths through the others (#697). A dot on its
     // column, which goes on.
     OwnerDropUnlessReturned {
+        is_break: bool,
         ro: ResourceAccessPoint,
         id: usize
     },
@@ -2370,6 +2367,7 @@ pub enum ExternalEvent {
     // `in_let` for a `let`'s, which is no branch: the place's drop is
     // then "only if nothing above moved it", not "no branch above".
     OrAltMove {
+        source: String, others: crate::facts::OtherBindings,
         ro: ResourceAccessPoint,
         into: String,
         from: Vec<String>,
@@ -2465,6 +2463,8 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         id: usize
     },
+    /// Incoming MIR edges differ over whether the place was assigned.
+    AssignmentJoin { ro: ResourceAccessPoint, always_assigned: bool, id: usize },
     // A `for` loop whose pattern leaves parts of each element unbound
     // (`for (f, _) in v`, `for _ in v`, #1434): at the end of each pass
     // those parts are dropped with the rest of the element. Stated on
@@ -2524,6 +2524,7 @@ pub enum ExternalEvent {
     // Branches are the most interesting event
     // they allow for events to be tree-like
     Branch {
+      join_span: Option<rustc_span::Span>,
       live_vars: HashSet<ResourceAccessPoint>, // variables who were defined outside of the branch but are live inside it
       branches: Vec<ExtBranchData>, 
       branch_type: BranchType,
@@ -2626,6 +2627,7 @@ impl ExternalEvent {
             &ExternalEvent::ChainFailUse { id, .. } |
             &ExternalEvent::TiedParamNote { id, .. } |
             &ExternalEvent::ReslicedInPlace { id, .. } |
+            &ExternalEvent::AssignmentJoin { id, .. } |
             &ExternalEvent::DeadElseNote { id, .. } |
             &ExternalEvent::PassRestDrop { id, .. } |
             &ExternalEvent::DeadLoanNote { id, .. } |
@@ -2778,6 +2780,7 @@ pub enum Event {
     //    ownership to a function as well.
     // `break_out`: see ExternalEvent::Move.
     Move {
+        carried_with: Option<(String, String)>,
         to: ResourceTy,
         is: ResourceTy,
         into_closure: bool,
@@ -2793,6 +2796,7 @@ pub enum Event {
 
     // Mirrors the ExternalEvent Branch
     Branch {
+      join_span: Option<rustc_span::Span>,
       is: ResourceTy,
       branch_history: Vec<BranchData>,
       ty: BranchType,
@@ -2881,7 +2885,7 @@ pub enum Event {
     // this happens when a owner is returned this line,
     // or if this owner's scope ends at this line. The data must be dropped.
     // `holds`, `early`: the ExternalEvent's.
-    OwnerGoOutOfScope { holds: Option<ScopeEndHolds>, early: Option<EarlyReturns>, id: usize },
+    OwnerGoOutOfScope { early: Option<EarlyReturns>, id: usize },
     // this happens when a vairable that is not an owner goes out of scope.
     // The data is not dropped in this case
     RefGoOutOfScope { early: Option<EarlyReturns>, id: usize },
@@ -2910,12 +2914,12 @@ pub enum Event {
     // early (#430). The owner's state is unchanged.
     OwnerDropIfTryReturns,
     // See ExternalEvent::OwnerDropUnlessReturned.
-    OwnerDropUnlessReturned,
+    OwnerDropUnlessReturned { is_break: bool },
     // See ExternalEvent::TupleTempDrop.
     TupleTempDrop { tuple: String, at: TupleDropAt, with: Vec<TupleLeft> },
     // See ExternalEvent::OrAltMove. `value`: the place holds a value
     // with nothing to drop, not a resource (#484).
-    OrAltMove { into: String, sources: Vec<String>, tuple: Option<String>, part_of: Option<(String, String)>, value: bool, in_let: bool },
+    OrAltMove { source: String, others: crate::facts::OtherBindings, into: String, sources: Vec<String>, tuple: Option<String>, part_of: Option<(String, String)>, value: bool, in_let: bool },
     // The place's side of an ExternalEvent::OrAltBorrow: it may be
     // borrowed by `into` (`end: false`), or that borrow ends (`end:
     // true`). Changes the place's state like a StaticLend / MutableLend
@@ -2936,6 +2940,7 @@ pub enum Event {
     TiedParamNote { lifetime: String },
     // See ExternalEvent::ReslicedInPlace.
     ReslicedInPlace { lender: String, mutable: bool, part: bool },
+    AssignmentJoin { always_assigned: bool, drops: bool },
     // See ExternalEvent::DeadElseNote.
     DeadElseNote,
     // See ExternalEvent::PassRestDrop.
@@ -3329,20 +3334,6 @@ pub enum InitBy {
     FirstPass,
 }
 
-/// What a variable holds where it goes out of scope at the `}` of its
-/// block, on the paths that get there through the code before it, as
-/// rustc's move data says (#1036, #1037).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ScopeEndHolds {
-    /// A value, on every such path: it's dropped there.
-    Value,
-    /// A value on some paths and not others: a runtime drop flag
-    /// decides whether anything is dropped.
-    Maybe,
-    /// Nothing, on any such path: nothing is dropped.
-    Nothing,
-}
-
 /// What a conditional's join leaves in a `let x;` local that only some
 /// of the branches reaching it assigned (#244; the Branch event's
 /// `maybe_init`), the others leaving it with no value.
@@ -3646,8 +3637,9 @@ impl Display for Event {
             Event::OwnerDropIfTryReturns => {
                 write!(f, "Resource is dropped if the `?` returns early")
             },
-            Event::OwnerDropUnlessReturned => {
-                write!(f, "Resource is dropped unless the `return` hands it to the caller")
+            Event::OwnerDropUnlessReturned { is_break } => {
+                if *is_break { write!(f, "Resource is dropped unless it becomes the break value") }
+                else { write!(f, "Resource is dropped unless the `return` hands it to the caller") }
             },
             Event::TupleTempDrop { tuple, .. } => {
                 write!(f, "Temporary tuple {} is dropped", tuple)
@@ -3675,6 +3667,7 @@ impl Display for Event {
             Event::ReslicedInPlace { .. } => {
                 write!(f, "Points to part of what it pointed to; its borrow goes on")
             },
+            Event::AssignmentJoin { .. } => write!(f, "Paths meet after an assignment"),
             Event::DeadElseNote => {
                 write!(f, "This else branch never runs")
             },
@@ -3851,8 +3844,8 @@ impl Event {
             Event::ChainFailAssign { place, drops_old, rc, path } => {
                 hover_messages::event_dot_chain_fail_assign(place.as_ref().unwrap_or(my_name), *drops_old, *rc, *path)
             }
-            Event::OrAltMove { into, sources, tuple, part_of, value, .. } => {
-                hover_messages::event_dot_or_alt_move(my_name, into, sources, tuple.as_deref(), part_of.as_ref(), *value)
+            Event::OrAltMove { into, sources, tuple, part_of, value, source, others, .. } => {
+                hover_messages::event_dot_or_alt_move(source, into, sources, tuple.as_deref(), part_of.as_ref(), *value, others)
             }
             Event::OrAltLend { into, is, sources, mutable, end, chain: Some(chain) } => {
                 let holds_value = lender_holds_value(is);
@@ -3864,7 +3857,9 @@ impl Event {
             }
             Event::OrAltLend { into, is, sources, mutable, end, chain: None } => {
                 let holds_value = lender_holds_value(is);
-                if *end {
+                if sources.len() == 1 {
+                    hover_messages::event_dot_single_pattern_lend(my_name, into.name(), &sources[0], *mutable, *end)
+                } else if *end {
                     hover_messages::event_dot_or_alt_reacquire(my_name, into.name(), *mutable, holds_value)
                 } else {
                     hover_messages::event_dot_or_alt_lend(my_name, into.name(), sources, *mutable, holds_value)
@@ -3900,6 +3895,8 @@ impl Event {
             Event::ChainFailUse { uses, definite, path, is_ref, pointee_value } => {
                 hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *path, *is_ref, *pointee_value)
             }
+            Event::AssignmentJoin { always_assigned: true, .. } => hover_messages::state_imaginary_unassigned(my_name),
+            Event::AssignmentJoin { always_assigned: false, drops } => hover_messages::event_dot_assignment_join(my_name, *drops),
             Event::DeadElseNote => {
                 hover_messages::event_dot_dead_else_note(my_name)
             }
@@ -3930,8 +3927,8 @@ impl Event {
             Event::OwnerDropIfTryReturns => {
                 hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
             }
-            Event::OwnerDropUnlessReturned => {
-                hover_messages::event_dot_owner_drop_unless_returned(my_name, false, "")
+            Event::OwnerDropUnlessReturned { is_break } => {
+                hover_messages::event_dot_owner_drop_unless_returned(my_name, false, "", *is_break)
             }
             Event::TemporaryDrop { ty: None, when, .. } => {
                 hover_messages::event_dot_extended_temporary_drop(my_name, when)
@@ -4133,6 +4130,8 @@ impl Event {
             Event::Move{ to: ResourceTy::Value(t), is, ..} if is.extract_rap().is_some_and(|r| r.hash() == t.hash()) => {
                 hover_messages::event_dot_move_out_for_new_value(&self.deref_name(my_name), is_plain(is))
             }
+            Event::Move { carried_with: Some((parent, dest)), to, .. } =>
+                hover_messages::field_carried_with(my_name, &to.name(), parent, dest),
             Event::Move{ to, is, ..} => {
                 let v = is_plain(is);
                 match to {
@@ -5389,7 +5388,7 @@ impl Visualizable for VisualizationData {
             // Dropped only on the path that returns; the code after the
             // `?` runs on the other one.
             (_, Event::OwnerDropIfTryReturns) => (*previous_state).clone(),
-            (_, Event::OwnerDropUnlessReturned) => (*previous_state).clone(),
+            (_, Event::OwnerDropUnlessReturned { .. }) => (*previous_state).clone(),
             // A dot on a column whose value already went into the tuple:
             // no change.
             (_, Event::TupleTempDrop { .. }) => (*previous_state).clone(),
@@ -5430,6 +5429,7 @@ impl Visualizable for VisualizationData {
             (_, Event::ChainFailUse { .. }) => (*previous_state).clone(),
             (_, Event::TiedParamNote { .. }) => (*previous_state).clone(),
             (_, Event::ReslicedInPlace { .. }) => (*previous_state).clone(),
+            (_, Event::AssignmentJoin { .. }) => State::FullPrivilege { s: LineState::Uninit },
             (_, Event::DeadElseNote) => (*previous_state).clone(),
             (_, Event::PassRestDrop { .. }) => (*previous_state).clone(),
             (_, Event::LentWithParent { .. }) => (*previous_state).clone(),
@@ -5882,12 +5882,12 @@ impl Visualizable for VisualizationData {
           if to_o { vec![(line_num,  Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: *id, break_alt: break_alt.clone()})] }
           else { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, of: source_copy_of(of), id: *id, break_alt: break_alt.clone()})] }
         },
-        ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, ..} => {
+        ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, carried_with, ..} => {
           if to_o { vec![(line_num,  Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), loop_head: loop_head.clone()})] }
           // A destructuring `for` head borrowed by the loop: a value
           // inside it is copied (#1390).
           else if matches!(loop_head, LoopHead::Part { moved: false, .. }) { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: false, of: CopyOf::Inside, id: *id, break_alt: break_alt.clone()})] }
-          else { vec![(line_num, Event::Move{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: loop_head.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out, empties_temp: self.temp_emptying_moves.contains(id)})] }
+          else { vec![(line_num, Event::Move{carried_with: carried_with.clone(), to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: loop_head.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out, empties_temp: self.temp_emptying_moves.contains(id)})] }
         },
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
           if to_o { vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
@@ -5954,10 +5954,10 @@ impl Visualizable for VisualizationData {
         ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
           vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone(), rest: rest.clone()})]
         },
-        ExternalEvent::GoOutOfScope{ro, holds, early, id} => {
+        ExternalEvent::GoOutOfScope{ro, early, id} => {
           match ro {
             ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-              vec![(line_num, Event::OwnerGoOutOfScope { holds: *holds, early: early.clone(), id: *id })]
+              vec![(line_num, Event::OwnerGoOutOfScope { early: early.clone(), id: *id })]
             },
             ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
               vec![(line_num, Event::RefGoOutOfScope { early: early.clone(), id: *id })]
@@ -5994,19 +5994,22 @@ impl Visualizable for VisualizationData {
         ExternalEvent::OwnerDropIfTryReturns{..} => {
           vec![(line_num, Event::OwnerDropIfTryReturns)]
         },
-        ExternalEvent::OwnerDropUnlessReturned{..} => {
-          vec![(line_num, Event::OwnerDropUnlessReturned)]
+        ExternalEvent::OwnerDropUnlessReturned{is_break, ..} => {
+          vec![(line_num, Event::OwnerDropUnlessReturned { is_break: *is_break })]
         },
         ExternalEvent::TupleTempDrop{ tuple, at, with, .. } => {
           vec![(line_num, Event::TupleTempDrop { tuple: tuple.clone(), at: *at, with: with.clone() })]
           },
-        ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, in_let, ..} => {
-          vec![(line_num, Event::OrAltMove { into: into.clone(), sources: from.clone(), tuple: tuple.clone(), part_of: part_of.clone(), value: ro.holds_value(), in_let: *in_let })]
+        ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, in_let, source, others, ..} => {
+          vec![(line_num, Event::OrAltMove { source: source.clone(), others: others.clone(), into: into.clone(), sources: from.clone(), tuple: tuple.clone(), part_of: part_of.clone(), value: ro.holds_value(), in_let: *in_let })]
         },
         ExternalEvent::ChainFailAssign{ro, place, drops_old, path, ..} => {
           let rc = if place.is_some() { None } else { ro.rc_drop() };
           vec![(line_num, Event::ChainFailAssign { place: place.clone(), drops_old: *drops_old, rc, path: *path })]
         },
+        ExternalEvent::AssignmentJoin { ro, always_assigned, .. } => {
+          vec![(line_num, Event::AssignmentJoin { always_assigned: *always_assigned, drops: !ro.drops_nothing() })]
+        }
         ExternalEvent::DeadElseNote{ .. } => {
           vec![(line_num, Event::DeadElseNote)]
         },
@@ -6038,7 +6041,7 @@ impl Visualizable for VisualizationData {
     fn append_branch_event(&self, event: &ExternalEvent, line_number: usize, is: &ResourceTy, b_history: &mut Vec<(usize, Event)>) {
         let rap = is.extract_rap().unwrap();
         match event {
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
+            ExternalEvent::Branch { join_span, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
                 if live_vars.contains(rap) {
                     let mut new_branches: Vec<BranchData> = Vec::new();
                     for b in branches.iter() {
@@ -6065,7 +6068,7 @@ impl Visualizable for VisualizationData {
                     }
 
                     b_history.push((line_number,  
-                        Event::Branch { is: is.clone(), 
+                        Event::Branch { join_span: *join_span, is: is.clone(),
                                         branch_history: new_branches, 
                                         ty: branch_type.clone(), 
                                         split_point: *split_point, 
@@ -6114,7 +6117,7 @@ impl Visualizable for VisualizationData {
             | ExternalEvent::LoopMaybeInit { ro, .. } | ExternalEvent::LoopExitKept { ro, .. }
             | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
             | ExternalEvent::ReslicedInPlace { ro, .. }
-            | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. }
+            | ExternalEvent::AssignmentJoin { ro, .. } | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. }
             | ExternalEvent::PassRestDrop { ro, .. } => {
                 if ro == rap {
                     b_history.extend(self.event_of_external_event(line_number, event, true));
@@ -6254,7 +6257,7 @@ impl Visualizable for VisualizationData {
 
         match event {
             // eg let ro_to = String::from("");
-            ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, ..} => {
+            ExternalEvent::Move{from: from_ro, to: to_ro, id, into_closure, loop_head, break_alt, break_out, via_try, carried_with, ..} => {
                 maybe_append_event(self, &to_ro.clone(), Event::Acquire{from : from_ro.to_owned(), is: to_ro.clone(), via_try, id: id, break_alt: break_alt.clone(), loop_head: loop_head.clone()}, line_number);
                 let out_first = self.moves_out_first.contains(&id);
                 let source = from_ro.extract_rap().map(|r| *r.hash());
@@ -6263,7 +6266,7 @@ impl Visualizable for VisualizationData {
                 if matches!(loop_head, LoopHead::Part { moved: false, .. }) {
                     maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, of: CopyOf::Inside, id: id, break_alt}, line_number);
                 } else {
-                    maybe_append_event(self, &from_ro.clone(), Event::Move{to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out, empties_temp: self.temp_emptying_moves.contains(&id)}, line_number);
+                    maybe_append_event(self, &from_ro.clone(), Event::Move{carried_with, to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out, empties_temp: self.temp_emptying_moves.contains(&id)}, line_number);
                 }
                 // A destructuring assignment's cycle (#1343): the source's
                 // move goes before the new value it got on this line.
@@ -6291,7 +6294,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);
             },
-            ExternalEvent::Branch { live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
+            ExternalEvent::Branch { join_span, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, id } => {
                 // need to add events with more granularity for Branches
                 for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
@@ -6325,7 +6328,7 @@ impl Visualizable for VisualizationData {
                         }, e_data: b_history, width: 0, states: Vec::new(), diverges: branch.diverges, entry_state: None, exits: branch.exits.clone() });
                     }
                     maybe_append_event(self, &is.clone(), Event::Branch { 
-                                        is: is, 
+                                        join_span, is,
                                         branch_history: branch_history, 
                                         ty: branch_type.clone(), 
                                         split_point: split_point, 
@@ -6471,10 +6474,10 @@ impl Visualizable for VisualizationData {
             ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
                 maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern, rest}, line_number);
             },
-            ExternalEvent::GoOutOfScope{ro, holds, early, id} => {
+            ExternalEvent::GoOutOfScope{ro, early, id} => {
                 match ro {
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-                        maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerGoOutOfScope { holds, early, id }, line_number);
+                        maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerGoOutOfScope { early, id }, line_number);
                     },
                     ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
                         maybe_append_event(self, &ResourceTy::Value(ro), Event::RefGoOutOfScope { early, id }, line_number);
@@ -6512,15 +6515,15 @@ impl Visualizable for VisualizationData {
             ExternalEvent::OwnerDropIfTryReturns{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropIfTryReturns, line_number);
             },
-            ExternalEvent::OwnerDropUnlessReturned{ro, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropUnlessReturned, line_number);
+            ExternalEvent::OwnerDropUnlessReturned{ro, is_break, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropUnlessReturned { is_break }, line_number);
             },
             ExternalEvent::TupleTempDrop{ro, tuple, at, with, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::TupleTempDrop { tuple, at, with }, line_number);
             },
-            ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, in_let, ..} => {
+            ExternalEvent::OrAltMove{ro, into, from, tuple, part_of, in_let, source, others, ..} => {
                 let value = ro.holds_value();
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OrAltMove { into, sources: from, tuple, part_of, value, in_let }, line_number);
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OrAltMove { source, others, into, sources: from, tuple, part_of, value, in_let }, line_number);
             },
             ExternalEvent::OrAltBorrow{ref ro, ref into, ..} => {
                 let (lend, borrow) = event.or_alt_borrow_events();
@@ -6539,6 +6542,10 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ReslicedInPlace{ro, lender, mutable, part, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ReslicedInPlace { lender, mutable, part }, line_number);
             },
+            ExternalEvent::AssignmentJoin { ro, always_assigned, .. } => {
+                let drops = !ro.drops_nothing();
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::AssignmentJoin { always_assigned, drops }, line_number);
+            }
             ExternalEvent::DeadElseNote{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadElseNote, line_number);
             },

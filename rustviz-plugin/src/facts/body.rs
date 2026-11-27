@@ -93,6 +93,29 @@ fn closure_has_no_return<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> bool 
     true
 }
 
+/// On entry to this while-let, real MIR edges lead straight to a pattern
+/// binding before any test can skip the body. Unknown for branched entries.
+pub(crate) fn loop_enters_pattern<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, facts: &BodyFacts, head: Span, pattern: Span) -> bool {
+    let mut loc = match body.basic_blocks.iter_enumerated().find(|(_, data)| {
+        let t = data.terminator();
+        t.source_info.span == head && matches!(t.kind, TerminatorKind::FalseUnwind { .. })
+    }) {
+        Some((bb, _)) => body.terminator_loc(bb),
+        None => return false,
+    };
+    let bindings: BTreeSet<_> = facts.binding_sources.iter().filter(|s| s.runs && pattern.contains(s.site))
+        .map(|s| s.location).collect();
+    let rows = Rows { tcx, body };
+    let mut seen = BTreeSet::new();
+    while seen.insert(loc) {
+        if bindings.contains(&loc) { return true; }
+        let succs = rows.real_succs(loc);
+        let [next] = succs.as_slice() else { break };
+        loc = *next;
+    }
+    false
+}
+
 impl<'a, 'tcx> Cx<'a, 'tcx> {
     fn name(&self, p: Place<'tcx>) -> Option<String> {
         self.names.name(self.tcx, self.body, p)
@@ -425,7 +448,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         if matches!(fact, Fact::BorrowEnd { .. }) {
             order.2 = 1;
         }
-        let ev = Ev { location: l, col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None, successor: None };
+        let ev = Ev { location: l, drop_route: DropRoute::Normal, col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None, successor: None };
         (row, ev)
     }
 }
@@ -2321,13 +2344,98 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         "nothing_to_drop"
     };
     // ---- moves, copies, inits, re-points, drops, scope ends ---------------------
+    // A shared destructor's source span is still the closing brace. In
+    // particular two arms of a break value can reach the same destructor
+    // without the loop's continuing edge ever reaching it (#1794).
+    let drop_route = |loc: Location, exits: &[(usize, Location)]| {
+        if exits.is_empty() { return DropRoute::Normal; }
+        let mut seen: BTreeSet<_> = exits.iter().map(|(_, at)| *at).collect();
+        let mut work = vec![loc];
+        while let Some(at) = work.pop() {
+            if !seen.insert(at) { continue; }
+            if at == Location::START { return DropRoute::Shared; }
+            if at.statement_index > 0 {
+                work.push(Location { statement_index: at.statement_index - 1, ..at });
+            } else {
+                work.extend(rt_body.basic_blocks.predecessors()[at.block].iter()
+                    .filter(|p| runs.contains(p) && !body.basic_blocks[**p].is_cleanup)
+                    .map(|p| body.terminator_loc(*p)));
+            }
+        }
+        DropRoute::ExitOnly
+    };
+    let mut binding_sources = Vec::new();
+    // Resolve fields of a temporary tuple through the operands that built
+    // it. Follow only single definitions, including MIR's staging locals.
+    let mut definitions = BTreeMap::new();
+    for data in body.basic_blocks.iter() {
+        for st in &data.statements {
+            if let StatementKind::Assign(asg) = &st.kind {
+                if !cx.names.locals.contains_key(&asg.0.local) {
+                    definitions.entry(asg.0.local).and_modify(|def| *def = None)
+                        .or_insert(asg.0.projection.is_empty().then_some(&asg.1));
+                }
+            }
+        }
+        if let TerminatorKind::Call { destination, .. } = data.terminator().kind {
+            definitions.insert(destination.local, None);
+        }
+    }
+    let source_place = |mut p: Place<'tcx>| {
+        let mut seen = BTreeSet::new();
+        while !cx.is_user(p) && seen.insert(p.local) {
+            let (op, suffix) = match definitions.get(&p.local).copied().flatten()? {
+                Rvalue::Use(op) => (op, &p.projection[..]),
+                Rvalue::Aggregate(kind, ops) if matches!(**kind, AggregateKind::Tuple) => {
+                    let (ProjectionElem::Field(f, _), rest) = p.projection.split_first()? else { return None };
+                    (ops.get(*f)?, rest)
+                }
+                _ => return None,
+            };
+            p = op.place()?.project_deeper(suffix, tcx);
+        }
+        cx.is_user(p).then_some(p)
+    };
     let mut temps: BTreeMap<Local, TempInfo> = BTreeMap::new();
     for (&loc, _) in &cx.rows.row {
-        if !runs.contains(&loc.block) {
-            continue;
-        }
         let data = &body.basic_blocks[loc.block];
-        if let Some(st) = data.statements.get(loc.statement_index) {
+        let statement = data.statements.get(loc.statement_index);
+        if let Some((st, asg)) = statement.and_then(|st| match &st.kind {
+            StatementKind::Assign(asg) => Some((st, asg)), _ => None,
+        }) {
+            let (lhs, rv) = &**asg;
+            if let Some(into) = cx.names.locals.get(&lhs.local).filter(|_| lhs.projection.is_empty()) {
+                let source = match rv {
+                    Rvalue::Use(op) => op.place().and_then(source_place),
+                    Rvalue::Ref(_, _, p) => source_place(*p),
+                    _ => None,
+                };
+                let from = source.filter(|p| column_projection(body, *p, 0)).and_then(|p| cx.name(p));
+                let mut parents = Vec::new();
+                let mut covers = Vec::new();
+                // An enum payload may have no column of its own. Its move
+                // still takes part of the enum and leaves unrelated places alone.
+                if let Some(p) = source.filter(|p| from.is_some() || p.projection.iter()
+                    .all(|e| matches!(e, ProjectionElem::Field(..) | ProjectionElem::Downcast(..)))) {
+                    covers.extend(cx.name(p));
+                    for (_, col, name) in columns.iter().chain(&synth).filter(|(_, col, _)| col.local == p.local) {
+                        if p.projection.len() > col.projection.len() && p.projection.starts_with(col.projection) {
+                            parents.push(name.clone());
+                        } else if col.projection.len() > p.projection.len() && col.projection.starts_with(p.projection) {
+                            covers.push(name.clone());
+                        }
+                    }
+                }
+                binding_sources.push(BindingSource {
+                    parents, covers, moves: matches!(rv, Rvalue::Use(Operand::Move(p)) if !ty_info(p.ty(&body.local_decls, tcx).ty).0),
+                    location: loc, runs: runs.contains(&loc.block),
+                    declaration: body.local_decls[lhs.local].source_info.span,
+                    site: st.source_info.span, into: into.clone(), from,
+                });
+            }
+        }
+        if !runs.contains(&loc.block) { continue; }
+        if let Some(st) = statement {
             let in_macro = cx.macro_at(loc);
             match &st.kind {
                 StatementKind::Assign(asg) => {
@@ -2563,8 +2671,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         } else {
                             items.insert(0, whole);
                         }
+                        let route = drop_route(loc, &shared);
                         for (n, h, also) in items {
-                            push(&mut evs, cx.ev(loc, Fact::Drop { path: n, how: h, at_reassign, early_exit, also_on_exits: also }));
+                            let mut ev = cx.ev(loc, Fact::Drop { path: n, how: h, at_reassign, early_exit, also_on_exits: also });
+                            ev.1.drop_route = route;
+                            push(&mut evs, ev);
                         }
                     }
                 } else if place.local != RETURN_PLACE
@@ -2677,6 +2788,37 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         false
     };
+    // Stop at the first write or the end of this incarnation of the
+    // local. A later loop iteration can declare the same MIR local again.
+    let next_assignment = |place: Place<'tcx>, exits: &[Location], after: bool| {
+        let mut work = if after {
+            exits.iter().flat_map(|l| cx.r.real_succs(*l)).collect()
+        } else { exits.to_vec() };
+        let mut seen = BTreeSet::new();
+        let writes = |dest: Place<'tcx>| dest.local == place.local && place.projection.starts_with(dest.projection);
+        let (mut assigned, mut ended) = (false, false);
+        while let Some(l) = work.pop() {
+            if !seen.insert(l) { continue; }
+            let data = &body.basic_blocks[l.block];
+            if let Some(st) = data.statements.get(l.statement_index) {
+                match &st.kind {
+                    StatementKind::Assign(a) if writes(a.0) => { assigned = true; continue; }
+                    StatementKind::StorageDead(v) if *v == place.local => { ended = true; continue; }
+                    _ => {}
+                }
+            } else if matches!(data.terminator().kind, TerminatorKind::Call { destination, target: Some(_), .. } if writes(destination)) {
+                assigned = true;
+                continue;
+            }
+            let succs = cx.r.real_succs(l);
+            // A diverging call (including panic) has no normal successor.
+            if succs.is_empty() {
+                ended = true;
+            }
+            work.extend(succs);
+        }
+        assigned.then_some(!ended)
+    };
     let mut state_at = |exits: &[Location], after: bool| -> State {
         let mut st = State::default();
         // The row's exits on code that runs (an arm an earlier `_` arm
@@ -2749,6 +2891,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             // fields' history says.
             if !declared(&mut storage) {
                 continue;
+            }
+            if !rt_exits.is_empty() && place.ty(&body.local_decls, tcx).ty.needs_drop(tcx, typing_env) {
+                if let Some(all) = next_assignment(*place, &rt_exits, after) {
+                    st.reassigned.insert(name.clone(), all);
+                }
             }
             if w == "unassigned" && !place.projection.is_empty() && root_unassigned() {
                 continue;
@@ -2881,6 +3028,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             };
             if through_ref && pw != "own" {
                 continue;
+            }
+            if !through_ref && fp.ty(&body.local_decls, tcx).ty.needs_drop(tcx, typing_env) {
+                if let Some(all) = next_assignment(*fp, &rt_exits, after) {
+                    st.reassigned.insert(name.clone(), all);
+                }
             }
             st.state.insert(name.clone(), if pw == "partly" { "own" } else { pw });
             if let Some(c) = st.cause.get(&pn).copied() {
@@ -3168,7 +3320,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         if !runs.contains(&from.block) { continue; }
         for to in cx.r.real_succs(from) {
             if let Some(&next) = cx.rows.row.get(&to) {
-                if next > row && !cx.rows.exit_only.contains(&to) && !cx.rows.early_exit.contains_key(&to) {
+                if next > row && !cx.rows.exit_only.contains(&to) && !cx.rows.early_exit.contains_key(&to)
+                    && !cx.rows.shared_exits.get(&to).is_some_and(|sites| drop_route(to, sites) == DropRoute::ExitOnly) {
                     entries.entry(next).or_default().insert(to);
                 }
             }
@@ -3208,6 +3361,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         if let Some(specs) = cx.rows.arms.get(&line) {
             for s in specs {
                 row.arms.push(Arm {
+                    runs: s.exits.iter().any(|e| runs.contains(&e.block)),
                     branch: s.branch,
                     arm: s.arm,
                     parent: s.parent,
@@ -3253,9 +3407,85 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }).collect();
     let evaluated_spans = cx.rows.row.keys().filter(|loc| runs.contains(&loc.block) && !body.basic_blocks[loc.block].is_cleanup)
         .map(|loc| body.source_info(*loc).span.with_parent(None)).collect();
+    // MIR gives the incoming gotos of a labeled block or an if the span
+    // of the expression they complete. Compare each incoming edge before
+    // they meet, including the break value's effects. Imaginary edges
+    // affect usability but do not execute an assignment.
+    // Search only this expression on real incoming paths. A sibling
+    // that returned, or an operation in a previous iteration, supplies
+    // no evidence about the value carried by this edge.
+    let reaches = |span: Span, mut work: Vec<Location>, effect: &dyn Fn(Location) -> bool| {
+        let mut seen = BTreeSet::new();
+        while let Some(loc) = work.pop() {
+            if !seen.insert(loc) || !span.contains(body.source_info(loc).span.source_callsite()) { continue; }
+            if effect(loc) { return true; }
+            if loc.statement_index > 0 {
+                work.push(Location { statement_index: loc.statement_index - 1, ..loc });
+            } else {
+                work.extend(rt_body.basic_blocks.predecessors()[loc.block].iter()
+                    .filter(|p| runs.contains(p)).map(|p| body.terminator_loc(*p)));
+            }
+        }
+        false
+    };
+    let mut continuations = BTreeMap::<Span, BTreeSet<_>>::new();
+    for &pred in &runs {
+        let term = body.basic_blocks[pred].terminator();
+        if let TerminatorKind::Goto { target } = term.kind {
+            if !term.source_info.span.from_expansion() {
+                continuations.entry(term.source_info.span).or_default().insert(target);
+            }
+        }
+    }
+    let mut joins = BTreeMap::new();
+    for (span, targets) in continuations {
+        if targets.len() != 1 { continue; }
+        let bb = *targets.first().expect("one continuation");
+        let state = state_at(&[Location { block: bb, statement_index: 0 }], false);
+        let join = joins.entry(span).or_insert(Join { state, assignments: BTreeMap::new(), dead_implicit_else: false });
+        let preds: Vec<_> = body.basic_blocks.predecessors()[bb].iter()
+            .filter(|p| checked.contains(p)).map(|p| body.terminator_loc(*p)).collect();
+        if preds.len() < 2 { continue; }
+        if !preds.iter().all(|p| body.source_info(*p).span == span
+            && matches!(body.basic_blocks[p.block].terminator().kind, TerminatorKind::Goto { target } if target == bb)) {
+            continue;
+        }
+        // The implicit else of an if with no else assigns unit at the
+        // zero-width end of the if. Its predecessor cannot execute.
+        let mut implicit_else = preds.iter().filter(|p| body.basic_blocks[p.block].statements.iter().any(|s|
+            s.source_info.span == span.shrink_to_hi() && matches!(&s.kind, StatementKind::Assign(a)
+                if a.0.ty(&body.local_decls, tcx).ty.is_unit()))).peekable();
+        join.dead_implicit_else = implicit_else.peek().is_some() && implicit_else.all(|p| !runs.contains(&p.block));
+        let incoming: Vec<_> = preds.iter().map(|p| (runs.contains(&p.block), state_at(&[*p], true))).collect();
+        for (mpi, place, name) in &columns {
+            if !place.projection.is_empty() || join.state.state.get(name) != Some(&"maybe") { continue; }
+            let edges = |real, word| preds.iter().zip(&incoming)
+                .filter(|(_, (r, s))| *r == real && s.state.get(name) == Some(&word))
+                .map(|(loc, _)| *loc).collect::<Vec<_>>();
+            let own = edges(true, "own");
+            if own.is_empty() { continue; }
+            let moved = edges(true, "moved");
+            let runtime_moved = !moved.is_empty();
+            if runtime_moved && reaches(span, moved, &|l| move_data.loc_map[l].iter()
+                .any(|m| move_data.moves[*m].path == *mpi)) {
+                join.state.moved_in_arm.insert(name.clone());
+            }
+            let runtime_empty = runtime_moved || !edges(true, "unassigned").is_empty();
+            if !runtime_empty && edges(false, "unassigned").is_empty() { continue; }
+            let written = reaches(span, own, &|l| move_data.init_loc_map[l].iter().any(|i| move_data.inits[*i].path == *mpi));
+            if written {
+                let always = join.state.always_assigned.contains(name);
+                if runtime_empty || always {
+                    join.assignments.insert(name.clone(), always);
+                }
+            }
+        }
+    }
     BodyFacts {
         evaluated_spans,
         constructed_vecs,
+        binding_sources,
+        joins,
         func,
         kind: if tcx.is_closure_like(def_id) { "closure" } else { "fn" },
         parent: tcx.is_closure_like(def_id).then(|| tcx.def_path_str(tcx.parent(def_id))),

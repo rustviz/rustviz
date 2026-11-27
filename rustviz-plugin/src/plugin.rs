@@ -292,11 +292,11 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
               &mut line_map2, &mut fn_events, rap_hash_num, &a_map,
               &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
             );
+            visitor.facts = body_facts(local_def_id);
             visitor.visit_body(hir_body);
-            visitor.emit_borrow_ends(body_facts(local_def_id));
+            visitor.emit_borrow_ends(visitor.facts);
             row_layout.append(&mut visitor.row_layout);
             visitor.print_out_of_scope();
-            visitor.fill_scope_end_holds(0);
             visitor.mark_temp_emptying_moves(0);
             visitor.collect_approx_notes(hir_body);
             approx_notes.append(&mut visitor.approx_notes);
@@ -364,11 +364,11 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           &mut line_map2, &mut fn_events, rap_hash_num, &a_map,
           &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
         );
+        visitor.facts = body_facts(def_id);
         visitor.visit_body(hir_body);
-        visitor.emit_borrow_ends(body_facts(def_id));
+        visitor.emit_borrow_ends(visitor.facts);
         row_layout.append(&mut visitor.row_layout);
         visitor.print_out_of_scope();
-        visitor.fill_scope_end_holds(0);
         visitor.mark_temp_emptying_moves(0);
         visitor.collect_approx_notes(hir_body);
         approx_notes.append(&mut visitor.approx_notes);

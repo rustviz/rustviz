@@ -3,7 +3,6 @@ cluster = "C13"
 title = "`break 'b { flag = true; }` skips `s = ..`: after the block s is maybe-unassigned, but drawn solid 'owner'"
 fn = "f"
 places = ["s"]
-beyond_facts = "P3: no 'may be left without a value' dot when the break carries a computed value"
 
 [[state]]
 row = 7

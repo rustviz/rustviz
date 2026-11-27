@@ -1,5 +1,5 @@
 extern crate handlebars;
-use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, ScopeEndHolds, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
+use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -1426,7 +1426,31 @@ fn render_branch_dots(
             .all(|b| matches!(b.states.last().map(|s| &s.2), Some(State::OutOfScope))) {
             return;
         }
-        let (mixed_moved, all_moved) = merge_move_kind(branch_history, ty);
+        let function = visualization_data.fn_source_lines.get(hash).copied();
+        let join = function.and_then(|f| match event {
+            Event::Branch { join_span: Some(span), .. } => visualization_data.state_table.join_cell(f, rap.name(), *span),
+            _ => None,
+        });
+        let reassigned = match join {
+            Some(cell) => cell.reassigned,
+            None => function.and_then(|f| {
+                let row = rv_attrs::line_of(*merge_point, &visualization_data.row_lines)?;
+                visualization_data.state_table.segment_cell(f, rap.name(), row)?.reassigned
+            }),
+        };
+        // A branch used as an assignment RHS has a MIR join before the
+        // destination is written. Its rendered dot may already include
+        // that write. A moved-state title belongs only at a boundary that
+        // still has the same uncertainty.
+        let moved_at_dot = join.is_some_and(|c| c.moved_in_arm) && function
+            .zip(rv_attrs::line_of(*merge_point, &visualization_data.row_lines)).and_then(|(f, row)|
+                visualization_data.state_table.segment_cell(f, rap.name(), row))
+            .is_some_and(|c| c.init == crate::facts::table::Init::Maybe && c.cause == Some("moved"));
+        let (mixed_moved, all_moved) = if moved_at_dot {
+            (true, false)
+        } else {
+            merge_move_kind(branch_history, ty)
+        };
         // `let s;` left unassigned on some path (#234): that
         // branch ends with no value, not with a move, so
         // nothing is dropped there. When another branch that
@@ -1513,22 +1537,13 @@ fn render_branch_dots(
             // if there is one, or else at the scope end. That
             // assignment may be in a later conditional's
             // branch, on some paths only.
-            let after = events_after(visualization_data, hash, history, event, *merge_point);
             let full = visualization_data.timelines.get(hash).map_or(history, |t| &t.history);
-            // (An assignment on every path: it comes before
-            // the scope end.)
-            let reassigned_next = after.iter()
-                .any(|(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. }));
-            // In a loop body that assigns s (#786), the next
-            // time round assigns it again.
-            let reassigned_later = after.iter().any(|(_, e)| reassigns_maybe_init(e))
-                || full.iter().any(|(_, e)| reassigns_in_loop(e));
             Some(if is_branch_temp_col(rap) {
                 // A temporary a `let` extends through a branch (#1397).
                 hover_messages::event_dot_branch_merge_temp_made(&is.real_name(), made_on_line(full, &visualization_data.row_lines))
-            } else if reassigned_next {
+            } else if reassigned == Some(true) {
                 hover_messages::event_dot_branch_merge_maybe_init_then_reassigned(&is.real_name(), false, moved)
-            } else if reassigned_later {
+            } else if reassigned == Some(false) {
                 hover_messages::event_dot_branch_merge_maybe_init_then_reassigned(&is.real_name(), true, moved)
             } else {
                 hover_messages::event_dot_branch_merge_maybe_init(
@@ -1543,10 +1558,6 @@ fn render_branch_dots(
             // It may have held nothing as the conditional started,
             // and only some branches assign it (#1034): it may hold
             // the new value, the old one, or nothing.
-            let reassigned = match reassigned_after(&events_after(visualization_data, hash, history, event, *merge_point)) {
-                None if matches!(event, Event::Branch { loop_assigned: true, .. }) => Some(false),
-                r => r,
-            };
             Some(hover_messages::event_dot_branch_merge_maybe_held(
                 &is.real_name(),
                 is.extract_rap().map_or(false, |r| r.drops_nothing()),
@@ -1604,7 +1615,6 @@ fn render_branch_dots(
                 // branch that gets here may assign it in a conditional of
                 // its own (#1514): it may hold a value or not, as for a
                 // `maybe_held` join.
-                let reassigned = reassigned_after(&events_after(visualization_data, hash, history, event, *merge_point));
                 Some(hover_messages::event_dot_branch_merge_maybe_held(
                     &is.real_name(),
                     is.extract_rap().map_or(false, |r| r.drops_nothing()),
@@ -1638,11 +1648,6 @@ fn render_branch_dots(
             // comes first (`if c { if d { drop(s); } s = …; }` assigns
             // s again in that branch, #1413; so can a later conditional
             // in it, #1460), then the column's whole history.
-            let after = events_after(visualization_data, hash, history, event, *merge_point);
-            let next = after.iter()
-                .find(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. } | Event::Branch { .. }))
-                .map(|(_, e)| e);
-            let reassigned_next = matches!(next, Some(Event::OwnerDropAtReassign { maybe_moved: true, .. }));
             // This `if`'s let-chain condition, not only a branch body,
             // may have moved it (#940, #953), or a `match` arm's
             // guard that failed (#247): the keyword of the conditional,
@@ -1662,32 +1667,10 @@ fn render_branch_dots(
                 hover_messages::event_dot_branch_merge_chain_new_value(
                     &is.real_name(), kw,
                     is.extract_rap().map_or(false, |r| r.drops_nothing()),
-                    rap.is_mut(), reassigned_next,
+                    rap.is_mut(), reassigned,
                     &is.extract_rap().map_or(String::new(), |r| r.drop_note()))
-            } else if reassigned_next {
-                // That assignment is in a loop's body (#1012), which
-                // may end before it runs: unless every `break` out of
-                // the loop comes after it (`LoopExitKept`). A loop that
-                // never comes back round may too (#1467).
-                let in_loop = matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::FirstPass), .. }))
-                    || matches!(next, Some(Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag), .. }))
-                    && !after.iter()
-                        .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
-                        .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
-                hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, in_loop)
-            } else if let Some(Some(every_path)) = matches!(next, Some(e @ Event::Branch { .. }) if assigns_in_branch(e))
-                .then(|| reassigned_after(&after)) {
-                // The next assignment is in a branch of a later
-                // conditional (#1034): unless another one follows on
-                // every path, the scope end drops it on the others.
+            } else if let Some(every_path) = reassigned {
                 hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, !every_path)
-            } else if matches!(event, Event::Branch { loop_assigned: true, .. })
-                && !is.extract_rap().is_some_and(|r| r.drops_nothing()) {
-                // In a loop whose body gives it a new value (#1026):
-                // when the loop comes back round, that assignment
-                // drops it; if it doesn't, a later one or the scope
-                // end does.
-                hover_messages::event_dot_branch_merge_moved_then_reassigned(&is.real_name(), by_cond, true)
             } else if mixed_box_paths(rap, &history.iter()
                 .take_while(|(_, e)| !std::ptr::eq(e, event)).cloned()
                 .chain(std::iter::once((*line_number, event.clone()))).collect::<Vec<_>>()) {
@@ -1768,35 +1751,27 @@ fn render_branch_dots(
         return;
 }
 
-/// A plain owner's scope end where what the column's history says about
-/// what's dropped there (as the arms of `render_scope_end_dot` read it)
-/// isn't what rustc's move data says (the event's `holds`, #1036,
-/// #1037): the text rustc's answer gives, and whether the dot drops
-/// something (a value, or one only a drop flag knows of). `None` when
-/// the history agrees, or rustc doesn't say. A conditional whose arms
-/// that get to its join leave s as it was (`if x { s = …; return s; }`
-/// after a branch that may have moved s) or a loop that may not have
-/// assigned a `let s;` before a conditional that does in some arms
-/// could make the history say a value is dropped, or none, where only
-/// a drop flag knows.
-fn scope_end_by_rustc(event: &Event, ro: &ResourceAccessPoint, history: &[(usize, Event)], resource_hold: bool, name: &String) -> Option<(String, bool)> {
-    let Event::OwnerGoOutOfScope { holds: Some(holds), .. } = event else { return None };
-    if !matches!(ro, ResourceAccessPoint::Owner(_)) || ro.never_drops() || ro.is_plain_value() || ro.is_closure()
+/// Preserve the detailed teaching text when it describes the runtime drop.
+fn scope_end_by_rustc(vd: &VisualizationData, row: usize, ro: &ResourceAccessPoint, history: &[(usize, Event)], resource_hold: bool, name: &String) -> Option<(String, bool)> {
+    let pattern_field = ro.is_member() && history.iter().any(|(_, e)| matches!(e, Event::OrAltMove { .. }));
+    if !(matches!(ro, ResourceAccessPoint::Owner(_)) || pattern_field) || ro.never_drops() || ro.is_plain_value() || ro.is_closure()
         || ro.is_union() || ro.is_manually_drop() || ro.is_temporary() || ro.holds_borrow() || ro.box_contents_moved() {
         return None;
     }
+    let src = rv_attrs::line_of(row, &vd.row_lines)?;
+    let how = vd.state_table.scope_drop(*vd.fn_source_lines.get(ro.hash())?, ro.name(), src)?;
     // The history's drop flag (`init_at_end`, `maybe_moved_at_end`).
     let flag = (!ro.holds_value() && matches!(init_at_end(history), Some(InitJoin::Loop | InitJoin::Maybe { .. })))
         || (!resource_hold && maybe_moved_at_end(history));
     let note = ro.drop_note();
-    match holds {
-        ScopeEndHolds::Maybe if !flag =>
+    match how {
+        "drops_if_init" if !flag =>
             Some((hover_messages::event_dot_go_out_of_scope_maybe_kept(name, &note), true)),
-        ScopeEndHolds::Nothing if resource_hold || flag => Some((
+        "nothing_to_drop" if resource_hold || flag => Some((
             hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_no_resource_dropped_suffix(),
             false,
         )),
-        ScopeEndHolds::Value if !resource_hold || flag => Some((
+        "drops" if !resource_hold || flag => Some((
             hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_resource_dropped_suffix(&note),
             true,
         )),
@@ -1907,7 +1882,7 @@ fn render_scope_end_dot(
         } else if is_plain {
             // Never a resource: going out of scope drops
             // nothing, whether or not it was moved earlier.
-            data.title = match struct_partial_move_split(visualization_data, *hash, exit) {
+            data.title = match struct_partial_move_split(visualization_data, *hash, *line_number, exit) {
                 Some(split) if resource_hold =>
                     hover_messages::event_dot_struct_partial_go_out_of_scope(&name, &split.moved, &split.maybe_moved, &[], true, split.by_cond, split.kept, false),
                 _ => event.print_message_with_name(&mut name),
@@ -1917,11 +1892,11 @@ fn render_scope_end_dot(
             // else moved part of it: all of it is dropped here on the
             // iterations that don't break.
             || (exit.is_none() && field_broken_out_at(visualization_data, *hash, *line_number)
-                && struct_partial_move_split(visualization_data, *hash, None).is_none())
+                && struct_partial_move_split(visualization_data, *hash, *line_number, None).is_none())
             // Or out of a labeled block it is declared in, by one of the
             // ways the block can end (#1288).
             || (exit.is_none() && broken_out_of_block(visualization_data, *hash).is_some()
-                && struct_partial_move_split(visualization_data, *hash, None).is_none()) {
+                && struct_partial_move_split(visualization_data, *hash, *line_number, None).is_none()) {
             // A `break` carried it out of the loop on this
             // line (#431), but only on the iteration that
             // ended the loop: every other one drops it here,
@@ -1981,7 +1956,8 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
-        } else if let Some((title, dropped)) = scope_end_by_rustc(event, ro, history, resource_hold, &name) {
+        } else if let Some((title, dropped)) = matches!(event, Event::OwnerGoOutOfScope { early: None, .. })
+            .then(|| scope_end_by_rustc(visualization_data, *line_number, ro, history, resource_hold, &name)).flatten() {
             // What's drawn above says something else about what's
             // dropped here than rustc does (#1036, #1037).
             if !dropped {
@@ -2203,7 +2179,7 @@ fn render_scope_end_dot(
                     None => data.title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix()),
                 }
             }
-        } else if let Some(split) = struct_partial_move_split(visualization_data, *hash, exit) {
+        } else if let Some(split) = struct_partial_move_split(visualization_data, *hash, *line_number, exit) {
             // Partially moved struct (#207): only the
             // fields still holding a value are dropped,
             // and those moved on some paths only maybe
@@ -2298,14 +2274,14 @@ fn render_scope_end_dot(
 /// (`Some(false)`). `None` when an owner may not hold its resource there
 /// (moved before the loop, on some paths, or in part): nothing is drawn,
 /// as after a conditional whose every branch leaves (#515, #1043).
-fn loop_runs_on_owns(hash: &u64, history: &[(usize, Event)], resource_hold: bool, visualization_data: &VisualizationData) -> Option<bool> {
+fn loop_runs_on_owns(line_number: &usize, hash: &u64, history: &[(usize, Event)], resource_hold: bool, visualization_data: &VisualizationData) -> Option<bool> {
     let ro = &visualization_data.timelines[hash].resource_access_point;
     if ro.is_ref() || ro.never_drops() || ro.is_plain_value() || ro.is_union() || ro.is_manually_drop()
         || (ro.is_closure() && closure_move_capture_count(visualization_data, *hash) == 0)
     {
         return Some(false);
     }
-    let whole = resource_hold && !maybe_moved_at_end(history) && struct_partial_move_split(visualization_data, *hash, None).is_none();
+    let whole = resource_hold && !maybe_moved_at_end(history) && struct_partial_move_split(visualization_data, *hash, *line_number, None).is_none();
     whole.then_some(true)
 }
 
@@ -2429,7 +2405,7 @@ fn render_dot(
                 Event::OwnerGoOutOfScope { early: Some(EarlyReturns { process_exit: Some(exit), .. }), .. } => {
                     // At a `process::exit`: the process ends, no
                     // destructor runs (#1172). A plain dot.
-                    let owns = loop_runs_on_owns(hash, history, resource_hold, visualization_data);
+                    let owns = loop_runs_on_owns(line_number, hash, history, resource_hold, visualization_data);
                     data.title = hover_messages::event_dot_process_exit(&name, owns, exit);
                     append_dot(data, timeline_data, dots, None, rv_attrs::event_name(event), *line_number);
                     continue;
@@ -2439,7 +2415,7 @@ fn render_dot(
                     // At the `}` of a `loop` nothing breaks out of: still
                     // alive while the loop keeps running (#1057). A plain
                     // dot: nothing is dropped here.
-                    if let Some(owns) = loop_runs_on_owns(hash, history, resource_hold, visualization_data) {
+                    if let Some(owns) = loop_runs_on_owns(line_number, hash, history, resource_hold, visualization_data) {
                         data.title = hover_messages::event_dot_loop_runs_on(&name, owns, on.exits, on.moved);
                         append_dot(data, timeline_data, dots, None, rv_attrs::event_name(event), *line_number);
                     }
@@ -2476,12 +2452,12 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
                     continue;
                 },
-                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
+                Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned { .. } | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
                     // A reassignment, or the drop at a `?`'s early return,
                     // says what else goes with it (#373, #542).
-                    let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned) {
+                    let note = if matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. } | Event::OwnerDropIfTryReturns | Event::OwnerDropUnlessReturned { .. }) {
                         visualization_data.timelines[hash].resource_access_point.drop_note()
                     } else { String::new() };
                     // `*b = …` drops the Box's old payload, not the Box
@@ -2497,12 +2473,17 @@ fn render_dot(
                     let box_paths = matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. })
                         && mixed_box_paths(&visualization_data.timelines[hash].resource_access_point,
                             &history[..i].iter().filter(|(l, _)| l < line_number).cloned().collect::<Vec<_>>());
-                    let title = if box_paths {
+                    let conditional_write = matches!(event, Event::OwnerDropAtReassign { .. }) &&
+                        visualization_data.fn_source_lines.get(hash).zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines))
+                            .is_some_and(|(&f, src)| visualization_data.state_table.skips_reassignment(f, &name, src));
+                    let mut title = if box_paths {
                         // A Box whose contents were moved out, given a
                         // new Box or moved away on some paths only
                         // (#1220): what the old value drops depends on
                         // the path.
                         hover_messages::event_dot_owner_drop_at_reassign_box_paths(&name)
+                    } else if conditional_write && !matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Loop), .. }) {
+                        hover_messages::event_dot_owner_drop_at_reassign_maybe_kept(&name, &note)
                     } else if matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. })
                         // (Before the new value's Acquire on this line.)
                         && init_by_maybe_held(history[..i].iter().filter(|(l, _)| l < line_number)) {
@@ -2558,7 +2539,7 @@ fn render_dot(
                     } else if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, parts: None, payload: false, .. })
                         && chain_new_value_lasts(history[..i].iter().filter(|(l, _)| l < line_number)) {
                         // A condition may have given it a new value (#603).
-                        hover_messages::event_dot_owner_drop_at_reassign_chain_new_value(&name, &note)
+                        hover_messages::event_dot_owner_drop_at_reassign_maybe_kept(&name, &note)
                     } else if let Event::OwnerDropAtReassign { maybe_moved: true, by_cond, .. } = event {
                         // A Box whose contents only were moved out in
                         // some branches (#921).
@@ -2609,10 +2590,10 @@ fn render_dot(
                         // Moved, or given a value, on some paths only
                         // (#1194): the drop flag decides.
                         hover_messages::event_dot_owner_drop_if_try_returns_maybe(&name, &note)
-                    } else if matches!(event, Event::OwnerDropUnlessReturned) {
+                    } else if let Event::OwnerDropUnlessReturned { is_break } = event {
                         // A ManuallyDrop has nothing to drop either (#1137).
                         let value = visualization_data.timelines[hash].resource_access_point.drops_nothing();
-                        hover_messages::event_dot_owner_drop_unless_returned(&name, value, &note)
+                        hover_messages::event_dot_owner_drop_unless_returned(&name, value, &note, *is_break)
                     } else if let Some(part) = matches!(event, Event::OwnerDropIfTryReturns).then(|| try_assigned_part(visualization_data, *hash as u64, *line_number)).flatten() {
                         // `p.f = f()?;` (#1151): on success the assignment
                         // gives a part of p, on its own column, a new value.
@@ -2624,6 +2605,9 @@ fn render_dot(
                     } else {
                         hover_messages::event_dot_owner_drop_at_reassign(&name, &note)
                     };
+                    if conditional_write {
+                        title.push_str(" This assignment runs on only some paths through this expression.");
+                    }
                     // A struct whose parts were all moved out before it
                     // is overwritten drops nothing: a plain dot that says
                     // so, no drop triangle (#1138).
@@ -3220,64 +3204,6 @@ fn maybe_moved_by_kept_round<'a>(history: impl Iterator<Item = &'a (usize, Event
     kept
 }
 
-// A conditional that assigns the column in one of its branches, also
-// in a conditional nested in one (#1034).
-fn assigns_in_branch(e: &Event) -> bool {
-    match e {
-        Event::Branch { branch_history, .. } => branch_history.iter().any(|b| b.e_data.iter()
-            .any(|(_, e)| matches!(e, Event::OwnerDropAtReassign { .. }) || assigns_in_branch(e))),
-        _ => false,
-    }
-}
-
-// After a conditional's join that may leave the column holding a value
-// (#1034), what drops that value, as for `event_dot_loop_maybe_init`'s
-// `reassigned`: the next assignment, on every path (`Some(true)`); one
-// that may not run, in a branch of a later conditional or in a loop that
-// may end before it (`Some(false)`); or the scope end (`None`). Later
-// conditionals that assign it in some branches only are looked past, for
-// an assignment on every path after them; one that assigns it on every
-// path is one (`if c { s = a; } else { s = b; }`, #1460). `after`: the
-// column's events after the join (`events_after`).
-fn reassigned_after(after: &[&(usize, Event)]) -> Option<bool> {
-    let mut in_branch = false;
-    for (i, (_, e)) in after.iter().enumerate() {
-        match e {
-            Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag), .. } => {
-                // In a loop's body, which may end before it runs, unless
-                // every `break` out of it comes after it.
-                let kept = after[i..].iter()
-                    .find(|(_, e)| matches!(e, Event::LoopExitKept { .. } | Event::LoopMaybeInit { .. } | Event::LoopExitMove { .. }))
-                    .is_some_and(|(_, e)| matches!(e, Event::LoopExitKept { reassigned: true }));
-                return Some(kept && !in_branch);
-            }
-            // In a loop that never comes back round and may end
-            // before it runs (#1467).
-            Event::OwnerDropAtReassign { maybe_init: Some(InitBy::FirstPass), .. } => return Some(false),
-            Event::OwnerDropAtReassign { .. } => return Some(true),
-            Event::Branch { .. } if assigns_on_every_path(e) => return Some(true),
-            Event::Branch { .. } if assigns_in_branch(e) => in_branch = true,
-            Event::Branch { .. } => break,
-            _ => {}
-        }
-    }
-    in_branch.then_some(false)
-}
-
-// A conditional that gives the column a new value on every path that gets
-// to its join, also by conditionals nested in its arms (`if c { s = a; }
-// else { s = b; }`): the old value, if any, is dropped there whichever
-// arm runs. Not an assignment in a loop (whose body may not run, #1467).
-fn assigns_on_every_path(e: &Event) -> bool {
-    let Event::Branch { branch_history, ty, .. } = e else { return false };
-    all_paths_present(ty, branch_history.len())
-        && branch_history.iter().any(|b| !b.diverges)
-        && branch_history.iter().filter(|b| !b.diverges).all(|b| b.e_data.iter().any(|(_, e)|
-            matches!(e, Event::OwnerDropAtReassign { maybe_init, .. }
-                    if !matches!(maybe_init, Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag | InitBy::FirstPass)))
-                || assigns_on_every_path(e)))
-}
-
 // The events on column `hash` after the conditional `event` (found in
 // `history`) joins at `merge_point`, in the order they run: the rest of
 // each arm it is nested in, innermost first, then what follows on the
@@ -3335,16 +3261,6 @@ fn reassigns_maybe_init(e: &Event) -> bool {
     }
 }
 
-// An assignment in a loop body to a `let x;` local that had no value
-// before the loop (#786), also one in a branch.
-fn reassigns_in_loop(e: &Event) -> bool {
-    match e {
-        Event::OwnerDropAtReassign { maybe_init, .. } => matches!(maybe_init, Some(InitBy::EarlierIteration | InitBy::OuterLoop { .. } | InitBy::DropFlag)),
-        Event::Branch { branch_history, .. } =>
-            branch_history.iter().any(|b| b.e_data.iter().any(|(_, e)| reassigns_in_loop(e))),
-        _ => false,
-    }
-}
 
 // The end state of each branch of a conditional that reaches its join
 // (not one that returns or panics, #296).
@@ -4222,9 +4138,12 @@ fn timeline_segment_title(
         return state.print_message_with_name(rap.name());
     }
     if matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }) && !rap.is_ref() {
-        if let Some((into, mutable, chain)) = or_alt_lend_at(visualization_data, rap, line) {
-            if let Some((sources, chain)) = chain {
+        if let Some((into, mutable, sources, chain)) = or_alt_lend_at(visualization_data, rap, line) {
+            if let Some(chain) = chain {
                 return hover_messages::state_chain_ref_lent(rap.name(), into.name(), sources, chain, mutable, rap.holds_value());
+            }
+            if let [source] = sources {
+                return hover_messages::event_dot_single_pattern_lend(rap.name(), into.name(), source, mutable, false);
             }
             return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
         }
@@ -4334,9 +4253,12 @@ fn flat_history<'a>(history: &'a [(usize, Event)], path: &[(usize, usize)], out:
 /// out: as `timeline_segment_title`, on the arm `path`.
 fn revoked_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, row: usize, path: &[(usize, usize)]) -> String {
     if !rap.is_ref() {
-        if let Some((into, mutable, chain)) = or_alt_lend_at(visualization_data, rap, Some(row)) {
-            if let Some((sources, chain)) = chain {
+        if let Some((into, mutable, sources, chain)) = or_alt_lend_at(visualization_data, rap, Some(row)) {
+            if let Some(chain) = chain {
                 return hover_messages::state_chain_ref_lent(rap.name(), into.name(), sources, chain, mutable, rap.holds_value());
+            }
+            if let [source] = sources {
+                return hover_messages::event_dot_single_pattern_lend(rap.name(), into.name(), source, mutable, false);
             }
             return hover_messages::state_or_alt_lent(rap.name(), into.name(), mutable, rap.holds_value());
         }
@@ -4882,7 +4804,7 @@ fn or_alt_lend_at<'a>(
     visualization_data: &'a VisualizationData,
     rap: &ResourceAccessPoint,
     line: Option<usize>,
-) -> Option<(&'a ResourceAccessPoint, bool, Option<(&'a [String], &'a ChainRef)>)> {
+) -> Option<(&'a ResourceAccessPoint, bool, &'a [String], Option<&'a ChainRef>)> {
     fn lends<'a>(history: &'a [(usize, Event)], out: &mut Vec<(usize, &'a Event)>) {
         for (l, e) in history {
             match e {
@@ -4909,7 +4831,7 @@ fn or_alt_lend_at<'a>(
         None => None,
     };
     match found {
-        Some(Event::OrAltLend { into, mutable, chain, sources, .. }) => Some((into, *mutable, chain.as_ref().map(|c| (sources.as_slice(), c)))),
+        Some(Event::OrAltLend { into, mutable, chain, sources, .. }) => Some((into, *mutable, sources, chain.as_ref())),
         _ => None,
     }
 }
@@ -5093,6 +5015,7 @@ struct PartialMoveSplit {
 fn struct_partial_move_split(
     visualization_data: &VisualizationData,
     hash: u64,
+    row: usize,
     exit: Option<ExitAt>,
 ) -> Option<PartialMoveSplit> {
     let rap = &visualization_data.timelines.get(&hash)?.resource_access_point;
@@ -5126,10 +5049,19 @@ fn struct_partial_move_split(
         // too, by a drop on its own column (`if c { return; } let a =
         // p.a;`, a let-else's `else`, #906); one moved later isn't moved
         // yet. (A Copy field has no drop to tell: it holds its value.)
+        // An or-pattern can move the field into different bindings on
+        // every executable alternative. Its scope-end drop gives the
+        // runtime answer even when the old arm event calls it conditional.
+        let pattern_drop = if exit.is_none() && timeline.history.iter().any(|(_, e)| matches!(e, Event::OrAltMove { .. })) {
+            rv_attrs::line_of(row, &visualization_data.row_lines).and_then(|src|
+                visualization_data.state_table.scope_drop(*visualization_data.fn_source_lines.get(&hash)?, name, src))
+                .filter(|how| matches!(*how, "drops" | "drops_if_init" | "nothing_to_drop"))
+        } else { None };
         let holds = match exit {
             Some(at) if !is_copy => dropped_at_exit(&timeline.history, at),
             _ => holds_resource_at_scope_end(timeline) || moved_only_by_block_break(&timeline.history),
         };
+        let holds = pattern_drop.map_or(holds, |how| how == "drops");
         if !holds {
             // A Copy part of a Box's payload moved out with all of it
             // (`x => …` on `match *b`, #898): nothing of it is ever
@@ -5139,7 +5071,7 @@ fn struct_partial_move_split(
             }
             // Moved in one arm of a `match` on the struct, or one
             // branch of an `if`, and not in the others (#395).
-            if maybe_moved_at_end(&timeline.history) {
+            if pattern_drop.map_or_else(|| maybe_moved_at_end(&timeline.history), |how| how == "drops_if_init") {
                 // A field with nothing to drop needs no drop flag: what
                 // the struct drops doesn't depend on whether it was
                 // moved (#1147). (A struct with nothing to drop at all
@@ -9441,9 +9373,13 @@ fn leg_table_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationDa
             // exhausted exit can disagree. Use the snapshot if its MIR
             // edge leads straight into the next row of this leg and
             // the hidden iterator holds the loan there.
+            let continues_here = table.continues_to_row(fn_line, col, l)
+                .is_some_and(|next| rl.get(row + 1) == Some(&Some(next)));
             cells.windows(2).all(|w| w[0] == w[1])
-                || (!rap.is_ref() && cell.lent.iter().any(|loan| loan.iterator)
-                    && table.continues_to_row(fn_line, col, l).is_some_and(|next| rl.get(row + 1) == Some(&Some(next))))
+                // A short-circuit write inside this arm rejoins before its
+                // next row. The RHS alone cannot initialize the skipped path.
+                || (continues_here && (table.skips_reassignment(fn_line, col, l)
+                    || (!rap.is_ref() && cell.lent.iter().any(|loan| loan.iterator))))
         }
     };
     // (A match arm on one row, `0 => c = &y,`: as a one-row arm, #1865.)
@@ -10323,7 +10259,9 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
         Init::Moved => return Some((layout.clone(), hover_messages::state_moved_out(name))),
         Init::Unassigned => return Some((layout.clone(), hover_messages::state_uninitialized(name))),
         Init::Maybe => {
-            let title = if cell.always_assigned {
+            let title = if cell.cause == Some("imaginary") && !rap.holds_value() && !rap.is_ref() {
+                format!("{}. {}", timeline_segment_title(&full, rap, vd, Some(row)), hover_messages::state_maybe(name, cell.cause))
+            } else if cell.always_assigned {
                 hover_messages::state_imaginary_unassigned(name)
             } else {
                 hover_messages::state_maybe(name, cell.cause)
@@ -10332,7 +10270,7 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
             // assigned only in an irrefutable `if let`'s arm, #1867): it
             // can't be used, so its line is dashed, as 2.x draws a local
             // some branches leave unassigned, not solid.
-            if cell.cause == Some("unassigned") && held {
+            if matches!(cell.cause, Some("unassigned" | "moved" | "imaginary")) && held {
                 return Some((State::FullPrivilege { s: LineState::Uninit }, title));
             }
             return Some((layout.clone(), title));
@@ -10813,7 +10751,7 @@ fn owner_part_loan_state(state: &State, rap: &ResourceAccessPoint, data: &Visual
     // Keep the or-pattern's teaching clause when its named holder really
     // does keep the loans live. Only the matched alternative ran.
     let alt = std::mem::discriminant(state) == std::mem::discriminant(&st)
-        && or_alt_lend_at(data, rap, Some(row)).is_some_and(|(h, mutable, _)| {
+        && or_alt_lend_at(data, rap, Some(row)).is_some_and(|(h, mutable, _, _)| {
             mutable == matches!(st, State::RevokedPrivilege { .. }) &&
                 table.cell(fn_line, h.name(), cell.from_row, cell.from_row)
                     .is_some_and(|h| cell.lent.iter().all(|l| h.holds.contains(&l.loan)))
@@ -11886,6 +11824,7 @@ mod tests {
     /// A `Branch` event with `n` empty arms, its widths populated.
     fn branch(arms: Vec<BranchData>) -> Vec<(usize, Event)> {
         let mut events = vec![(0, Event::Branch {
+            join_span: None,
             is: ResourceTy::Anonymous,
             branch_history: arms,
             ty: BranchType::Match(Vec::new(), Vec::new()),

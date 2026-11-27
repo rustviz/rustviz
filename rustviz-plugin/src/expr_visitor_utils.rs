@@ -1083,7 +1083,7 @@ pub fn collect_event_live_vars(
             ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::TupleTempDrop { ro, .. } | ExternalEvent::OrAltMove { ro, .. }
             | ExternalEvent::OrAltBorrow { ro, .. } | ExternalEvent::ChainFailAssign { ro, .. } | ExternalEvent::ChainFailUse { ro, .. } | ExternalEvent::TiedParamNote { ro, .. }
             | ExternalEvent::ReslicedInPlace { ro, .. }
-            | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. }
+            | ExternalEvent::AssignmentJoin { ro, .. } | ExternalEvent::DeadElseNote { ro, .. } | ExternalEvent::DeadLoanNote { ro, .. }
             | ExternalEvent::PassRestDrop { ro, .. } => {
                 out.insert(ro.clone());
             }
