@@ -524,6 +524,9 @@ pub struct StaticRef {                // let (mut) r1 = & a;
 
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct Function {
+    /// This endpoint comes from an actual call terminator.
+    pub mir_result: bool,
+    pub mir_constructor: bool,
     pub callable_result: bool,
     pub name: String,
     pub hash: u64,
@@ -950,8 +953,16 @@ impl ResourceAccessPoint {
         rap
     }
 
-    /// A copy of this function RAP marked as `std::mem::drop` called on
-    /// a value that needs drop.
+    /// Mark the function endpoint as producing a call result.
+    pub fn with_mir_result(&self) -> Self {
+        let mut rap = self.clone();
+        if let Self::Function(f) = &mut rap {
+            f.mir_result = true;
+        }
+        rap
+    }
+
+    /// Mark a call to `std::mem::drop` whose argument needs drop.
     pub fn with_drops_arg(&self) -> ResourceAccessPoint {
         let mut rap = self.clone();
         if let ResourceAccessPoint::Function(f) = &mut rap {
@@ -4282,7 +4293,7 @@ impl Event {
                     ResourceTy::Caller => Some("the caller".to_owned()),
                     _ => None,
                 };
-                hover_messages::event_dot_move_into_try(&self.deref_name(my_name), target.as_ref(), *kind, is_plain(is))
+                hover_messages::event_dot_move_into_try(&is.name(), target.as_ref(), *kind, is_plain(is))
             }
             // Moving a `&mut` moves the reference, not its referent; so
             // does moving a struct with a `&T` field (#637).
@@ -4411,7 +4422,7 @@ impl Event {
             }
             // arrow going in
             // `n` in `let n = r?;` (#652).
-            Event::Acquire{ from: ResourceTy::Value(from), is, via_try: Some(kind), ..} => {
+            Event::Acquire{ from, is, via_try: Some(kind), ..} => {
                 let holds = match is.extract_rap() {
                     Some(r) if r.is_mutref() => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::MutRef),
                     Some(r) if r.is_ref() => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::Ref),
@@ -4419,15 +4430,16 @@ impl Event {
                     _ if is_plain(is) => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::Plain),
                     _ => hover_messages::acquire_from_try_holds(hover_messages::TryHolds::Resource),
                 };
-                hover_messages::event_dot_acquire_from_try(&self.deref_name(my_name), from.name(), *kind, holds)
+                hover_messages::event_dot_acquire_from_try(&self.deref_name(my_name), &from.name(), *kind, holds)
             }
             // `let o = Some(5);`: the value a constructor of literals
             // builds; nothing is copied from the constructor (#768).
             // `let y = Fruit::Banana;` with nothing to drop reads the
             // same (#873); one that needs drop acquires a resource.
             Event::Acquire{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), is, via_try: None, ..}
-                if is.extract_rap().is_some_and(|r| r.holds_value()) && f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())) => {
-                hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, None, f.inside.as_deref())
+                if is.extract_rap().is_some_and(|r| r.holds_value()) && !f.mir_result
+                    && f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())) => {
+                hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, None, f.inside.as_deref(), true)
             }
             // `for w in words`: each iteration moves one element of the
             // collection into `w` (#850).
@@ -4660,21 +4672,22 @@ impl Event {
             // `if let Some(&x) = v.get(0)`: x gets a copy of the value
             // the reference the call returned points to (#874).
             Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), of: CopyOf::Pointee { part }, ..} => {
-                hover_messages::event_dot_copy_pointee_of_call(&self.deref_name(my_name), &f.name, f.inside.as_deref(), *part)
+                hover_messages::event_dot_copy_pointee_of_call(&self.deref_name(my_name), &f.name, f.inside.as_deref(), *part, f.mir_result, f.mir_constructor)
             }
             // `let x = Some(one());`: x holds a Some value around the
             // value one() returns (#1183).
             Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), of: CopyOf::IntoCtor(ctor), ..}
-                if f.inside.is_none() && !f.name.rsplit("::").next().unwrap_or(&f.name).starts_with(|c: char| c.is_uppercase()) => {
+                if f.inside.is_none() && (f.mir_result || !f.name.rsplit("::").next().unwrap_or(&f.name).starts_with(|c: char| c.is_uppercase())) => {
                 hover_messages::event_dot_init_from_call_in_ctor(&self.deref_name(my_name), &f.name, ctor, f.cast_to.as_deref())
             }
             Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), ..} => {
-                hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, f.cast_to.as_deref(), f.inside.as_deref())
+                let constructor = !f.mir_result && f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase()));
+                hover_messages::event_dot_init_from_call(&self.deref_name(my_name), &f.name, f.cast_to.as_deref(), f.inside.as_deref(), constructor)
             }
             // `let f = Fruit::Apple(z);`: f holds the value the
             // constructor builds, not a copy of z (#866).
             Event::Copy{ of: CopyOf::IntoCtor(ctor), ..} => {
-                hover_messages::event_dot_init_from_call(&self.deref_name(my_name), ctor, None, None)
+                hover_messages::event_dot_init_from_call(&self.deref_name(my_name), ctor, None, None, true)
             }
             // `if let Some(x) = opt`: x gets a copy of the value inside
             // opt, not of opt (#866).

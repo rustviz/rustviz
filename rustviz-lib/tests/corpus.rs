@@ -123,7 +123,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `y: u32` is Copy: returning it copies the value out. This
         // entry used to pin the arrow's "moved to the caller" text.
         must_contain: &[
-            "Copy of the value f() returns to x",
+            "x receives the value f() returns",
             // `y: u32` is Copy: returning it copies (the arrow's
             // tooltip used to say "moved" regardless).
             // (A Copy value is a "value", not a "resource", #274.)
@@ -666,7 +666,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from String::from to s",
             "s is passed to len by shared reference (as self, implicitly borrowed). len may read it",
-            "Copy of the value len() returns to n",
+            "n receives the value len() returns",
         ],
         must_not_contain: &[],
     },
@@ -1908,7 +1908,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v is passed to len by shared reference (as self, implicitly borrowed). len may read it",
             "v goes out of scope. Its resource is dropped.",
             "n is initialized with the value count() returns",
-            "Copy of the value count() returns to n",
+            "n receives the value count() returns",
         ],
         must_not_contain: &[
             "Move from r to into_iter",
@@ -2515,8 +2515,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "n is initialized with the value count() returns",
             "k is initialized with the value sum() returns",
             "w is initialized with the value count() returns",
-            "Copy of the value sum() returns to k",
-            "Copy of the value count() returns to w",
+            "k receives the value sum() returns",
+            "w receives the value count() returns",
             "k goes out of scope",
             "w goes out of scope",
             "v goes out of scope. Its resource is dropped.",
@@ -3997,7 +3997,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Closure add_one is bound",
             "y is initialized with the value add_one() returns",
-            "Copy of the value add_one() returns to y",
+            "y receives the value add_one() returns",
         ],
         must_not_contain: &[
             "add_one's value is copied",
@@ -4158,7 +4158,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // value, not a resource (#484).
             "h's value is immutably borrowed by get; h is read-only while the borrow is live",
             "h is passed to get by shared reference (as self, implicitly borrowed). get may read it",
-            "Copy of the value get() returns to v",
+            "v receives the value get() returns",
             "h goes out of scope",
         ],
         must_not_contain: &[
@@ -4875,7 +4875,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "A shared reference through spaces is passed to len (as self). len may read through it",
             "spaces₂ is initialized with the value len() returns",
-            "Copy of the value len() returns to spaces₂",
+            "spaces₂ receives the value len() returns",
             "x₂ is bound to a copyable value",
             "x₂ goes out of scope",
             "x₂, immutable. x₂ shadows x: it is a new variable named x, declared on line 10",
@@ -6576,16 +6576,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (#872); the `break` and `return` arms end the borrow in the arm.
         // The merge after branches that moved a value and then left
         // early says how they left: panicked, continued, returned
-        // (two arms), return and break mixed; a `&mut` that was
-        // returned is still held. All were "isn't moved in any of the
-        // branches above", as if nothing had moved it.
+        // (two arms), return and break mixed. The returned `&mut`
+        // reborrows through r on the path that returns early.
         must_contain: &[
             "s still owns its resource here: the branch that moved s panicked before reaching this point",
             "c still owns its resource here: the branch that moved c continued to the next iteration before reaching this point",
             "t still owns its resource here: the branches that moved t returned before reaching this point",
             "m still owns its resource here: the branches that moved m left early (return, break) before reaching this point",
-            "r still holds its mutable reference here: the branch that moved r returned before \
-             reaching this point",
+            "a mutable reference to *r, reborrowed through r, is returned to the caller; the data it points to is not copied",
             "s goes out of scope. Its resource is dropped.",
             "total isn't moved in any of the branches above",
         ],
@@ -8347,7 +8345,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // already holds on main (the wording from #178 covers these
         // shapes); the entry pins it.
         must_contain: &[
-            "Copy of the value pick() returns to r",
+            "r receives the value pick() returns",
             "r's borrow ends (what it borrows from isn't shown)",
             "Copy from *rr[0] to r",
             "Copy from *b to s",
@@ -12767,8 +12765,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // #737: the value comes from the call, not from a variable
             // that happens to share the method's name.
             "len is initialized with the value len() returns",
-            "Copy of the value len() returns to len",
-            "Copy of the value len() returns to m",
+            "len receives the value len() returns",
+            "m receives the value len() returns",
             // #737: `(u, 1).1` is a field of a temporary: k still gets
             // its (Copy) value.
             "k is bound to a copyable value",
@@ -12797,7 +12795,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy of the value inside the Option last() returns to w",
             "Copy of the value inside the Ok that map() returns to d",
             "Copy to n",
-            "Copy of the value len() returns to len",
+            "len receives the value len() returns",
         ],
         must_not_contain: &[
             "Copy of the value pop() returns to t",
@@ -13591,7 +13589,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from make to the caller",
             "Move from String::from to the caller",
-            "Copy of the value num() returns to the caller",
+            "The caller receives the value num() returns",
         ],
         must_not_contain: &[
             "Move from Some to",
@@ -13944,7 +13942,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "anonymous_copy2caller",
         must_contain: &[
-            "Copy of the value f() returns to x",
+            "x receives the value f() returns",
             "x is initialized with the value f() returns",
             "z is bound to a copyable value",
         ],
@@ -13969,11 +13967,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "anonymous_fnparam",
         must_contain: &[
-            "Copy of the value inc() returns to y",
+            "y receives the value inc() returns",
             "y is initialized with the value inc() returns",
-            "Copy of the value inc_by_ref() returns to c",
+            "c receives the value inc_by_ref() returns",
             "c is initialized with the value inc_by_ref() returns",
-            "the value x points to is immutably borrowed by +",
+            "Copy from x to +. The operator reads the value x points to through the copied reference",
+            "The value five() returns is passed to inc",
             "z's value is copied",
         ],
         must_not_contain: &[
@@ -13982,7 +13981,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "acquires ownership of a resource",
             "is the owner of the resource",
             "Copy from z to +",
-            "=+",
+            "=Copy from x to +",
         ],
     },
     TooltipExpect {
@@ -14638,13 +14637,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to s1",
             "s1 acquires ownership of a resource",
             "s1 is the owner of the resource",
-            "Copy of the value calculate_length() returns to len",
+            "len receives the value calculate_length() returns",
             "len is initialized with the value calculate_length() returns",
             "s1's resource is immutably borrowed by calculate_length; s1 is read-only while the borrow is live",
             "len's value is immutably borrowed by println!; len is read-only while the borrow is live",
             "s1's resource is immutably borrowed by println!; s1 is read-only while the borrow is live",
             "s1 goes out of scope. Its resource is dropped.",
-            "Copy of the value len() returns to the caller",
+            "The caller receives the value len() returns",
             "the resource s points to is immutably borrowed by len",
         ],
         must_not_contain: &[
@@ -15135,7 +15134,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r is bound to a value",
             "r.width is bound to a copyable value",
             "r.height is bound to a copyable value",
-            "Copy of the value area() returns to a",
+            "a receives the value area() returns",
             "a is initialized with the value area() returns",
             "r's value is immutably borrowed by area; r is read-only while the borrow is live",
             "r's value is immutably borrowed by print_area; r is read-only while the borrow is live",
@@ -15150,15 +15149,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "testBorrow",
         must_contain: &[
-            "the value x points to is immutably borrowed by *",
+            "Copy from x to *. The operator reads the value x points to through the copied reference",
             "num is bound to a copyable value",
-            "Copy of the value square() returns to result",
+            "result receives the value square() returns",
             "num's value is immutably borrowed by square; num is read-only while the borrow is live",
             "result is initialized with the value square() returns",
             "num's value is immutably borrowed by println!; num is read-only while the borrow is live",
             "result's value is immutably borrowed by println!; result is read-only while the borrow is live",
         ],
         must_not_contain: &[
+            "=Copy from x to *",
             "(moved from",
             "(copied from",
             "acquires ownership of a resource",
@@ -20959,15 +20959,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). \
              s, which f captured, is dropped during the call",
-            "Copy of the value f() returns into a Some value held by _x",
+            "_x receives a Some value holding the value f() returns",
             "g is moved into the call (an FnOnce closure can only be called once). \
              t, which g captured, is dropped during the call",
-            "Copy of the value h() returns into a Some value held by z",
+            "z receives a Some value holding the value h() returns",
             "k is moved into the call (an FnOnce closure can only be called once). \
              w, which k captured, is dropped during the call",
             "m is moved into the call (an FnOnce closure can only be called once). \
              q, which m captured, is dropped during the call",
-            "Copy of the value m() returns to the caller",
+            "The caller receives a Some value holding the value m() returns",
         ],
         must_not_contain: &[
             "f's value is copied",
@@ -21124,7 +21124,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from café to t",
             "café goes out of scope. No resource is dropped.",
             "Move from t to länge",
-            "Copy of the value länge() returns to n",
+            "n receives the value länge() returns",
             "p.größe holds a copyable value",
             "Immutable borrow from 名前 to r",
             "名前 goes out of scope. Its resource is dropped.",
@@ -22327,6 +22327,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "call_arg_inner_call_1161",
         must_contain: &[
+            "The value run() returns is passed to std::process::exit",
             "Move from config to run",
             "Move from s to tag",
             "s's resource is moved",
@@ -22334,7 +22335,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "Move from config to std::process::exit",
-            "to std::process::exit",
+            "config to std::process::exit",
             // s's String was never drawn as moved into tag.
             "=s goes out of scope. Its resource is dropped.",
             // process::exit never returns: main's `}` is never reached,
@@ -22434,11 +22435,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "ctor_call_value_1183",
         must_contain: &[
             "_x is initialized with a Some value holding the value one() returns",
-            "Copy of the value one() returns into a Some value held by _x",
+            "_x receives a Some value holding the value one() returns",
             "_y is initialized with a Some value holding the value h() returns",
-            "Copy of the value h() returns into a Some value held by _y",
+            "_y receives a Some value holding the value h() returns",
             "_p is initialized with an Ok value holding the value one() returns",
-            "Copy of the value one() returns into an Ok value held by _p",
+            "_p receives an Ok value holding the value one() returns",
             "_f is initialized with a Some value",
         ],
         must_not_contain: &[
@@ -28926,6 +28927,120 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c's resource is moved to z when the block ends with break 'blk Some(c())",
         ],
     },
+    TooltipExpect {
+        // Borrowck MIR shows copies of shared, a loan through reuse,
+        // a move of moved, a call writing a result, and an Ok aggregate
+        // consuming the success value of Try::branch.
+        name: "rv3_direct_value_flow",
+        must_contain: &[
+            "n is initialized with the value Make() returns",
+            "Copy from shared to take",
+            "Move from moved to take",
+            "The caller receives the value answer() returns",
+            "The caller receives a Some value holding a tuple whose second element is the value answer() returns",
+            "owned's resource is moved to the caller",
+            "pending's resource is moved into the `?`. If pending is `Ok`, the returned value can be an Ok value holding the value inside it if execution reaches that construction. If pending is `Err`, the `?` returns early.",
+            "a mutable reference to *reuse, reborrowed through reuse, is returned to the caller; the data it points to is not copied",
+        ],
+        must_not_contain: &[
+            "The caller receives a Some value holding the value answer() returns",
+            "n is initialized with a Make value",
+            "take reads from shared",
+            "Move from reuse to touch",
+            "Copy of the value answer() returns to the caller",
+            "Move from owned to Ok",
+            "pending's resource is moved to the caller",
+            "reuse's mutable reference is moved to the caller",
+        ],
+    },
+    TooltipExpect {
+        name: "rv3_custom_try_value_flow",
+        // The input holds only a bool. Try::branch constructs a String on success.
+        must_contain: &[
+            "pending's value is moved into the `?`. If pending produces an output value, the returned value can be an Ok value holding that output if execution reaches that construction. If pending produces a residual, the `?` returns early.",
+            "pending's value is moved into the `?`. If pending produces an output value, the returned value can be an Ok value holding a Some value holding that output if execution reaches that construction. If pending produces a residual, the `?` returns early.",
+            "pending.0's value is moved",
+        ],
+        must_not_contain: &[
+            "If pending produces an output value, the caller receives an Ok value holding the value inside it.",
+            "pending.0's value is moved to the caller",
+        ],
+    },
+    TooltipExpect {
+        name: "rv3_review_value_arguments",
+        // Borrowck MIR passes the guard's binding by value on its arm and
+        // copies shared in both alternative guards. The tuple's .0 reaches
+        // take; .1 drops in the caller. ignore returns unrelated data and
+        // the compiler accepts the write to text inside the loop.
+        must_contain: &[
+            "Copy from x to pred",
+            "Copy from shared to take",
+            "Move from left to take",
+            "Move from right to (temporary)",
+            "Move from first to take_first",
+            "Move from second to inspect",
+            "The value answer() returns is passed to take",
+            "Copy from r to ignore",
+        ],
+        must_not_contain: &[
+            "(o as Some).0",
+            "Move from right to take",
+            "Move from left to (temporary)",
+            "Move from second to take_first",
+            "the resource r points to is immutably borrowed by the `for` loop's iterator",
+            "the `for` loop's iterator no longer borrows the resource r points to",
+        ],
+    },
+    TooltipExpect {
+        name: "rv3_review_value_results",
+        // The executable probe returns a caller-local reference through a
+        // pointer, borrows the string buffer, casts 300_u16 to 44_u8, and
+        // drops the first payload before returning the second residual.
+        must_contain: &[
+            "a reference to *p is returned to the caller; the data it points to is not copied. The pointee must stay valid for the lifetime of the returned reference",
+            "a reference to the string data borrowed through s is returned to the caller; the data it points to is not copied",
+            "n receives the value Make() returns, converted to u8",
+            "n is initialized with the value Make() returns, converted to u8",
+            "n is initialized with a copy of the value pointed to by the reference inside the Option MakeRef() returns",
+            "Copy of the value pointed to by the reference inside the Option MakeRef() returns to n",
+            "The caller receives a tuple whose first element is the value answer() returns",
+            "a's resource is moved into the `?`. If a is `Ok`, the returned value can be an Ok value holding a Pair value with the value inside it in field 0 if execution reaches that construction. If a is `Err`, the `?` returns early.",
+        ],
+        must_not_contain: &[
+            "p is a static",
+            "a reference to *s, reborrowed through s, is returned to the caller",
+            "=n receives the value Make() returns",
+            "the reference inside a MakeRef value",
+            "The caller receives the value answer() returns",
+            "If a is `Ok`, the caller receives",
+            "If a is `Ok`, the caller gets the value inside it",
+        ],
+    },
+    TooltipExpect {
+        name: "rv3_review_copy_try",
+        // The input is still available after ?. MIR copies the input and
+        // Try::branch makes a fresh String on the Continue edge.
+        must_contain: &[
+            "The `?` takes a copy of pending. If it produces an output value, text is initialized with that output. Otherwise the `?` returns early.",
+        ],
+        must_not_contain: &[
+            "text is initialized with a copy of a value inside pending",
+            "Partial copy from pending to text",
+        ],
+    },
+    TooltipExpect {
+        name: "known_bugs/1699_try_projected_place",
+        // MIR moves the Result from the allocation and uses the Ok
+        // payload to initialize text. Rust still frees the allocation.
+        must_contain: &[
+            "*moved's resource is moved into the `?`. If *moved is `Ok`, text gets the value inside it. Otherwise the `?` returns early.",
+            "text acquires ownership of the resource the `?` takes out of *moved's `Ok`",
+            "**nested's resource is moved into the `?`. If **nested is `Ok`, text gets the value inside it. Otherwise the `?` returns early.",
+        ],
+        must_not_contain: &[
+            "If moved is `Ok`",
+        ],
+    },
 ];
 
 #[test]
@@ -29015,6 +29130,79 @@ fn runtime_drop_facts_cover_first_range_visit_and_skip_dead_writes_1909() {
     let first = fact_row(fact_body(facts, "first_iteration"), 29);
     assert!(first["facts"].as_array().unwrap().iter().any(|f|
         f["ev"] == "Drop" && f["path"] == "s" && f["how"] == "drops"), "{first}");
+}
+
+#[test]
+fn direct_transfers_keep_mir_occurrences_on_the_same_row() {
+    let tl = run_with_local_backend("rv3_direct_value_flow").timeline_panel_string();
+    for line in [12, 13] {
+        assert_eq!(tooltip_of_id(&tl, &format!("shared>take@L{line}:arrow:copy")).as_deref(),
+            Some("Copy from shared to take"));
+    }
+    let loan = rv_elements(&tl, "reuse@L14:dot:").into_iter().map(|e| e.1).collect::<Vec<_>>().join(" ");
+    assert!(loan.contains("mutable reborrow") && loan.contains("reuse can't be used until touch returns"), "{loan}");
+    // Their source row is shared. The MIR stages left, receives answer's
+    // result and stages right, in order, before building the tuple and Some.
+    let marks: Vec<_> = ["left>caller@L32:arrow:move", "answer>caller@L32:arrow:copy", "right>caller@L32:arrow:move"]
+        .into_iter().map(|id| {
+            let [(_, _, _, (_, bottom))] = rv_elements(&tl, id).try_into().unwrap_or_else(|marks: Vec<_>| {
+                panic!("expected one arrow for {id}, found {marks:?}")
+            });
+            bottom
+        }).collect();
+    assert!(marks.windows(2).all(|pair| pair[0] < pair[1]), "return arrows are out of evaluation order: {marks:?}");
+}
+
+#[test]
+fn arithmetic_reference_copies_explain_each_referent_read() {
+    // Forwarding Add loads its shared operand through one reference.
+    // Forwarding Mul loads both operands, even when they come from x.
+    for (fixture, operator, row, count) in [("anonymous_fnparam", "+", 15, 1), ("testBorrow", "*", 2, 2)] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let copies = rv_elements(&svg, &format!("x>{operator}@L{row}:arrow:copy"));
+        let text = format!("Copy from x to {operator}. The operator reads the value x points to through the copied reference");
+        assert_eq!(copies.iter().map(|(_, tip, ..)| tip.as_str()).collect::<Vec<_>>(),
+            vec![text.as_str(); count], "{fixture}");
+    }
+}
+
+#[test]
+fn same_row_call_result_arrives_before_its_use() {
+    let svg = run_with_local_backend("rv3_direct_value_flow").timeline_panel_string();
+    let row = read_corpus("rv3_direct_value_flow").lines()
+        .position(|line| line.contains("let held = answer(); take(held);")).unwrap() + 1;
+    let y = |id: &str| rv_elements(&svg, id).first().unwrap_or_else(|| panic!("missing {id}")).3.1;
+    let arrival = y(&format!("answer>held@L{row}:arrow:copy"));
+    let argument = y(&format!("held>take@L{row}:arrow:copy"));
+    assert!(arrival < argument, "call result at y={arrival}, argument copy at y={argument}");
+}
+
+#[test]
+fn try_field_moves_once_through_returned_constructors() {
+    // Coincident identical move dots merge in SVG. Count the events
+    // behind the dots via the installed plugin's existing debug trace.
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir(&src).unwrap();
+    fs::write(dir.path().join("Cargo.toml"),
+        "[package]\nname = \"user-code\"\nversion = \"0.1.0\"\nedition = \"2024\"\n").unwrap();
+    fs::copy(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rust-toolchain.toml"),
+        dir.path().join("rust-toolchain.toml")).unwrap();
+    fs::write(src.join("lib.rs"), read_corpus("rv3_custom_try_value_flow")).unwrap();
+    let trace = dir.path().join("events.log");
+    let out = Command::new("cargo").arg("rv-plugin").env("RUSTVIZ_DEBUG_LOG", &trace)
+        .current_dir(dir.path()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let trace = fs::read_to_string(trace).unwrap();
+    let (_, events) = trace.split_once("processed events [").unwrap();
+    let (events, _) = events.split_once("processed line map").unwrap();
+    let moves: Vec<_> = events.split("\n    (\n").filter_map(|entry| {
+        let (row, event) = entry.split_once(",\n        Move {\n")?;
+        let (from, _) = event.split_once("\n            to:")?;
+        from.lines().any(|line| line.trim() == r#"name: "pending.0","#).then_some(row.trim())
+    }).collect();
+    // In both functions the bool travels with Pending into Try::branch.
+    assert_eq!(moves, ["32", "36"]);
 }
 
 #[test]
@@ -42177,6 +42365,7 @@ fn loan_ends_before_conflicting_use_1529_1516() {
               "The old value at *m is dropped and the replacement is stored there"][..],
             &["r3 no longer borrows the resource m points to",
               "The old value at *m is dropped and the replacement is stored there"][..],
+              "*m acquires ownership of a new resource; its previous resource is dropped"][..],
             &["m.a's resource is no longer immutably borrowed",
               "The old value at m.a is dropped and the replacement is stored there"][..],
         ][..]),
@@ -42187,6 +42376,17 @@ fn loan_ends_before_conflicting_use_1529_1516() {
                 "{snippet}: no dot says, in this order, {seq:#?}\ndots: {tips:#?}");
         }
     }
+    // The shared reference is copied at String::from. Its last use and
+    // the store both belong to L42, with distinct marks in MIR order.
+    let svg = run_with_local_backend("write_after_reborrow_1516").timeline_panel_string();
+    let end = "r3 no longer borrows the resource m points to";
+    let write = "*m acquires ownership of a new resource; its previous resource is dropped";
+    assert_eq!(tooltip_of_id(&svg, "m@L42:dot:static_reacquire").as_deref(), Some(end));
+    assert_eq!(tooltip_of_id(&svg, "m@L42:dot:acquire").as_deref(), Some(write));
+    let y = |id| rv_elements(&svg, id).into_iter().find(|e| e.0 == id).unwrap().3.0;
+    let (ended, assigned) = (y("m@L42:dot:static_reacquire"), y("m@L42:dot:acquire"));
+    assert!(ended.is_finite() && assigned.is_finite() && ended < assigned);
+
     // Each borrow of the pair on its own: no dot lists both before an end.
     let tips = tooltip_lines(&run_with_local_backend("same_line_borrows_1529").timeline_panel_string());
     for (a, b) in [("a", "b"), ("r", "m"), ("m", "r"), ("x", "m")] {
@@ -42906,6 +43106,39 @@ fn imaginary_unassigned_join_explains_the_runtime_drop() {
     assert!(rv_elements(&svg, "s@L5:dot:").iter().any(|(_, t, ..)| t.contains("assigned on every path that runs")
         && t.contains("can't be used")));
     assert!(timeline_tooltips(&svg).iter().any(|t| t == "s goes out of scope. Its resource is dropped."));
+}
+
+#[test]
+fn shadowed_match_arm_keeps_its_drawn_move_1804() {
+    // Borrowck MIR moves s into drop on the wildcard's imaginary
+    // successor. The executable successor still drops s at scope exit.
+    let name = "rv3_issues/1804_arm_shadowed_by_wildcard";
+    let rv = run_with_local_backend(name);
+    let svg = rv.timeline_panel_string();
+    let arrow = tooltip_of_id(&svg, "s>drop@L6:arrow:move");
+    let segment = tooltip_of_id(&svg, "s@L5-6:branch_line:full_privilege");
+    assert_eq!(
+        (arrow.as_deref(), segment.as_deref()),
+        (Some("Move from s to drop"), Some("s's value was moved out, so it can't be used here")),
+    );
+    check_review_tip(&svg, "s@L10:dot:owner_go_out_of_scope",
+        &["s goes out of scope. Its resource is dropped."], &["runtime drop flag"]);
+    let (violations, _, _) = common::oracle::check(&read_corpus(name), &svg, &rv.code_panel_string());
+    assert!(violations.is_empty(), "{name}: {violations:?}");
+}
+
+#[test]
+fn shadowed_call_keeps_the_moves_and_copies_into_its_argument() {
+    // In borrowck MIR the shadowed arm builds Some from the moved String
+    // or from both copies of count, then passes that aggregate to take.
+    let svg = run_with_local_backend("rv3_shadowed_call_arguments").timeline_panel_string();
+    assert_eq!(tooltip_of_id(&svg, "owned>take@L9:arrow:move").as_deref(),
+        Some("Move from owned to take"));
+    let copies = rv_elements(&svg, "count>take@L10:arrow:copy");
+    assert_eq!(copies.len(), 2);
+    assert!(copies.iter().all(|(_, tip, ..)| tip == "Copy from count to take"));
+    assert!(rv_elements(&svg, "owned>Some@L9:arrow:").is_empty());
+    assert!(rv_elements(&svg, "count>Some@L10:arrow:").is_empty());
 }
 
 #[test]
@@ -44082,7 +44315,9 @@ fn fork_after_condition_evaluation_1916() {
     // &s compiles before the outer condition and gives E0382 after the
     // condition's inner if. The outer fork describes the latter point.
     let svg = run_with_local_backend("rv3_1916_fork_after_condition").timeline_panel_string();
-    let tip = tooltip_of_id(&svg, "s@L4:dot:branch+owner_drop_at_reassign").expect("outer fork");
+    let tip = tooltip_of_id(&svg, "s@L4:dot:branch+acquire+owner_drop_at_reassign").expect("outer fork");
+    // The assignment's String::new() result now arrives as its own acquire
+    // event on the same row, so the dot's id carries it.
     assert_review_title(&tip, &["The borrow checker can't prove that s holds a value at this branch decision."],
         &["when this conditional begins", "s is live in a conditional expression"]);
 }
