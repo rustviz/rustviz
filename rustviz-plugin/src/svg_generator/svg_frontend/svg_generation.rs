@@ -1121,7 +1121,7 @@ fn one_row_layout(visualization_data: &mut VisualizationData) -> BTreeSet<usize>
     out
 }
 
-/// The rows of code that never runs (`StateTable::dead_row`) inside an
+/// The rows of code that never runs (`StateTable::dead_rows`) inside an
 /// `else { .. }` block and outside every conditional drawn with arms: the
 /// dead `else` of an irrefutable `if let`, drawn inline (#987). (Not the
 /// code after an `if let` whose body always leaves: nothing is drawn for

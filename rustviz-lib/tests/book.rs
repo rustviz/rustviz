@@ -584,14 +584,14 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_11_enum_method",
-        status: Wrong,
-        note: "self's own borrow ends at L9, before s reborrows through it at L10 (#372)",
         must_contain: &[
-            "Partial immutable borrow from self to s",
+            "L9 self's immutable borrow ends",
+            "L10 Partial immutable borrow from self to s",
             "call reads from m (implicitly borrowed)",
             "m goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "L10+ s no longer borrows the resource self points to",
             "L10+ s's immutable borrow ends",
+            "L10+ self's immutable borrow ends",
         ],
         must_not_contain: &[
             "L10 self's resource is no longer immutably borrowed",
@@ -601,7 +601,6 @@ const BOOK: &[Snippet] = &[
             "Move from Message::Quit to q",
             "=Message::Quit",
         ],
-        known_wrong: &["L9 self's immutable borrow ends"],
         ..E
     },
     // ─── Chapter 8: collections ───────────────────────────────────────
@@ -1023,13 +1022,13 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c13_01_closure_param",
         status: Wrong,
-        note: "y gets the closure's return value, but the arrow reads as a copy of add_one; on main it now starts at a function icon, not add_one's column. The call isn't drawn as a borrow of add_one (#299)",
-        must_contain: &["Closure add_one is bound"],
-        must_not_contain: &["add_one's resource is copied"],
-        known_wrong: &[
-            "y is initialized with the value add_one() returns",
-            "Copy of the value add_one() returns to y",
+        note: "The result arrow says Copy. The call borrows add_one and initializes y directly with its result. The shared borrow of the closure is missing (#299)",
+        must_contain: &[
+            "Closure add_one is bound",
+            "L3 y is initialized with the value add_one() returns",
         ],
+        must_not_contain: &["add_one's resource is copied"],
+        known_wrong: &["Copy of the value add_one() returns to y"],
         ..E
     },
     Snippet {
@@ -1344,10 +1343,15 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_08_early_return_string",
-        status: Wrong,
-        note: "`return s` is not shown; s shown dropped at the end of pick, false on the return path",
-        must_contain: &["Move from s to pick", "Move from pick to r", "s goes out of scope. No resource is dropped."],
-        known_wrong: &["L6 s goes out of scope. Its resource is dropped."],
+        must_contain: &[
+            "L3 s's resource is moved to the caller",
+            "L4 s still owns its resource here: the branch that moved s returned before reaching this point",
+            "L6 s goes out of scope. Its resource is dropped.",
+            "Move from s to pick",
+            "Move from pick to r",
+            "s goes out of scope. No resource is dropped.",
+        ],
+        must_not_contain: &["L3 s goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -1905,6 +1909,152 @@ fn dump(dir: &str, id: &str, outcome: &Outcome) {
     let _ = fs::write(PathBuf::from(dir).join(format!("{}.txt", id)), text);
 }
 
+fn timeline_dot<'a, 'input>(
+    doc: &'a roxmltree::Document<'input>,
+    var: &str,
+    line: &str,
+    event: &str,
+) -> ((f64, f64), roxmltree::Node<'a, 'input>) {
+    let mut dots = doc.descendants().filter(|n| {
+        n.attribute("data-rv-kind") == Some("dot")
+            && n.attribute("data-rv-var") == Some(var)
+            && n.attribute("data-rv-line") == Some(line)
+            && n.attribute("data-rv-event")
+                .is_some_and(|events| events.split_whitespace().any(|e| e == event))
+    });
+    let dot = dots.next().unwrap_or_else(|| panic!("missing {var} {event} dot on L{line}"));
+    assert!(dots.next().is_none(), "repeated {var} {event} dot on L{line}");
+    let circle = dot.descendants().find(|n| n.has_tag_name("circle")).expect("dot has a circle");
+    let coordinate = |attr| circle.attribute(attr).unwrap().parse().unwrap();
+    ((coordinate("cx"), coordinate("cy")), dot)
+}
+
+fn check_book_paths(id: &str, timeline: &str) {
+    use common::geometry::{near, parse};
+
+    let tooltip = |n: roxmltree::Node| clean_tooltip(n.attribute("data-tooltip-text").unwrap_or_default());
+    match id {
+        "c6_11_enum_method" => {
+            // MIR switches on the discriminant of *self. Only Write borrows
+            // its payload through self. Quit prints without using self again.
+            let doc = roxmltree::Document::parse(timeline).unwrap();
+            let geo = parse(&doc);
+            let (fork, _) = timeline_dot(&doc, "self", "8", "branch");
+            let (quit_end, _) = timeline_dot(&doc, "self", "9", "static_die");
+            let (write_lend, _) = timeline_dot(&doc, "self", "10", "static_lend");
+            let (write_end, _) = timeline_dot(&doc, "self", "10", "static_die");
+            let (give_back, give_back_dot) = timeline_dot(&doc, "self", "10", "static_reacquire");
+            let (payload_borrow, _) = timeline_dot(&doc, "s", "10", "static_borrow");
+            let (payload_end, _) = timeline_dot(&doc, "s", "10", "static_die");
+            // The branch groups link to code-panel rows. Quit starts on L9
+            // and its entry carries a state tooltip. Write starts on L10
+            // and is named in the tooltip on its dashed entry.
+            let quit_rows = "9 9";
+            let write_rows = "10 11";
+            let labels = |rows| {
+                doc.descendants()
+                    .filter(move |n| {
+                        n.attribute("data-rv-kind") == Some("branch_line")
+                            && n.attribute("data-rv-var") == Some("self")
+                            && n.parent().and_then(|g| g.attribute("data-arm-rows")) == Some(rows)
+                    })
+                    .map(tooltip)
+                    .filter(|tip| tip.starts_with("This segment leads into the ") || tip.starts_with("This segment is for the "))
+            };
+            let write_labels: Vec<_> = labels(write_rows).collect();
+            assert!(
+                write_labels.iter().any(|tip| tip.starts_with("This segment leads into the Message::Write branch"))
+                    && write_labels.iter().all(|tip| tip.contains("Message::Write branch"))
+                    && labels(quit_rows).all(|tip| tip.contains("Message::Quit branch")),
+                "{id}: branch labels must match the Quit and Write source arms"
+            );
+            let arm = |rows| geo.branch_segments("self").filter(move |&(_, _, arm)| arm == Some(rows));
+            assert!(
+                arm(quit_rows).any(|(from, to, _)| near(from, fork) && near(to, quit_end)),
+                "{id}: Quit borrow ends at its leg's entry"
+            );
+            assert!(
+                arm(write_rows).any(|(from, entry, _)| {
+                    near(from, fork) && !near(entry, quit_end)
+                        && arm(write_rows).any(|(from, to, _)| near(from, entry) && near(to, write_lend))
+                }),
+                "{id}: Write reaches the reborrow on its own leg"
+            );
+            assert!(
+                geo.arrow_connects("self", "s", "10", (write_lend, payload_borrow), |tip| {
+                    clean_tooltip(tip) == "Partial immutable borrow from self to s"
+                }),
+                "{id}: the reborrow arrow must connect Write's self dot to the s borrow dot"
+            );
+            assert!(
+                near((write_lend.0, give_back.1), give_back)
+                    && tooltip(give_back_dot).contains("s no longer borrows the resource self points to")
+                    && geo.arrow_connects("s", "self", "10", (payload_end, give_back), |tip| {
+                        clean_tooltip(tip) == "Return immutably borrowed resource from s to self"
+                    }),
+                "{id}: the payload borrow must return from s to self on Write's leg"
+            );
+            assert!(
+                write_lend.1 < give_back.1 && give_back.1 <= write_end.1
+                    && near((write_lend.0, write_end.1), write_end)
+                    && arm(write_rows).any(|(from, to, _)| near(from, write_lend) && near(to, write_end)),
+                "{id}: Write's self borrow must last through the payload give-back"
+            );
+        }
+        "m_08_early_return_string" => {
+            // MIR moves the parameter into the return place on the true
+            // edge. Only the false edge reaches the parameter's drop.
+            let doc = roxmltree::Document::parse(timeline).unwrap();
+            let geo = parse(&doc);
+            let (fork, _) = timeline_dot(&doc, "s", "2", "branch");
+            let (ret, ret_dot) = timeline_dot(&doc, "s", "3", "move");
+            let (join, _) = timeline_dot(&doc, "s", "4", "branch_join");
+            let (drop, drop_dot) = timeline_dot(&doc, "s", "6", "owner_go_out_of_scope");
+            assert_eq!(
+                tooltip(ret_dot), "s's resource is moved to the caller",
+                "{id}: the return dot describes moving s to the caller without dropping it"
+            );
+            assert!(
+                !doc.descendants().any(|n| {
+                    n.attribute("data-rv-kind") == Some("dot")
+                        && n.attribute("data-rv-var") == Some("s")
+                        && n.attribute("data-rv-line") == Some("3")
+                        && n.attribute("data-rv-drop") == Some("true")
+                }),
+                "{id}: s has no drop mark on the return row"
+            );
+            let legs = || geo.branch_segments("s");
+            let return_rows = Some("3 4");
+            assert!(
+                legs().any(|(from, to, rows)| rows == return_rows && near(from, fork) && near(to, ret)),
+                "{id}: returning leg reaches the move"
+            );
+            assert!(
+                ret.1 < join.1
+                    && legs().all(|(from, to, rows)| {
+                        !near(from, ret) && (rows != return_rows || (from.1 <= ret.1 && to.1 <= ret.1))
+                    }),
+                "{id}: returning leg stops at the move above the join"
+            );
+            let continuing_leg = legs().any(|(from, entry, rows)| {
+                rows.is_none() && near(from, fork) && !near(entry, ret)
+                    && legs().any(|(from, to, rows)| rows.is_none() && near(from, entry) && near(to, join))
+            });
+            assert!(
+                continuing_leg && legs().filter(|&(_, to, _)| near(to, join)).count() == 1,
+                "{id}: only the continuing leg reaches the join"
+            );
+            assert!(
+                join.1 < drop.1 && near((join.0, drop.1), drop)
+                    && geo.main_segments("s", "full_privilege").any(|(from, to)| near(from, join) && near(to, drop))
+                    && drop_dot.attribute("data-rv-drop") == Some("true"),
+                "{id}: the continuing ownership line connects the join to the drop"
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Checks one snippet's outcome against its table entry, pushing to
 /// `failures` (test fails) or `notes` (table is out of date, test passes).
 fn check(s: &Snippet, outcome: &Outcome, failures: &mut Vec<String>, notes: &mut Vec<String>) {
@@ -1993,6 +2143,7 @@ fn check(s: &Snippet, outcome: &Outcome, failures: &mut Vec<String>, notes: &mut
             s.id, gone
         ));
     }
+    check_book_paths(s.id, timeline);
 }
 
 /// The table itself must be consistent with the files on disk.

@@ -4763,7 +4763,7 @@ pub struct VisualizationData {
     pub exits_at_split: BTreeSet<(usize, usize)>,
 
     /// Source rows of code that never runs (reached only by borrowck's
-    /// imaginary edges, `StateTable::dead_row`) that 2.x draws inline, in no
+    /// imaginary edges, `StateTable::dead_rows`) that 2.x draws inline, in no
     /// conditional's arms: the dead `else` of an irrefutable `if let`
     /// (#987). Set by `render_svg`; `data-rv-dead-rows` on the timeline.
     /// (Until that `else` is drawn as a branch of its own, #1873.)

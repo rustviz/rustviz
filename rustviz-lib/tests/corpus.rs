@@ -5366,13 +5366,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "shadow_matrix_scopes",
-        // An inner `let` ends with its block, and later uses go to the
-        // outer column. Main crashes on this file (#253); the false
-        // texts are main's for each fn on its own. Known gaps, not
-        // asserted: `loop_body`'s l₂ never goes out of scope (#256);
-        // `early_return` still drops r / r₂ at its unreachable `}`
-        // (#515). Before `return`'s drops (#411) looked names up per
-        // binding, `return r;` dropped r₂ there and not r.
+        // Inner bindings end with their blocks. The loop-local l₂ drops
+        // each iteration (#256). Both returns drop the outer r and move
+        // r₂. Neither binding reaches the function's closing brace
+        // (#411, #515). The negative pins cover regressions from #253.
         must_contain: &[
             // block_then_outer
             "a₂ is initialized with the value len() returns",
@@ -5391,8 +5388,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v₂ goes out of scope. Its resource is dropped.",
             // early_return: the first r is dropped at each `return`
             // (its drop dot ends its column, #410); r₂ is moved to the
-            // caller. `branches_that_diverge_stop_short` checks that only
-            // r₂'s column ends in a stop bar.
+            // caller or into `+`. `branches_that_diverge_stop_short`
+            // checks that this fixture has no stop bars.
             "r goes out of scope. Its resource is dropped.",
             // main: its own s / s₂, unrelated to param's
             "Move from param to s₂",
@@ -5407,12 +5404,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "shadow_matrix_patterns",
-        // Pattern bindings that reuse a name are new variables. Main
-        // crashes on this file (#253). Known wrong, not asserted (same
-        // as main with the bindings renamed): `for y in ys` says y₂
-        // "acquires ownership of a resource" (#504) and
-        // `let P { n, .. } = p` moves "from p" with p.n still dropping
-        // (#326).
+        // Pattern bindings that reuse a name are new variables (#253).
+        // The iterator supplies each i32 to y₂ (#504). The struct
+        // pattern moves p.n into n₂, which drops at scope end (#326).
         must_contain: &[
             // if_let_same_name
             "Move from s to s₂",

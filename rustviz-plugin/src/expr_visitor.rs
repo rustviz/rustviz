@@ -1330,18 +1330,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  pub fn return_type_of(&self,fn_expr:&Expr)->Option<Ty<'tcx>>{
-    let type_check = self.tcx.typeck(fn_expr.hir_id.owner);
-    let type_of_path = type_check.expr_ty(fn_expr);
-    let mut fn_sig = type_of_path.fn_sig(self.tcx).skip_binder().output().walk();
-    if let Some(return_type)= fn_sig.next(){
-      Some(return_type.expect_ty())
-    }
-    else {
-      None
-    }
-  }
-
   // updates the lifetime of a loan (as well as for each of the aliases associated with this loan)
   pub fn update_lifetime(&mut self, name: &String, line:usize){
     self.borrow_map.get_mut(name).unwrap().lifetime = line;

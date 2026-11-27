@@ -12,31 +12,26 @@ use std::process::{Command, Stdio};
 
 use rustviz_lib::{error_kind, ErrorKind, Rustviz, DOES_NOT_COMPILE_INTRO, UNSUPPORTED_PREFIX};
 
-/// Snippets the plugin refuses on `main` (it panics, which surfaces as
-/// "RustViz can't visualize this program yet"). The tests only need
-/// *one* of them to still be refused; one that starts visualizing is
-/// skipped. If they all start working, add a new one here.
-///
-/// The first is a deliberate refusal, not a bug: a match guard in a
-/// loop's body that assigns a new reference to a variable declared
-/// outside it leaves it pointing to one of two values in the later arms,
-/// and the loans can come back round to the guard; where they end isn't
-/// worked out for that yet (#603 draws it outside loops). The second is
-/// an ordinary crash (#210).
-const KNOWN_PANICKING: &[(&str, &str)] = &[
-    // A match guard in a loop that assigns a new reference to an outer
-    // variable. (A guard that moves one, #247, and one outside a loop
-    // that assigns a reference, #603, render now.)
-    (
-        "guard_assigns_reference_in_loop",
-        "fn main() {\n    let s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let mut r = &t;\n    for n in 0..2 {\n        match Some(n) {\n            Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n            _ => println!(\"{}\", r),\n        }\n    }\n}\n",
-    ),
-    // Calling a closure with a `&mut` argument (#210).
-    (
-        "closure_mutref_arg",
-        "fn main() {\n    let mut s = String::from(\"a\");\n    let mut push = |q: &mut String| q.push('b');\n    push(&mut s);\n    println!(\"{}\", s);\n}\n",
-    ),
-];
+// Historical error cases now render: calling a closure with a &mut argument
+// (#210), writing through a reference in both arms (#264), shadowing a
+// moved binding (#253), moving in a guard (#247), and repointing an outer
+// reference in a guard outside a loop (#603).
+
+/// Active refusal. A guard in a loop assigns a new reference to an outer
+/// binding. Loans from an iteration can reach the guard again, and the
+/// renderer does not work out where those loans end yet.
+const GUARD_ASSIGNS_REFERENCE_IN_LOOP: &str = r#"fn main() {
+    let s = String::from("a");
+    let t = String::from("b");
+    let mut r = &t;
+    for n in 0..2 {
+        match Some(n) {
+            Some(_) if { r = &s; r.len() > 3 } => println!("{}", r),
+            _ => println!("{}", r),
+        }
+    }
+}
+"#;
 
 /// The Rust Book's "two mutable borrows" example (ch04-02).
 const BOOK_TWO_MUT_BORROWS: &str = r#"fn main() {
@@ -106,89 +101,45 @@ fn run_plugin_raw(src: &str) -> (bool, String) {
 
 #[test]
 fn plugin_panic_prints_one_clean_unsupported_line() {
-    let mut panicked = 0;
-    for (name, src) in KNOWN_PANICKING {
-        let (ok, stderr) = run_plugin_raw(src);
-        if ok {
-            eprintln!("{} no longer panics the plugin; skipping", name);
-            continue;
-        }
-        panicked += 1;
-        let lines: Vec<&str> = stderr.lines().filter(|l| l.contains(UNSUPPORTED_PREFIX)).collect();
-        assert_eq!(lines.len(), 1, "{}: expected one unsupported line in:\n{}", name, stderr);
-        let line = lines[0];
-        assert!(
-            line.contains("RustViz can't visualize this program yet (internal error at ")
-                && line.contains(".rs:")
-                && line.ends_with(
-                    "Please report it at https://github.com/rustviz/rustviz/issues with your snippet."
-                ),
-            "{}: unexpected line {:?}",
-            name,
-            line
-        );
-        for noise in ["panicked at", "RUST_BACKTRACE", "Caused by", "process didn't exit", "rv-plugin-driver"] {
-            assert!(!stderr.contains(noise), "{}: {:?} leaked into stderr:\n{}", name, noise, stderr);
-        }
-
-        // ...and the library turns it into an Unsupported error.
-        let err = render(src).expect_err("known-panicking snippet rendered");
-        assert_eq!(error_kind(err.as_ref()), ErrorKind::Unsupported, "{}: {}", name, err);
-        assert!(err.to_string().starts_with("RustViz can't visualize this program yet"), "{}", err);
-    }
+    let (ok, stderr) = run_plugin_raw(GUARD_ASSIGNS_REFERENCE_IN_LOOP);
+    assert!(!ok, "the loop guard now renders; update the active error fixture");
+    let lines: Vec<&str> = stderr.lines().filter(|l| l.contains(UNSUPPORTED_PREFIX)).collect();
+    assert_eq!(lines.len(), 1, "expected one unsupported line in:\n{stderr}");
+    let line = lines[0];
     assert!(
-        panicked > 0,
-        "none of KNOWN_PANICKING panics the plugin any more; add a snippet that does"
+        line.contains("RustViz can't visualize this program yet (internal error at ")
+            && line.contains(".rs:")
+            && line.ends_with(
+                "Please report it at https://github.com/rustviz/rustviz/issues with your snippet."
+            ),
+        "unexpected line {line:?}"
     );
-}
+    for noise in ["panicked at", "RUST_BACKTRACE", "Caused by", "process didn't exit", "rv-plugin-driver"] {
+        assert!(!stderr.contains(noise), "{noise:?} leaked into stderr:\n{stderr}");
+    }
 
-/// Snippets that trip an internal-state guard, with the reason the
-/// student-facing line must give (#134). The reason must be readable: no
-/// bare "not possible", and no std `unwrap()` text (a missing lookup says
-/// so in words). As with `KNOWN_PANICKING`, a snippet that starts working
-/// is skipped, but at least one must still trip a guard.
-const GUARD_REASONS: &[(&str, &str, &str)] = &[
-    // A match guard in a loop that assigns a new reference to an outer
-    // variable. (Shadowing a moved variable (#253), a guard that moves one
-    // (#247), and one outside a loop that assigns a reference (#603) used
-    // to be the example here; they render now.)
-    (
-        "guard_assigns_reference_in_loop",
-        "fn main() {\n    let s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let mut r = &t;\n    for n in 0..2 {\n        match Some(n) {\n            Some(_) if { r = &s; r.len() > 3 } => println!(\"{}\", r),\n            _ => println!(\"{}\", r),\n        }\n    }\n}\n",
-        "match guards that assign a new reference to a variable declared outside the guard",
-    ),
-    // A write through `*r` in both arms of an if/else (#264): the layout
-    // has no column for the event's timeline.
-    (
-        "write_through_ref_in_arms",
-        "fn main() {\n    let mut s = String::from(\"a\");\n    let t = String::from(\"b\");\n    let c = true;\n    let r = &mut s;\n    if c {\n        *r = t;\n    } else {\n        *r = String::new();\n    }\n}\n",
-        "no layout column for the timeline of event",
-    ),
-];
+    let err = render(GUARD_ASSIGNS_REFERENCE_IN_LOOP).expect_err("the loop guard now renders");
+    assert_eq!(error_kind(err.as_ref()), ErrorKind::Unsupported, "{err}");
+    assert!(err.to_string().starts_with("RustViz can't visualize this program yet"), "{err}");
+}
 
 #[test]
 fn plugin_internal_errors_give_a_readable_reason() {
-    let mut tripped = 0;
-    for (name, src, reason) in GUARD_REASONS {
-        let (ok, stderr) = run_plugin_raw(src);
-        if ok {
-            eprintln!("{} no longer trips an internal guard; skipping", name);
-            continue;
-        }
-        tripped += 1;
-        let line = stderr
-            .lines()
-            .find(|l| l.contains(UNSUPPORTED_PREFIX))
-            .unwrap_or_else(|| panic!("{}: no unsupported line in:\n{}", name, stderr));
-        assert!(line.contains("(internal error at "), "{}: {:?}", name, line);
-        assert!(line.contains(reason), "{}: reason {:?} missing from {:?}", name, reason, line);
-        for bad in ["not possible", "Not possible", "Option::unwrap", "Result::unwrap", "internal state:", "panicked at"] {
-            assert!(!stderr.contains(bad), "{}: {:?} leaked into:\n{}", name, bad, stderr);
-        }
-        let err = render(src).expect_err("guard snippet rendered");
-        assert_eq!(error_kind(err.as_ref()), ErrorKind::Unsupported, "{}: {}", name, err);
+    let (ok, stderr) = run_plugin_raw(GUARD_ASSIGNS_REFERENCE_IN_LOOP);
+    assert!(!ok, "the loop guard now renders; update the active error fixture");
+    let line = stderr
+        .lines()
+        .find(|l| l.contains(UNSUPPORTED_PREFIX))
+        .unwrap_or_else(|| panic!("no unsupported line in:\n{stderr}"));
+    let reason = "match guards that assign a new reference to a variable declared outside the guard";
+    assert!(line.contains(reason), "reason {reason:?} missing from {line:?}");
+    // The panic reason is part of the student-facing diagnostic (#134).
+    for bad in ["not possible", "Not possible", "Option::unwrap", "Result::unwrap", "internal state:", "panicked at"] {
+        assert!(!stderr.contains(bad), "{bad:?} leaked into:\n{stderr}");
     }
-    assert!(tripped > 0, "none of GUARD_REASONS trips a guard any more; add a snippet that does");
+    let err = render(GUARD_ASSIGNS_REFERENCE_IN_LOOP).expect_err("the loop guard now renders");
+    assert_eq!(error_kind(err.as_ref()), ErrorKind::Unsupported, "{err}");
+    assert!(err.to_string().contains(reason), "{err}");
 }
 
 #[test]
