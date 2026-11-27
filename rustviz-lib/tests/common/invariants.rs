@@ -426,7 +426,7 @@ fn says_maybe_moved(d: &Dot) -> bool {
 // (A conditional drop says "drop flag" or "... here only if ...": not the
 // Rc note's "the shared value is dropped only if that was its last Rc",
 // which is about the pointee, not whether the handle is dropped.)
-const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "here only if", "moved out earlier, so only", "Whatever it still holds (if anything)"];
+const PARTIAL_DROP_PHRASES: &[&str] = &["drop flag", "here only if", "Any remaining initialized fields that need dropping", "moved out earlier, so only", "Whatever it still holds (if anything)"];
 /// A move drawn on the column's own line that says it happens on some
 /// paths only (`break f` in a loop whose value is returned, #1171).
 const CONDITIONAL_MOVE_PHRASES: &[&str] = &["if the loop ended with"];
@@ -515,6 +515,7 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
     // left, or that a drop flag decides, contradicts the picture (the
     // reason the value may still be there isn't drawn).
     let whole_move = |p: &Dot| p.has("move") && on_main(p) && !contents_moved(p)
+        && !p.tip.starts_with("The pattern moves part of ")
         && !says_maybe_moved(p) && !CONDITIONAL_MOVE_PHRASES.iter().any(|c| p.tip.contains(c));
     for d in &fig.dots {
         let (reached, _) = meets_col(d, false);

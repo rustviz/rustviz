@@ -201,6 +201,8 @@ pub enum InteriorMut {
 /// See `Owner::elems_left`: element names (`arr[0]`) in index order.
 #[derive(Clone, Hash, PartialEq, Eq, Debug, Default)]
 pub struct ElemsLeft {
+    /// Slots with payload moves. True when every move from that slot takes a payload.
+    pub payloads: std::collections::BTreeMap<String, bool>,
     pub moved: Vec<String>,
     pub left: Vec<String>,
     /// When `left` is empty (patterns on several lines move every
@@ -479,6 +481,9 @@ pub struct Struct {
 /// identity on the event without changing that column's equality or hash.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RefBinding {
+    /// The enclosing MIR local of a pictured reference field. Its storage
+    /// ends with that local; the loan it holds still uses its own identity.
+    pub scope_owner: Option<rustc_middle::mir::Local>,
     pub local: Option<rustc_middle::mir::Local>,
     pub slice_item: bool,
 }
@@ -881,6 +886,17 @@ impl ResourceAccessPoint {
             Self::Owner(o) => o.local,
             Self::Struct(s) => s.local,
             _ => None,
+        }
+    }
+
+    /// The local whose storage this column represents. Temporary columns
+    /// can hold the local for a residual operand without being that binding.
+    pub(crate) fn scope_local(&self) -> Option<rustc_middle::mir::Local> {
+        if self.is_temporary() || self.is_static() { return None; }
+        match self {
+            Self::StaticRef(r) => r.binding.scope_owner.or(r.binding.local),
+            Self::MutRef(r) => r.binding.scope_owner.or(r.binding.local),
+            _ => self.owner_local(),
         }
     }
 
@@ -4306,6 +4322,9 @@ impl Event {
             // temporary, which keeps the rest (#469).
             Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::Owner(Owner { temp_part: Some(part), .. })), empties_temp, ..} => {
                 hover_messages::event_dot_move_out_of_temporary(&self.deref_name(my_name), &to.name(), part, *empties_temp)
+            }
+            Event::Move { is: ResourceTy::Index(ResourceAccessPoint::Struct(s), place, PlaceWrite::Update), .. } if s.is_member => {
+                format!("The pattern moves part of {} ({})", hover_messages::styled_name_html(my_name), hover_messages::styled_name_html(place))
             }
             // `[c, _] => …`: only the element `pair[0]` moves out (#1285).
             Event::Move{ is: is @ ResourceTy::Index(r, place, _), ..} if r.elems_left().is_some() => {

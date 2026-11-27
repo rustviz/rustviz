@@ -549,12 +549,6 @@ impl StateTable {
             .then_some(how)
     }
 
-    /// A normal scope-end drop (the column can already be out of storage
-    /// in the row's after-cell). Several sites must agree.
-    pub fn local_scope_drop(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>) -> Option<&'static str> {
-        self.drop_kind(function, column, row, local, false)
-    }
-
     pub fn reassignment_drop(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>) -> Option<&'static str> {
         self.drop_kind(function, column, row, local, true)
     }
@@ -1073,6 +1067,7 @@ mod tests {
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
+            scope_ends: Default::default(),
             residual_drops: Vec::new(),
             short_call_borrows: Default::default(),
             drop_holders: Default::default(),

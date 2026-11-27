@@ -8,7 +8,7 @@ use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, AutoBorrowMutability, Der
 use rustc_span::Span;
 use rustc_hir::{Expr, ExprKind, Path, def::Res, Pat, PatKind, QPath, HirId, StmtKind, Stmt, Block, UnOp};
 
-use crate::expr_visitor::{BodyRaps, RefData};
+use crate::expr_visitor::{BodyRaps, RapData, RefData};
 
 /// True iff the path `raw` ends in the whole function `String::from`, not in
 /// a longer name that merely starts with it (`String::from_utf8_lossy`,
@@ -766,19 +766,26 @@ pub fn collect_pat_bindings(
         // So are its reference fields (`h.r`, #1421).
         if let ResourceAccessPoint::Struct(st) = &rd.rap {
           if !st.is_member {
+            // Shared field columns belong to the declaration on this arm.
+            let field = |f: &RapData| match st.local {
+              Some(local) => raps.place(local, f.rap.name()).map(|rd| rd.rap.clone()),
+              None => Some(f.rap.clone()),
+            };
             let mut group: HashSet<u64> = HashSet::from([st.hash]);
             #[expect(clippy::iter_over_hash_type, clippy::disallowed_methods, reason = "collected into a set")]
             for f in raps.values() {
               if matches!(&f.rap, ResourceAccessPoint::Struct(m) if m.is_member && m.owner == st.hash) {
-                out.insert(f.rap.to_owned());
-                group.insert(*f.rap.hash());
+                if let Some(member) = field(f) {
+                  group.insert(*member.hash());
+                  out.insert(member);
+                }
               }
             }
             #[expect(clippy::iter_over_hash_type, clippy::disallowed_methods, reason = "collected into a set")]
             for f in raps.values() {
               if matches!(&f.rap, ResourceAccessPoint::MutRef(MutRef { member_of: Some(m), .. })
                 | ResourceAccessPoint::StaticRef(StaticRef { member_of: Some(m), .. }) if group.contains(m)) {
-                out.insert(f.rap.to_owned());
+                out.extend(field(f));
               }
             }
           }

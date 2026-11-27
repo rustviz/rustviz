@@ -124,9 +124,9 @@ struct ArrayStep {
     slice: bool,
 }
 
-fn array_steps<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &rustc_middle::mir::Body<'tcx>, p: Place<'tcx>) -> Option<Vec<ArrayStep>> {
+fn array_steps<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &rustc_middle::mir::Body<'tcx>, p: Place<'tcx>, prefix: usize) -> Option<Vec<ArrayStep>> {
     let mut steps = Vec::new();
-    for (base, elem) in p.iter_projections() {
+    for (base, elem) in p.iter_projections().skip(prefix) {
         // Moving the sole field of an enum variant takes the resource in
         // that array element (e.g. [Some(s), _]), as the element tooltip says.
         if let [ProjectionElem::Downcast(_, variant), ProjectionElem::Field(field, _)] = &p.projection[base.projection.len()..] {
@@ -141,7 +141,7 @@ fn array_steps<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &rustc_middle::m
                 let i = index(offset, from_end)?;
                 (i..i + 1, false)
             }
-            ProjectionElem::Subslice { from, to, from_end } if steps.len() + 1 == p.projection.len() =>
+            ProjectionElem::Subslice { from, to, from_end } if base.projection.len() + 1 == p.projection.len() =>
                 (from..index(to, from_end)?, true),
             _ => return None,
         };
@@ -150,9 +150,9 @@ fn array_steps<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &rustc_middle::m
     (!steps.is_empty()).then_some(steps)
 }
 
-pub(crate) fn array_operand_name<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &rustc_middle::mir::Body<'tcx>, p: Place<'tcx>, mut name: String) -> Option<String> {
+pub(crate) fn array_operand_name<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &rustc_middle::mir::Body<'tcx>, p: Place<'tcx>, prefix: usize, mut name: String) -> Option<String> {
     use std::fmt::Write;
-    for step in array_steps(tcx, body, p)? {
+    for step in array_steps(tcx, body, p, prefix)? {
         if step.slice { write!(name, "[{}..{}]", step.indices.start, step.indices.end).ok()?; }
         else { write!(name, "[{}]", step.indices.start).ok()?; }
     }
@@ -166,6 +166,8 @@ struct ArrayElemMoves<'a, 'tcx> {
     /// Length of each array whose immediate elements a move distinguishes.
     lengths: BTreeMap<Vec<u64>, u64>,
     moved: BTreeSet<Vec<u64>>,
+    payloads: BTreeSet<Vec<u64>>,
+    whole_slots: BTreeSet<Vec<u64>>,
     whole: bool,
     assigns: usize,
     at: Vec<(Location, Vec<u64>)>,
@@ -175,7 +177,7 @@ impl<'tcx> Visitor<'tcx> for ArrayElemMoves<'_, 'tcx> {
     fn visit_operand(&mut self, op: &Operand<'tcx>, loc: Location) {
         if let Operand::Move(p) = op {
             if p.local != self.local { return; }
-            if let Some(steps) = array_steps(self.tcx, self.body, *p) {
+            if let Some(steps) = array_steps(self.tcx, self.body, *p, 0) {
                 let mut prefix = Vec::new();
                 for (depth, step) in steps.iter().enumerate() {
                     self.lengths.insert(prefix.clone(), step.len);
@@ -183,6 +185,8 @@ impl<'tcx> Visitor<'tcx> for ArrayElemMoves<'_, 'tcx> {
                         for i in step.indices.clone() {
                             let mut path = prefix.clone();
                             path.push(i);
+                            if steps.len() < p.projection.len() { self.payloads.insert(path.clone()); }
+                            else { self.whole_slots.insert(path.clone()); }
                             self.moved.insert(path.clone());
                             self.at.push((loc, path));
                         }
@@ -266,7 +270,7 @@ impl crate::facts::BodyBindings {
         if !crate::expr_visitor_utils::needs_drop_in(tcx, *elem, rustc_middle::ty::TypingEnv::fully_monomorphized()) {
             return None;
         }
-        let mut v = ArrayElemMoves { tcx, body, local, lengths: BTreeMap::new(), moved: BTreeSet::new(), whole: false, assigns: 0, at: Vec::new() };
+        let mut v = ArrayElemMoves { tcx, body, local, lengths: BTreeMap::new(), moved: BTreeSet::new(), payloads: BTreeSet::new(), whole_slots: BTreeSet::new(), whole: false, assigns: 0, at: Vec::new() };
         v.visit_body(body);
         if v.whole || v.assigns > 1 || v.moved.is_empty() {
             return None;
@@ -305,6 +309,7 @@ impl crate::facts::BodyBindings {
             }
         }
         Some(crate::svg_generator::data::ElemsLeft {
+            payloads: v.payloads.iter().map(|p| (label(p), !v.whole_slots.contains(p))).collect(),
             moved: v.moved.iter().map(label).collect(), left: left.iter().map(label).collect(), last,
         })
     }

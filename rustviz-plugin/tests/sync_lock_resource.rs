@@ -1,6 +1,6 @@
 // std's lock types own an OS synchronization object. Whether they have
-// drop glue depends on the host's std (pthread on macOS, futex / SRW on
-// Linux / Windows), so the wording must not: always "resource" (#484).
+// drop glue depends on the target. Acquiring and borrowing a lock use
+// resource wording (#484); only an actual destructor gets a drop triangle.
 
 use std::sync::{Condvar, Mutex, RwLock};
 

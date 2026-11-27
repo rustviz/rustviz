@@ -1367,6 +1367,11 @@ pub(crate) enum StoredLoan {
 /// Coincident effects on one column can include a dot without an arrow.
 #[derive(Default, Debug)]
 pub struct RowLayout {
+    /// The scope-ending MIR occurrence selected before rows are shifted or
+    /// stacked. Two exits on the same printed line can have different drops.
+    pub(crate) scope_ends: BTreeMap<usize, crate::facts::ScopeEnd>,
+    /// The call ends the pictured control flow without a normal storage boundary.
+    pub(crate) terminal_calls: BTreeSet<usize>,
     /// Both column dots and the connecting arrow describe the same aggregate operand.
     pub(crate) pattern_payloads: BTreeMap<usize, (String, &'static str)>,
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
@@ -1414,6 +1419,8 @@ impl RowLayout {
     pub fn append(&mut self, other: &mut Self) {
         self.arm_points.append(&mut other.arm_points);
         self.pattern_payloads.append(&mut other.pattern_payloads);
+        self.terminal_calls.append(&mut other.terminal_calls);
+        self.scope_ends.append(&mut other.scope_ends);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.shadowed_borrow_lenders.append(&mut other.shadowed_borrow_lenders);
         self.closure_result_holders.append(&mut other.closure_result_holders);
