@@ -41862,10 +41862,10 @@ fn ref_old_loan_and_never_fn_ids_1486_1556_1557_1553() {
         ("self_assign_mut_ref_1556",
          &["r@L13:dot:resliced_in_place"][..],
          &["r@L13:dot:mutable_lend", "p.r@L24:dot:mutable_lend"][..]),
-        // r's old loan of a lasts to r's read on line 17 (the `_` arm) and
-        // to the re-point on line 14; not `a.len()`'s, which ends on line 10.
+        // B6 still draws the match-arm return on L14 after the L13 MIR edge.
+        // The other arm reads r on L17. The a.len() temporary ends on L10.
         ("repoint_ref_cond_call_loan_1557",
-         &["a@L14:dot:static_reacquire\"", "a@L17:dot:static_reacquire\"", "a2@L31:dot:static_reacquire\"",
+         &["a@L14:dot:static_reacquire\"", "a@L17:dot:static_reacquire\"", "a2@L30:dot:static_reacquire\"",
            "a2@L34:dot:static_reacquire\"", "a3@L47:dot:static_reacquire\""][..],
          &["a@L10:dot:static_reacquire\"", "r@L10:dot:static_die\"", "a2@L29:dot:static_reacquire\"",
            "r2@L29:dot:static_die\"", "a3@L43:dot:branch_join+static_reacquire"][..]),
@@ -43333,6 +43333,225 @@ fn field_holder_on_return_edge_1884() {
     let svg = rv.timeline_panel_string();
     assert!(svg.contains("w.r@L53:dot:static_die"));
     assert!(!svg.contains("w2.r@L53:"));
+}
+
+/// The two match arms initialize r2 with references to different strings.
+/// In borrow-check MIR one arm reborrows its temporary into r2.
+#[test]
+fn conditional_reborrow_reaches_outer_slot_1884() {
+    let rv = run_with_local_backend("repoint_ref_cond_call_loan_1557");
+    let body = fact_body(rv.facts().unwrap(), "in_if");
+    // a2.len() borrows the same lender on the same row. Identify only
+    // the two definitions that actually supplied a reference to r2.
+    let original = |lender: &str| &body["loans"].as_array().unwrap().iter().find(|l|
+        l["lender"] == lender && l["direct_holders"].as_array().unwrap().iter().any(|h| h == "r2")
+    ).unwrap()["loan"];
+    let (a, b) = (original("a2"), original("b2"));
+    let reassign = row_facts(body, 31).into_iter().find(|f| f["ev"] == "Repoint" && f["holder"] == "r2").unwrap();
+    let reaching = reassign["reaching"].as_array().unwrap();
+    assert_eq!(reaching.len(), 2);
+    assert!(reaching.contains(a) && reaching.contains(b));
+    let svg = rv.timeline_panel_string();
+    // The condition kills the old value on just its true successor.
+    // Both lenders can be mutated before the assignment. Neither can
+    // be mutated before the read of the old r2 in the else arm.
+    let entry = body["switches"].as_array().unwrap().iter().find(|s| s["arm"] == 0 &&
+        row_facts(body, 30).iter().any(|e| e["loan"] == *a && e["occurrence"]["at"] == s["switch"])).unwrap();
+    for loan in [a,b] {
+        assert!(row_facts(body, 30).iter().any(|e| e["ev"] == "BorrowEnd" && e["loan"] == *loan &&
+            e["occurrence"]["at"] == entry["switch"] && e["occurrence"]["successor"][0] == entry["successor"]));
+    }
+    assert_alternative_end(&svg, "r2", 30, 31);
+}
+
+fn assert_alternative_end(svg: &str, holder: &str, fork: usize, overwrite: usize) {
+    let clause = format!("{holder}'s immutable borrow ends");
+    let dots = |row| rv_elements(svg, &format!("{holder}@L{row}:dot:"));
+    assert_eq!(dots(fork).iter().map(|d| d.1.matches(&clause).count()).sum::<usize>(), 1,
+        "one end of the previous reference at the fork");
+    assert!(dots(fork).iter().all(|d| !d.1.contains("immutable borrow of ")));
+    assert!(dots(overwrite).iter().all(|d| !d.1.contains("borrow ends") && !d.1.contains("borrow of ")));
+    assert!(dots(overwrite).iter().any(|d| d.1.contains("immutably borrows a resource")));
+}
+
+#[test]
+fn normal_fork_holder_provenance_1884() {
+    let rv = run_with_local_backend("edition2024/normal_fork_ends_1884");
+    let facts = rv.facts().unwrap();
+    let body = fact_body(facts, "copied");
+    let loan = &fact_loan(body, 5, "*s")["loan"];
+    let holds: Vec<_> = row_facts(body, 7).into_iter().filter(|e| e["ev"] == "HoldEnd" && &e["loan"] == loan).collect();
+    assert_eq!(holds.len(), 2);
+    for (row, ending, continuing) in [(8, "q", "r"), (11, "r", "q")] {
+        let edge = holds.iter().find(|e| e["to_line"] == row).unwrap();
+        assert_eq!(edge["end_places"][0]["name"], ending);
+        let slots = edge["continuing_places"].as_array().expect("named continuing slot on this successor");
+        let releases: Vec<_> = row_facts(body, row).into_iter().filter(|e| e["ev"] == "BorrowEnd" && &e["loan"] == loan).collect();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0]["name"], continuing);
+        assert_eq!(releases[0]["end_places"][0], slots[0]);
+    }
+
+    let rv = run_with_local_backend("match_binding_end_in_nested_arm_1513");
+    let field = fact_body(rv.facts().unwrap(), "field_copy_in_arm");
+    let loan = &fact_loan(field, 44, "*m")["loan"];
+    let own = row_facts(field, 46).into_iter().find(|e| e["ev"] == "HoldEnd" && &e["loan"] == loan).unwrap();
+    assert_eq!(own["end_places"][0]["name"], "h.r");
+    assert_eq!(own["continuing_places"][0]["name"], "r");
+    let release = row_facts(field, 47).into_iter().find(|e| e["ev"] == "BorrowEnd" && &e["loan"] == loan).unwrap();
+    assert_eq!(own["continuing_places"], release["end_places"]);
+}
+
+#[test]
+fn copied_last_holder_gives_back_1884() {
+    let rv = run_with_local_backend("edition2024/normal_fork_ends_1884");
+    let svg = rv.timeline_panel_string();
+    for (row, last, unused) in [(8, "r", "q"), (11, "q", "r")] {
+        assert_eq!(rv_elements(&svg, &format!("{last}>s@L{row}:arrow:static_die")).len(), 1);
+        assert!(rv_elements(&svg, &format!("{unused}>s@L{row}:arrow:static_die")).is_empty());
+        assert!(rv_elements(&svg, &format!("{unused}@L7:dot:")).iter().any(|d| d.1.contains("immutable borrow ends")));
+        assert!(rv_elements(&svg, &format!("{unused}@L13:dot:branch_join")).iter().any(|d| d.1.contains("borrow ended in each branch")));
+    }
+}
+
+#[test]
+fn partially_moved_holder_keeps_its_reference_field_1884() {
+    let rv = run_with_local_backend("edition2024/fork_edge_places_1884");
+    let b = fact_body(rv.facts().unwrap(), "partial");
+    let end = row_facts(b, 13).into_iter().find(|e| e["ev"] == "HoldEnd" && e["holder"] == "q").unwrap();
+    let other = row_facts(b, 13).into_iter().find(|e| e["ev"] == "HoldEnd" && e["holder"] == "h.r" && e["loan"] == end["loan"]).unwrap();
+    assert_eq!(other["continuing_places"], end["end_places"]);
+    assert_eq!(end["continuing_places"], other["end_places"], "moving h.owned leaves h.r initialized");
+}
+
+#[test]
+fn same_join_different_incoming_holder_1884() {
+    let rv = run_with_local_backend("edition2024/fork_edge_places_1884");
+    let b = fact_body(rv.facts().unwrap(), "joined");
+    let loan = &fact_loan(b, 22, "*s")["loan"];
+    let row = row_facts(b, 24);
+    let store = row.iter().find(|e| e["ev"] == "Repoint" && e["holder"] == "q").unwrap();
+    // Both short-circuit failures go to the same MIR block. Only the
+    // RHS evaluates q = t, so the old q carries r on the LHS failure.
+    let edges: Vec<_> = row.iter().filter(|e| e["ev"] == "HoldEnd" && e["loan"] == *loan && e["holder"] == "r").collect();
+    assert_eq!(edges.len(), 2);
+    assert_eq!(edges[0]["occurrence"]["successor"], edges[1]["occurrence"]["successor"]);
+    for e in edges {
+        let rhs = e["occurrence"]["at"][0] == store["occurrence"]["at"][0];
+        let kept = e["continuing_places"].as_array().is_some_and(|s| s.iter().any(|p| p["name"] == "q"));
+        assert_eq!(kept, !rhs, "old q on the short-circuit edge only: {e}");
+    }
+}
+
+#[test]
+fn fieldless_discriminants_keep_array_projections_1884() {
+    let rv = run_with_local_backend("edition2024/fork_edge_places_1884");
+    let b = fact_body(rv.facts().unwrap(), "elements");
+    let fieldless = |line| row_facts(b, line).into_iter().find_map(|e| e.get("fieldless_operand").cloned()).unwrap();
+    let (first, second) = (fieldless(32), fieldless(34));
+    assert_eq!(first["local"], second["local"]);
+    for (place, offset) in [(first, 0), (second, 1)] {
+        assert_eq!(place["projection"], serde_json::json!([{"constant_index": {
+            "offset": offset, "min_length": 2, "from_end": false
+        }}]));
+    }
+}
+
+#[test]
+fn raw_field_dereference_does_not_reborrow_sibling_1884() {
+    let rv = run_with_local_backend("edition2024/fork_edge_places_1884");
+    let b = fact_body(rv.facts().unwrap(), "raw");
+    let store = row_facts(b, 43).into_iter().find(|e| e["ev"] == "Repoint" && e["holder"] == "p").unwrap();
+    let reaching = store["reaching"].as_array().unwrap();
+    for loan in b["loans"].as_array().unwrap().iter().filter(|l| l["lender"] == "*s") {
+        assert!(!reaching.contains(&loan["loan"]), "p refers to h.owned, s.clear() is legal before see(p)");
+    }
+}
+
+#[test]
+fn nested_alternative_lenders_1884() {
+    let rv = run_with_local_backend("edition2024/fork_edge_places_1884");
+    let b = fact_body(rv.facts().unwrap(), "nested_lenders");
+    let loans = ["a", "b", "c"].map(|name| b["loans"].as_array().unwrap().iter().find(|l| l["lender"] == name).unwrap());
+    for (i, l) in loans.iter().enumerate() {
+        for other in &loans[..i] {
+            assert!(l["issuance_path"].as_array().unwrap().iter().any(|a|
+                other["issuance_path"].as_array().unwrap().iter().any(|b|
+                    a["switch"] == b["switch"] && a["successor"] != b["successor"])));
+        }
+    }
+    assert_alternative_end(&rv.timeline_panel_string(), "r", 53, 54);
+}
+
+#[test]
+fn fieldless_variant_on_normal_loan_end_1884() {
+    // Some moves its mutable reference to x. None has nowhere to store it.
+    let rv = run_with_local_backend("assign_branch_vec_holder_1477");
+    let body = fact_body(rv.facts().unwrap(), "muts");
+    let loan = &fact_loan(body, 48, "s1")["loan"];
+    let empty = row_facts(body, 55).into_iter().find(|e| e["ev"] == "BorrowEnd" && &e["loan"] == loan).unwrap();
+    assert_eq!(empty["fieldless_operand"]["name"], "y");
+    assert_eq!(empty["fieldless_operand"], empty["end_places"][0]);
+
+    let rv = run_with_local_backend("edition2024/normal_fork_ends_1884");
+    let facts = rv.facts().unwrap();
+    let chain = fact_body(facts, "chain");
+    let loan = &fact_loan(chain, 38, "*s")["loan"];
+    let ends: Vec<_> = row_facts(chain, 39).into_iter().filter(|e| e["ev"] == "BorrowEnd" && &e["loan"] == loan).collect();
+    assert_eq!(ends.len(), 2);
+    // The discriminant branches to the else body on None. The second
+    // end is the return edge of test(r), which is reached only for Some.
+    let is_none = |e: &serde_json::Value| chain["switches"].as_array().unwrap().iter().any(|s|
+        s["arm"] == 1 && s["switch"] == e["occurrence"]["at"] && s["successor"] == e["occurrence"]["successor"][0]);
+    let none = ends.iter().find(|e| is_none(e)).unwrap();
+    let evaluated = ends.iter().find(|e| !is_none(e)).unwrap();
+    assert_eq!(none["fieldless_operand"]["name"], "flag");
+    assert!(evaluated.get("fieldless_operand").is_none());
+
+    // The otherwise target accepts both Empty and Second(&String).
+    let shared = fact_body(facts, "shared_target");
+    let mixed = row_facts(shared, 55).into_iter().find(|e| e["ev"] == "BorrowEnd" && e["holder"] == "value").unwrap();
+    assert!(mixed.get("fieldless_operand").is_none());
+}
+
+#[test]
+fn nested_and_adjacent_fork_end_edges_1884() {
+    let rv = run_with_local_backend("edition2024/normal_fork_ends_1884");
+    let facts = rv.facts().unwrap();
+    for (func, issued, rows) in [("nested", 17, &[19, 20, 23][..]), ("neighboring", 29, &[31, 32][..])] {
+        let body = fact_body(facts, func);
+        let loan = &fact_loan(body, issued, "*s")["loan"];
+        let mut ends = Vec::new();
+        for r in body["rows"].as_array().unwrap() {
+            for e in r["facts"].as_array().unwrap().iter().filter(|e| e["ev"] == "BorrowEnd" && &e["loan"] == loan) {
+                assert_eq!(e["end_places"][0]["name"], "r");
+                ends.push(r["line"].as_u64().unwrap());
+            }
+        }
+        assert_eq!(ends, rows, "{func}");
+    }
+    let nested = fact_body(facts, "nested");
+    let unused = row_facts(nested, 19).into_iter().find(|e| e["ev"] == "BorrowEnd" && e["holder"] == "r").unwrap();
+    let occurrence = &unused["occurrence"];
+    assert!(nested["switches"].as_array().unwrap().iter().any(|s|
+        s["switch"] == occurrence["at"] && s["successor"] == occurrence["successor"][0] && s["arm"] == 1));
+
+    // The calls in these four little arms are in their entry blocks. The
+    // first switch selects both returns through r. The caller slot ends
+    // in the successors of the other switch on the shared source line.
+    let adjacent = fact_body(facts, "neighboring");
+    let decision = |rows: [u64; 2], caller: bool| {
+        let switches = adjacent["switches"].as_array().unwrap();
+        let ids = rows.map(|row| {
+            let end = row_facts(adjacent, row).into_iter().find(|e| e["ev"] == "BorrowEnd" &&
+                if caller { e["caller_slot"]["name"] == "s" } else { e["holder"] == "r" }).unwrap();
+            switches.iter().find(|s| s["successor"] == end["occurrence"]["at"][0]).unwrap()["switch"].clone()
+        });
+        assert_eq!(ids[0], ids[1]);
+        ids[0].clone()
+    };
+    assert_ne!(decision([31, 32], false), decision([33, 34], true));
 }
 
 /// rustc rejects a second mutable borrow of s after the conditional break

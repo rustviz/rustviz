@@ -969,7 +969,7 @@ mod tests {
     }
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
-        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, display_location: rustc_middle::mir::Location::START, place_local: None, drop_route: DropRoute::Normal, occurrence: super::super::Occurrence::at(rustc_middle::mir::Location::START), end_places: vec![], caller_slot: None, transfer_paths: vec![], col: 1, arm, fact, order: (0, 0, 0) }).collect();
+        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, display_location: rustc_middle::mir::Location::START, place_local: None, drop_route: DropRoute::Normal, occurrence: super::super::Occurrence::at(rustc_middle::mir::Location::START), end_places: vec![], continuing_places: vec![], fieldless_operand: None, caller_slot: None, transfer_paths: vec![], col: 1, arm, fact, order: (0, 0, 0) }).collect();
         Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new(), partial_drops: Vec::new() }
     }
 
@@ -1011,6 +1011,7 @@ mod tests {
                 issue: None,
                 lender_local: None,
                 issued_on: None,
+                issuance_path: vec![],
                 loan: 0,
                 line: 3,
                 col: 5,

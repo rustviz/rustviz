@@ -329,6 +329,36 @@ impl super::BodyFacts {
         Some(SourceArm { branch: exit.branch?, index: exit.tested_pattern? })
     }
 
+    /// An outer reference's boundary on entry to this drawn arm. Its
+    /// own copy can die while a different named slot carries the loan.
+    /// An overwritten reference can instead release alternative loans
+    /// together. Require agreement across every incoming edge and ID.
+    pub(crate) fn reference_end_entering(
+        &self, arm: SourceArm, local: rustc_middle::mir::Local, ids: &[usize],
+    ) -> Option<(usize, &super::Ev)> {
+        use super::Fact;
+        if ids.is_empty() { return None; }
+        let alternatives = ids.len() > 1 && ids.iter().all(|id| self.loans.iter().find(|l| l.loan == *id)
+            .is_some_and(|loan| self.loans.iter().any(|other| ids.contains(&other.loan) && loan.alternative_to(other))));
+        let mut entries = self.switches.iter().filter(|s| s.branch == Some(arm.branch) && s.arm == Some(arm.index));
+        let entry = entries.next()?.edge;
+        // Several tests (for example a let-chain) can enter a shared
+        // arm. There is then no single switch occurrence to draw here.
+        if entries.next().is_some() { return None; }
+        let ends = self.rows.iter().flat_map(|r| r.facts.iter().map(move |e| (r.line, e)))
+            .chain(self.inline_holder_ends.iter().map(|(row, e)| (*row, e)))
+            .filter(|(_, e)| e.occurrence.at == entry.switch && e.occurrence.successor == Some(entry.successor.start_location())
+                && e.end_places.iter().any(|p| p.local == local.index() && p.projection.is_empty()));
+        let find = |id| ends.clone().find(|(_, e)| match &e.fact {
+            Fact::HoldEnd { loan, .. } => loan == id && !e.continuing_places.is_empty(),
+            Fact::BorrowEnd { loan, .. } => loan == id && alternatives,
+            _ => false,
+        });
+        let (row, first) = find(&ids[0])?;
+        ids[1..].iter().all(|id| find(id).is_some_and(|(_, e)| std::mem::discriminant(&e.fact) == std::mem::discriminant(&first.fact)))
+            .then_some((row, first))
+    }
+
     pub(crate) fn tests_of(&self, owner: HirId) -> BTreeSet<Location> {
         self.switches.iter().filter(|e| e.branch == Some(owner)).map(|e| e.edge.switch).collect()
     }
