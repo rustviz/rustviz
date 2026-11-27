@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainRef, ChainUse, FailPath, NoValueBefore, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainRef, ChainUse, FailPath, NoValueBefore, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, TiedInputs, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -2982,7 +2982,7 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
         let head = format!(": {0} points into what the reference {1} returned points to", to_fmt, func_fmt);
         let names: Vec<String> = lenders.iter().map(|n| styled_name_html(n)).collect();
         return if !tie.tied.is_empty() {
-            format!("{}; {}", head, signature_tie(&func_fmt, "that reference", "point into", to_name, &names, also_unnamed, tie))
+            format!("{}; {}", head, signature_tie(&func_fmt, "that reference", to_name, &names, also_unnamed, tie))
         } else if names.len() >= 2 {
             format!("{}, so it may point into {}, and {} while {} is in use",
                 head, either_word(names.len()), kept_words(&names, false), to_fmt)
@@ -3011,7 +3011,7 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
         let names: Vec<String> = lenders.iter().map(|n| styled_name_html(n)).collect();
         let tied = !tie.tied.is_empty();
         return if tied && (names.len() >= 2 || tie.tied.len() >= 2 || also_unnamed) {
-            format!("{}; {}", head, signature_tie(&func_fmt, "that value", "point into", to_name, &names, also_unnamed, tie))
+            format!("{}; {}", head, signature_tie(&func_fmt, "that value", to_name, &names, also_unnamed, tie))
         } else if names.len() < 2 {
             head
         } else if from_call {
@@ -3038,7 +3038,6 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
-    let point = if carrier == ViaCarrier::Value { "borrow from" } else { "point into" };
     let names: Vec<String> = lenders.iter().map(|n| styled_name_html(n)).collect();
     // `Some(Pair { l: &s, r: &t })` / `Some([&s, &t])`: the one argument
     // holds every borrow itself; the signature merges nothing.
@@ -3057,7 +3056,7 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
             ("the value it returns".to_owned(), format!("; {} {} the borrow on", join_names(&names), if fs.len() == 1 { "passes" } else { "pass" }))
         }
     };
-    format!(": {}{}{}", signature_tie(&func_fmt, &what, point, to_name, &names, also_unnamed, tie), passed, not_ref)
+    format!(": {}{}{}", signature_tie(&func_fmt, &what, to_name, &names, also_unnamed, tie), passed, not_ref)
 }
 
 /// `a and b` / `a, b, and c`.
@@ -3084,12 +3083,10 @@ fn kept_words(names: &[String], unnamed: bool) -> String {
     }
 }
 
-/// `{func}'s signature gives {what} the same lifetime as both
-/// arguments, so it may point into either, and both stay borrowed
-/// while x is in use`: which of the call's arguments the signature
+/// Which of the call's arguments the signature
 /// ties its result to, and what that means for `to_name` when the
 /// result borrows from several variables (`names`, already styled).
-fn signature_tie(func_fmt: &str, what: &str, point: &str, to_name: &String, names: &[String], also_unnamed: bool, tie: &ArgTie) -> String {
+fn signature_tie(func_fmt: &str, what: &str, to_name: &String, names: &[String], also_unnamed: bool, tie: &ArgTie) -> String {
     let join = join_names;
     fn ordinal(i: usize) -> String {
         const NAMES: [&str; 10] = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
@@ -3163,9 +3160,19 @@ fn signature_tie(func_fmt: &str, what: &str, point: &str, to_name: &String, name
     let to_fmt = styled_name_html(to_name);
     let unnamed_slots = tie.unnamed.max(usize::from(also_unnamed));
     let tail = if names.len() >= 2 {
-        let either = either_word(names.len() + unnamed_slots);
         let kept = kept_words(names, unnamed_slots > 0);
-        format!(", so it may {} {}, and {} while {} is in use", point, either, kept, to_fmt)
+        if let Some((source, kind, either_input)) = &tie.reference_source {
+            let origin = styled_name_html(source);
+            let reference = kind.map_or_else(|| format!("the reference returned by {origin}"),
+                |k| format!("a {k} reborrow of the reference returned by {origin}"));
+            let flow = if *either_input { format!(" The code in {origin} has return paths from both inputs.") } else { String::new() };
+            format!(". {func_fmt} receives {reference}.{flow} At the caller, {kept} while {to_fmt} is in use")
+        } else if tie.returns_alternatives {
+            let inputs = if tie.tied.len() == 2 { "both tied inputs" } else { "all the tied inputs" };
+            format!(". The code in {func_fmt} has return paths from {inputs}. At the caller, {kept} while {to_fmt} is in use")
+        } else {
+            format!(". At the caller, {kept} while {to_fmt} is in use")
+        }
     } else if names.len() == 1 && (tied_count >= 2 || also_unnamed) {
         format!(", so {} stays borrowed while {} is in use", names[0], to_fmt)
     } else {
@@ -3180,19 +3187,6 @@ fn signature_tie(func_fmt: &str, what: &str, point: &str, to_name: &String, name
 }
 
 
-
-// The end of a borrow whose lender has no column (a string literal
-// `let s: &str = "hi";`, or a reference returned by a function call
-// that isn't linked to its argument). The arrow used to read "Return
-// immutably borrowed resource from s to *s", a borrow returned to
-// itself (#178).
-pub fn arrow_borrow_ends_lender_not_drawn(from_name: &String, is_mut: bool) -> String {
-    format!(
-        "{0}'s {1} borrow ends (what it borrows from isn't shown)",
-        styled_name_html(from_name),
-        if is_mut { "mutable" } else { "immutable" }
-    )
-}
 
 // The end of a borrow whose lender has no column but is known to be
 // data that lives for the whole program: a string literal (`let s:
@@ -5390,11 +5384,20 @@ pub fn event_dot_lent_with_parent(my_name: &String, parent: &str, to: &str, muta
     }
 }
 
-pub fn event_dot_tied_param_note(my_name: &String, lifetime: &str) -> String {
+pub fn event_dot_tied_param_note(my_name: &String, lifetime: &str, inputs: TiedInputs) -> String {
+    let name = styled_name_html(my_name);
+    let input = if inputs.reassigned { format!("The reference originally passed as {name}") } else { name };
+    if inputs.nested {
+        return format!("{input} isn't returned on this path. The signature ties references carried by the inputs to the result lifetime {lifetime}, so the caller keeps their referents borrowed while it uses the result.");
+    }
+    let (which, kept) = match (inputs.count, inputs.total) {
+        (1, _) => ("this input", "it"),
+        (2, 2) => ("both inputs", "both"),
+        (2, _) => ("two input references", "both"),
+        _ => ("these inputs", "them"),
+    };
     format!(
-        "{0} isn't returned on this path, but its borrow lasts as long as the result (same lifetime {1})",
-        styled_name_html(my_name),
-        lifetime
+        "{input} isn't returned on this path. The signature ties {which} to the result lifetime {lifetime}, so the caller keeps {kept} borrowed while it uses the result."
     )
 }
 
@@ -6633,7 +6636,7 @@ pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: 
  * geometry; the words live here, so every message can be checked
  * against Rust's semantics in one file. */
 
-use crate::svg_generator::data::{DeepPlace, ExternalEvent, FieldLenders, Function, LoopHead, ImplicitRef, ResourceTy, StoredIn, holds_copy_value, rc_call_of, returned_closure};
+use crate::svg_generator::data::{DeepPlace, ExternalEvent, FieldLenders, Function, LoopHead, ImplicitRef, ResourceTy, StoredIn, rc_call_of, returned_closure};
 
 // set style for code string
 static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
@@ -6684,10 +6687,6 @@ pub fn arrow_title(e: &ExternalEvent) -> String {
             else if *is_reborrow { String::from("Immutable reborrow") }
             else { String::from("Immutable borrow") }
         },
-        // `&r` borrowed the reference r itself, a value (#925).
-        ExternalEvent::StaticDie{ to, of_ref_var, .. } => {
-            format!("Return immutably borrowed {}", if *of_ref_var || holds_copy_value(to) { "value" } else { "resource" })
-        },
         ExternalEvent::MutableBorrow{ is_partial, is_reborrow, to, via, .. } => {
             if *is_partial { String::from("Partial mutable borrow") }
             else if to.is_closure() && *is_reborrow && !returned_closure(via) { String::from("Closure capture (mutable reborrow)") }
@@ -6699,13 +6698,9 @@ pub fn arrow_title(e: &ExternalEvent) -> String {
             else if *is_reborrow { String::from("Mutable reborrow") }
             else { String::from("Mutable borrow") }
         },
-        // `&mut r` borrowed the reference r itself, a value (#914).
-        ExternalEvent::MutableDie{ to, of_ref_var, .. } => {
-           format!("Return mutably borrowed {}", if *of_ref_var || holds_copy_value(to) { "value" } else { "resource" })
-        },
         // Reached only when the callee isn't a Function RAP — a call
         // through a closure variable (`f(&x)`, `g(r)`); calls to real
-        // fns get their "f reads from x" title from render_arrow's
+        // fns get their reference-passing title from render_arrow's
         // function-target arm instead. Deliberately no "reborrow"
         // wording here: whether `g(r)` reborrows or moves `r` depends
         // on the callee's parameter type, which this event doesn't
@@ -6734,6 +6729,51 @@ pub fn arrow_fn_return_title(copy: bool, named_call: bool, styled_fn: &str) -> S
 pub fn field_carried_with(field: &str, into: &str, parent: &str, dest: &str) -> String {
     format!("{} travels with {} when the whole value moves into {}, becoming {}",
         styled_name_html(field), styled_name_html(parent), styled_name_html(dest), styled_name_html(into))
+}
+
+pub fn loan_kind_word(loan: &crate::facts::LoanInfo) -> Option<&'static str> {
+    match loan.kind {
+        "mut" => Some("mutable"), "shared" => Some("shared"), "unique" => Some("unique immutable"), _ => None,
+    }
+}
+
+/// An end arrow is anchored on the lender's column. Only an identified
+/// loan supplies its kind and borrowed place. A holder can carry different
+/// loans on different incoming paths.
+pub fn arrow_end_title(from: &ResourceTy, to: &ResourceTy, static_lender: Option<&StaticLender>,
+    of_ref_var: bool, loan: Option<&crate::facts::LoanInfo>, kind: Option<&str>, payload: Option<&(String, &'static str)>) -> String {
+    let holder = styled_name_html(&from.name());
+    if from.is_same_underlying(to) {
+        if let Some(lender) = static_lender {
+            return arrow_borrow_of_static_ends(&from.name(), kind == Some("mutable"), lender);
+        }
+        return format!("{holder}'s borrow ends (what it borrows from isn't shown)");
+    }
+    if let Some((parent, kind)) = payload {
+        let parent = styled_name_html(parent);
+        return format!("{holder}'s {kind} borrow of the value inside {parent} ends. This borrow no longer restricts access to {parent}");
+    }
+    let column = styled_name_html(&to.name());
+    let place = match loan {
+        Some(l) if of_ref_var && l.lender == to.name() => format!("the reference slot {column}"),
+        Some(l) if to.is_ref() && l.through.as_deref() == Some(&to.name()) && l.lender == format!("*{}", to.name()) =>
+            format!("the data behind {column}"),
+        Some(l) if l.lender == to.name() =>
+            styled_name_html(&l.lender),
+        _ if of_ref_var => format!("the reference slot {column}"),
+        _ if matches!(to, ResourceTy::Value(r) if r.is_ref()) => format!("the data behind {column}"),
+        _ => column.clone(),
+    };
+    if let (Some(kind), Some(l)) = (kind, loan) {
+        if l.runs && l.issued_on.is_none() && (l.direct_holder.as_deref() == Some(&from.name())
+            || (l.kind == "unique" && l.direct_holders.contains(&from.name())))
+            && (l.lender == to.name() || l.through.as_deref() == Some(&to.name()) && l.lender == format!("*{}", to.name())) {
+            let value = if of_ref_var || crate::svg_generator::data::holds_copy_value(to) { "value" } else { "resource" };
+            return format!("{holder}'s {kind} borrow of {place} ends. This borrow no longer restricts access to {place}. Ending the borrow doesn't move the {value}");
+        }
+    }
+    let borrow = kind.map_or_else(|| "borrow".to_string(), |kind| format!("{kind} borrow"));
+    format!("If {holder} holds a {borrow} affecting {place}, that borrow ends here. It no longer restricts access to {place}")
 }
 
 /// The full title of an arrow between two columns: `arrow_title`, then
@@ -6815,19 +6855,6 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
             title = arrow_rc_call(&from.name(), &to.name(), call);
         }
     }
-    // A borrow "returned" from `s` to `*s`: the lender has no
-    // column, so don't describe it as returned to itself.
-    // When the visitor knows it borrowed 'static data (a string
-    // literal, a static), name that instead.
-    if let ExternalEvent::StaticDie { static_lender, .. } | ExternalEvent::MutableDie { static_lender, .. } = external_event {
-        if from.is_same_underlying(to) {
-            let is_mut = matches!(external_event, ExternalEvent::MutableDie { .. });
-            title = match static_lender {
-                Some(lender) => arrow_borrow_of_static_ends(&from.name(), is_mut, lender),
-                None => arrow_borrow_ends_lender_not_drawn(&from.name(), is_mut),
-            };
-        }
-    }
     if let ExternalEvent::Move { break_alt: Some(alt), .. }
          | ExternalEvent::Copy { break_alt: Some(alt), .. }
          | ExternalEvent::StaticBorrow { break_alt: Some(alt), .. }
@@ -6845,47 +6872,41 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
 /// ends to, several lenders on one row (#1354, `FieldLenders`): the
 /// field holds one reference, which may point into any of `lenders`,
 /// and the borrow checker keeps all of them borrowed while it is in use.
-/// "Immutable borrow from s1 or s2 to d.a: …" / "Return immutably
-/// borrowed resource from d.a to s1 or s2 (d.a may point into either;
-/// its borrow of both ends here)".
+/// The end names the possible lenders and releases this borrow on each.
 pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, group: &FieldLenders, previous: bool, option_ref: bool) -> String {
     let lenders = &group.lenders;
-    let title = arrow_full_title(external_event, from, to, option_ref);
-    let (either, all) = if lenders.len() == 2 { ("either", "both") } else { ("any of them", "all of them") };
+    let all = if lenders.len() == 2 { "both" } else { "all of them" };
     if group.end {
         let field = styled_name_html(&from.name());
-        let title = title.replacen(&format!(" to {}", styled_name_html(&to.name())), &format!(" to {}", or_list(lenders)), 1);
-        if previous {
-            format!("{title}. The earlier reference in {field} could point into {either}. Its borrow of {all} ends here")
-        } else {
-            format!("{} ({} may point into {}; its borrow of {} ends here)", title, field, either, all)
-        }
+        let places = or_list(lenders);
+        let which = if previous { "The earlier reference" } else { "The reference" };
+        format!("{which} in {field} no longer keeps {places} borrowed. The borrow checker can still restrict {all} through other references")
     } else {
+        let title = arrow_full_title(external_event, from, to, option_ref);
         let field = styled_name_html(&to.name());
         let title = title.replacen(&format!(" from {}", styled_name_html(&from.name())), &format!(" from {}", or_list(lenders)), 1);
         // A call's result says why already (`arrow_borrow_via_call_suffix`).
         if matches!(external_event, ExternalEvent::StaticBorrow { via: Some(_), .. } | ExternalEvent::MutableBorrow { via: Some(_), .. }) {
             title
         } else {
-            format!("{}: {} may point into {}, and {} stay borrowed while {} is in use", title, field, either, all, field)
+            format!("{title}: the borrow checker keeps {all} borrowed while {field} is in use")
         }
     }
 }
 
 /// The field's own dot where those borrows start (`arrow_field_lenders_title`).
 pub fn event_dot_field_lenders_borrow(my_name: &String, lenders: &[String], mutable: bool) -> String {
-    let (either, all) = if lenders.len() == 2 { ("either", "both") } else { ("any of them", "all of them") };
-    format!(
-        "{0} {1} borrows {2}: it may point into {3}, so {4} stay borrowed while {0} is in use",
-        styled_name_html(my_name), if mutable { "mutably" } else { "immutably" }, or_list(lenders), either, all
-    )
+    let (all, names) = (if lenders.len() == 2 { "both" } else { "all of them" }, or_list(lenders));
+    format!("The borrow checker treats {names} as possible lenders to {}. It keeps {all} {}borrowed while the field is in use",
+        styled_name_html(my_name), if mutable { "mutably " } else { "" })
+
 }
 
 /// The field's own dot where they end.
-pub fn event_dot_field_lenders_end(my_name: &String, lenders: &[String], mutable: bool) -> String {
+pub fn event_dot_field_lenders_end(my_name: &String, lenders: &[String]) -> String {
     format!(
-        "{0}'s {1} borrow of {2} ends",
-        styled_name_html(my_name), if mutable { "mutable" } else { "immutable" }, or_list(lenders)
+        "The reference in {} no longer keeps its possible lenders borrowed ({})",
+        styled_name_html(my_name), or_list(lenders)
     )
 }
 
@@ -6904,18 +6925,11 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
         _ => styled_from_name.clone(),
     };
 
-        let title_fn = match external_event {
-            ExternalEvent::PassByStaticReference { .. } => " reads from ",
-            ExternalEvent::PassByMutableReference { terminal: Some(crate::facts::TerminalArgument::Formatted), .. } => " reads through ",
-            ExternalEvent::PassByMutableReference { terminal: Some(_), .. } => " borrows ",
-            // `r` is itself a `&mut` reference (#812): f
-            // reads and writes the value r points to, not r,
-            // so say "through" like the other `&mut` writes.
-            ExternalEvent::PassByMutableReference { is_reborrow: true, .. } => " reads and writes through ",
-            ExternalEvent::PassByMutableReference { .. } => " reads from/writes to ",
-            _ => panic!("internal state: expected a pass-by-reference event here")
+        let (implicit, of_ref_var, mutable, reborrow) = match external_event {
+            ExternalEvent::PassByStaticReference { implicit, of_ref_var, .. } => (implicit, *of_ref_var, false, false),
+            ExternalEvent::PassByMutableReference { implicit, of_ref_var, is_reborrow, .. } => (implicit, *of_ref_var, true, *is_reborrow),
+            _ => unreachable!("expected a pass-by-reference event"),
         };
-
         // Reborrow note for the call-dot tooltip. `f(r)`
         // with r: `&mut T` and f taking `&mut T` is
         // compiler-rewritten to `f(&mut *r)`: r isn't
@@ -6931,44 +6945,22 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
             ExternalEvent::PassByMutableReference { is_reborrow: true, terminal: Some(_), .. } => format!(
                 " (mutable reborrow — {} cannot be used while the reborrow is live)", styled_from_name,
             ),
-            ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: false, .. } => format!(
+            ExternalEvent::PassByMutableReference { is_reborrow: true, ends_at_call: true, .. } => format!(
                 " (mutable reborrow — {} can't be used until {} returns)",
                 styled_from_name, styled_fn_name,
             ),
-            ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: true, .. } => format!(
+            ExternalEvent::PassByMutableReference { is_reborrow: true, ends_at_call: false, .. } => format!(
                 " (mutable reborrow — {} can't be used while the reborrow is live)",
                 styled_from_name,
             ),
             _ => String::new(),
         };
-        // The `&` / `&mut` was inserted by Rust, not written
-        // (`println!("{}", s)` takes `&s`, `s.len()` is
-        // `String::len(&s)`): say so, or the call reads like
-        // it moves s. Method calls are everywhere, so their
-        // note is the shorter one.
-        let implicit_suffix: String = match external_event {
-            ExternalEvent::PassByStaticReference { implicit: ImplicitRef::MacroArg, .. } => format!(
-                " through an implicit reference, so {} isn't moved", styled_from_name),
-            ExternalEvent::PassByMutableReference { implicit: ImplicitRef::MacroArg, .. } => format!(
-                " through an implicit mutable reference, so {} isn't moved", styled_from_name),
-            ExternalEvent::PassByStaticReference { implicit: ImplicitRef::Autoref, .. } =>
-                " (implicitly borrowed)".to_string(),
-            // A reborrow through a reference (`rv[0].push(..)`
-            // with rv: &mut Vec) already says "mutable
-            // reborrow"; "implicitly mutably borrowed" would
-            // stack a second parenthetical, and describes an
-            // autoref of an owner, which this isn't.
-            ExternalEvent::PassByMutableReference { implicit: ImplicitRef::Autoref, is_reborrow: false, .. } =>
-                " (implicitly mutably borrowed)".to_string(),
-            _ => String::new(),
-        };
-
         // `&self` method on a value with interior mutability
         // (`c.set(2)` on a Cell, `cell.borrow_mut()`,
         // `m.lock()`, atomics): the borrow checker sees a
         // shared borrow, but the value inside can change,
         // so "reads from" would be false (#203).
-        let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: ImplicitRef::No | ImplicitRef::Autoref, .. })
+        let interior_mut = matches!(external_event, ExternalEvent::PassByStaticReference { implicit: ImplicitRef::No | ImplicitRef::Autoref | ImplicitRef::Receiver { .. }, .. })
             && from_variable.extract_rap().map_or(false, |r| r.has_interior_mut());
         // The same through a shared reference to such a value (`r.set(2)`
         // with `r: &Cell<i32>`, #1149).
@@ -7066,12 +7058,45 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
                 matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
             alt.map_or(msg.clone(), |a| with_break_alt_lend(&msg, a)) + &stored_suffix
         } else {
-            let call = if matches!(external_event, ExternalEvent::PassByMutableReference { manually_takes: true, .. }) {
-                format!("{styled_fn_name} takes an exclusive borrow of the ManuallyDrop wrapper and reads out the inner value, leaving the wrapper's storage unchanged")
-            } else {
-                format!("{styled_fn_name}{title_fn}{styled_via}")
+            let kind = if mutable { "mutable" } else { "shared" };
+            let receiver = match implicit {
+                ImplicitRef::Receiver { autoref: true, .. } => " (as self, implicitly borrowed)",
+                ImplicitRef::Receiver { autoref: false, .. } => " (as self)",
+                ImplicitRef::Autoref | ImplicitRef::Comparison { .. } => " (implicitly borrowed)",
+                _ => "",
             };
-            format!("{call}{alt_suffix}{implicit_suffix}{reborrow_suffix}{stored_suffix}")
+            let access = if mutable { "read or write" } else { "read" };
+            let call = if matches!(external_event, ExternalEvent::PassByMutableReference { manually_takes: true, .. }) {
+                format!("{styled_fn_name} takes an exclusive borrow of the ManuallyDrop wrapper and reads out the inner value, leaving the wrapper's storage unchanged{alt_suffix}")
+            } else if matches!(external_event, ExternalEvent::PassByMutableReference { terminal: Some(crate::facts::TerminalArgument::Formatted), .. }) {
+                format!("A mutable reference through {styled_via} is passed to {styled_fn_name}{alt_suffix}. {styled_fn_name} passes a shared reference to its parameter to the panic formatter")
+            } else if let ImplicitRef::Capture { place, unique, interior_mut } = implicit {
+                let how = if *unique { "unique immutable reference" } else if mutable { "mutable reference" } else { "reference" };
+                let access = if *interior_mut && !mutable && !unique { ". Its contents can change even through a shared borrow" } else { "" };
+                format!("{styled_fn_name} captures {} by {how}{alt_suffix}{access}", styled_name_html(place))
+            } else if let ImplicitRef::MacroArg { place } | ImplicitRef::FormatArg { place } = implicit {
+                let purpose = if matches!(implicit, ImplicitRef::FormatArg { .. }) { " for formatting" } else { "" };
+                let operand = place.as_deref().map(styled_name_html).unwrap_or_else(|| "its argument".into());
+                let kept = if place.is_some() { format!("{operand} isn't moved") } else { "the borrow doesn't move the argument".into() };
+                format!("{styled_fn_name} borrows {operand}{purpose} through an implicit {kind} reference{alt_suffix}, so {kept}")
+            } else if let ImplicitRef::Comparison { place } | ImplicitRef::Receiver { place, .. } = implicit {
+                if matches!(implicit, ImplicitRef::Receiver { .. }) && from_variable.is_ref()
+                    && !of_ref_var && place.as_deref() == Some(&format!("*{}", from_variable.name())) {
+                    format!("A {kind} reference through {styled_via} is passed to {styled_fn_name}{receiver}{alt_suffix}. {styled_fn_name} may {access} through it")
+                } else if let Some(p) = place {
+                    let operand = styled_name_html(p);
+                    format!("{operand} is passed to {styled_fn_name} by {kind} reference{receiver}{alt_suffix}. {styled_fn_name} may {access} it")
+                } else {
+                    format!("{styled_fn_name} takes a {kind} reference{receiver}{alt_suffix}. It may {access} through that reference")
+                }
+            } else if reborrow && matches!(from_variable, ResourceTy::DerefField(..)) {
+                format!("A {kind} reference to {styled_via} is passed to {styled_fn_name}{receiver}{alt_suffix}. {styled_fn_name} may {access} through it")
+            } else if reborrow || (!of_ref_var && matches!(from_variable, ResourceTy::Value(r) if r.is_ref())) {
+                format!("A {kind} reference through {styled_via} is passed to {styled_fn_name}{receiver}{alt_suffix}. {styled_fn_name} may {access} through it")
+            } else {
+                format!("{styled_via} is passed to {styled_fn_name} by {kind} reference{receiver}{alt_suffix}. {styled_fn_name} may {access} it")
+            };
+            format!("{call}{reborrow_suffix}{stored_suffix}")
         }
 }
 

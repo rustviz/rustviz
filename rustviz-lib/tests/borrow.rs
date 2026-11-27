@@ -7,7 +7,7 @@
 //! describe correctness without pinning exact pixel coordinates:
 //!
 //!   * The expected hover strings are present.
-//!   * No phantom `from s to *s` (the pre-fix bug).
+//!   * A reference parameter has no loan-end arrow back to itself.
 //!   * The borrow-region path (`<path ... staticref ...>` or its
 //!     mutref counterpart) has a non-zero vertical extent.
 //!   * The lender's timeline has at least one Solid segment AND at
@@ -157,8 +157,10 @@ fn f(s: &String) {
     let timeline = timeline_of(src);
 
     assert!(
-        !timeline.contains("from s to *s"),
-        "phantom `from s to *s` tooltip is back"
+        !common::svg::rv_elements(&timeline).iter().any(|e| e.kind == "arrow"
+            && e.event.as_deref() == Some("static_die") && e.var.as_deref() == Some("s")
+            && matches!(e.to.as_deref(), Some("s" | "*s"))),
+        "phantom loan-end arrow from the reference parameter to itself"
     );
     assert!(
         timeline.contains("s is an immutable borrow from the caller"),
@@ -206,7 +208,7 @@ fn main() {
 
     assert!(timeline.contains("r holds an immutable reference"));
     assert!(timeline.contains("Immutable borrow from x to r"));
-    assert!(timeline.contains("Return immutably borrowed resource from r to x"));
+    assert!(timeline.contains("r's shared borrow of x ends. This borrow no longer restricts access to x"));
 
     let lines = ref_line_paths(&timeline);
     assert!(!lines.is_empty(), "no staticref path emitted for r");
@@ -415,7 +417,7 @@ fn main() {
     // Excerpt has no Drop impl, so that is at the literal, not at the
     // end of the scope (#1310).
     assert!(
-        timeline.contains("Return immutably borrowed resource from i.p to n"),
+        timeline.contains("If i.p holds a shared borrow affecting n, that borrow ends here. It no longer restricts access to n"),
         "i.p didn't return its borrow to n"
     );
 
@@ -494,7 +496,7 @@ fn main() {
     let timeline = timeline_of(src);
 
     assert!(timeline.contains("Mutable borrow from x to y"));
-    assert!(timeline.contains("Return mutably borrowed resource from y to x"));
+    assert!(timeline.contains("y's mutable borrow of x ends. This borrow no longer restricts access to x"));
     assert!(timeline.contains("y holds a mutable reference"));
 
     let lines = ref_line_paths(&timeline);

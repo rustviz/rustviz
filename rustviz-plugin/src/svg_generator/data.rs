@@ -1427,16 +1427,23 @@ pub enum StaticLender {
 /// Whether the `&` / `&mut` of a pass-by-reference event was written in
 /// the source or inserted by Rust. Drives the call dot's tooltip: without
 /// a note, `println!("{}", s)` or `s.len()` reads like it moves `s`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ImplicitRef {
     /// Written (`f(&s)`, `(&s).len()`), or the argument already is a
     /// reference (`r.len()` with `r: &String`).
     No,
-    /// A formatting macro's argument: `println!("{}", s)` goes
-    /// through `format_args!`, which takes `&s`.
-    MacroArg,
-    /// A method receiver that rustc auto-referenced: `s.len()` is
+    /// A shared or mutable borrow supplied by a macro expansion.
+    MacroArg { place: Option<String> },
+    /// The compiler lowered this borrow as a formatting argument.
+    FormatArg { place: Option<String> },
+    /// A closure argument captures this place by reference.
+    Capture { place: String, unique: bool, interior_mut: bool },
+    /// A method receiver, with or without an implicit borrow: `s.len()` is
     /// `String::len(&s)`, `s.push_str(t)` is `String::push_str(&mut s, t)`.
+    Receiver { autoref: bool, place: Option<String> },
+    /// Both operands of an overloaded comparison are borrowed.
+    Comparison { place: Option<String> },
+    /// An overloaded operator implicitly borrows this operand.
     Autoref,
 }
 
@@ -1554,6 +1561,15 @@ pub struct BorrowVia {
     pub passed_on: Vec<String>,
 }
 
+/// Direct reference parameters tied to this result lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TiedInputs {
+    pub reassigned: bool,
+    pub count: usize,
+    pub total: usize,
+    pub nested: bool,
+}
+
 /// Which arguments of a call a returned reference's lifetime is tied
 /// to by the callee's signature. Positions count the receiver of a
 /// method call as position 0; it only shapes the tooltip wording.
@@ -1582,6 +1598,10 @@ pub struct ArgTie {
     /// Some tied argument has a lifetime that only outlives the
     /// result's (`'a: 'b`, #1125): "the same lifetime" isn't true of it.
     pub via_outlives: bool,
+    /// The one tied reference operand came from this MIR call.
+    pub reference_source: Option<(String, Option<&'static str>, bool)>,
+    /// Body return assignments directly derive from each tied reference parameter.
+    pub returns_alternatives: bool,
     /// The resolved callee constructs a variant with the argument in it.
     pub constructs_variant: bool,
 }
@@ -2251,8 +2271,7 @@ pub enum ExternalEvent {
     // `is_reborrow`: `from` is a `&mut T` that the call reborrows
     // (`f(&mut *r)`, or `f(r)` / `r.m()` with rustc inserting the
     // reborrow) rather than moves (`take(r)` into a generic `T`).
-    // `result_has_lifetime`: the call's result type mentions a
-    // lifetime, so the reborrow may outlive the call
+    // `ends_at_call`: borrowck ends the argument loan at the call's normal successor
     // (`let w = first(r);`). Both drive the call-site dot's suffix.
     PassByMutableReference {
         // This MIR callee reads the inner value without writing the wrapper.
@@ -2261,7 +2280,7 @@ pub enum ExternalEvent {
         from: ResourceTy,
         to: ResourceTy, // must be a function
         is_reborrow: bool,
-        result_has_lifetime: bool,
+        ends_at_call: bool,
         implicit: ImplicitRef, // see PassByStaticReference
         stored_in: StoredIn, // see PassByStaticReference
         result_keeps_borrow: bool,
@@ -2543,6 +2562,7 @@ pub enum ExternalEvent {
     TiedParamNote {
         ro: ResourceAccessPoint,
         lifetime: String,
+        inputs: TiedInputs,
         id: usize
     },
     // The `else` block of a lone `if let` whose pattern always matches
@@ -3049,7 +3069,7 @@ pub enum Event {
     // reference, so what was lent is the resource it points to.
     ChainFailUse { uses: Vec<ChainUse>, definite: bool, path: FailPath, is_ref: bool, pointee_value: bool },
     // See ExternalEvent::TiedParamNote.
-    TiedParamNote { lifetime: String },
+    TiedParamNote { lifetime: String, inputs: TiedInputs },
     // See ExternalEvent::ReslicedInPlace.
     ReslicedInPlace { lender: String, mutable: bool, part: bool },
     AssignmentJoin { always_assigned: bool, drops: bool },
@@ -3803,7 +3823,7 @@ impl Display for Event {
                 write!(f, "May have been borrowed by the condition")
             },
             Event::TiedParamNote { .. } => {
-                write!(f, "Not returned on this path; its borrow lasts as long as the result")
+                write!(f, "Input tied to the result lifetime at the caller")
             },
             Event::ReslicedInPlace { .. } => {
                 write!(f, "Points to part of what it pointed to; its borrow goes on")
@@ -4060,8 +4080,8 @@ impl Event {
             Event::LentWithParent { parent, to, mutable } => {
                 hover_messages::event_dot_lent_with_parent(my_name, parent, to, *mutable)
             }
-            Event::TiedParamNote { lifetime, .. } => {
-                hover_messages::event_dot_tied_param_note(my_name, lifetime)
+            Event::TiedParamNote { lifetime, inputs, .. } => {
+                hover_messages::event_dot_tied_param_note(my_name, lifetime, *inputs)
             }
             Event::ReslicedInPlace { lender, mutable, part } => {
                 hover_messages::event_dot_resliced_in_place(my_name, lender, *mutable, *part)
@@ -6171,8 +6191,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::PassRestDrop{ parts, .. } => {
           vec![(line_num, Event::PassRestDrop { parts: parts.clone() })]
         },
-        ExternalEvent::TiedParamNote{ lifetime, .. } => {
-          vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone() })]
+        ExternalEvent::TiedParamNote{ lifetime, inputs, .. } => {
+          vec![(line_num, Event::TiedParamNote { lifetime: lifetime.clone(), inputs: *inputs })]
         },
         ExternalEvent::ReslicedInPlace{ lender, mutable, part, .. } => {
           vec![(line_num, Event::ReslicedInPlace { lender: lender.clone(), mutable: *mutable, part: *part })]
@@ -6698,8 +6718,8 @@ impl Visualizable for VisualizationData {
                 let rc = if place.is_some() { None } else { ro.rc_drop() };
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ChainFailAssign { place, drops_old, rc, path }, line_number);
             },
-            ExternalEvent::TiedParamNote{ro, lifetime, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::TiedParamNote { lifetime }, line_number);
+            ExternalEvent::TiedParamNote{ro, lifetime, inputs, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TiedParamNote { lifetime, inputs }, line_number);
             },
             ExternalEvent::ReslicedInPlace{ro, lender, mutable, part, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ReslicedInPlace { lender, mutable, part }, line_number);

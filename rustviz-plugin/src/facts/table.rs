@@ -1026,6 +1026,7 @@ mod tests {
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
             residual_drops: Vec::new(),
+            short_call_borrows: Default::default(),
             drop_holders: Default::default(),
             switches: vec![],
             closure_result_loans: Default::default(),

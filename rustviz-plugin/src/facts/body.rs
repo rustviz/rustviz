@@ -396,6 +396,63 @@ fn skipped_closure_returns<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> BTreeM
     skipped
 }
 
+/// A reference argument can be a reborrow of the immediately preceding
+/// call's result. Require the actual MIR return edge and the same place.
+/// A join or another source of the operand leaves the origin unnamed.
+pub(crate) fn reference_argument_source<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, call: Span, index: usize) -> Option<(String, Option<&'static str>, bool)> {
+    let mut reborrow = None;
+    let mut calls = body.basic_blocks.iter_enumerated().filter_map(|(bb, data)| {
+        let term = data.terminator();
+        let TerminatorKind::Call { args, .. } = &term.kind else { return None };
+        term.source_info.span.source_equal(call).then_some((bb, args))
+    });
+    let (bb, args) = calls.next()?;
+    if calls.next().is_some() { return None; }
+    let mut local = args.get(index)?.node.place()?.as_local()?;
+    if !body.local_decls[local].ty.is_ref() { return None; }
+    let [pred] = body.basic_blocks.predecessors()[bb].as_slice() else { return None };
+    let TerminatorKind::Call { func, destination, target: Some(target), .. } =
+        &body.basic_blocks[*pred].terminator().kind else { return None };
+
+    // Trace only copies and reborrows that reach this operand on the
+    // return edge. An indirect write could change a reference via an alias.
+    for statement in body.basic_blocks[bb].statements.iter().rev() {
+        match &statement.kind {
+            StatementKind::Assign(assign) => {
+                let (dst, rhs) = &**assign;
+                if dst.is_indirect() { return None; }
+                if dst.local != local { continue; }
+                dst.as_local()?;
+                local = match rhs {
+                    Rvalue::Use(Operand::Copy(p) | Operand::Move(p)) => p.as_local()?,
+                    Rvalue::Ref(_, kind, p) if p.projection.as_slice() == [ProjectionElem::Deref] => {
+                        reborrow.get_or_insert(match kind {
+                            BorrowKind::Shared => "shared", BorrowKind::Mut { .. } => "mutable", _ => return None,
+                        });
+                        p.local
+                    }
+                    _ => return None,
+                };
+            }
+            StatementKind::StorageLive(l) | StatementKind::StorageDead(l) if *l != local => {}
+            StatementKind::PlaceMention(_) | StatementKind::FakeRead(_) |
+            StatementKind::AscribeUserType(..) | StatementKind::Nop => {}
+            _ => return None,
+        }
+    }
+    if *target != bb || destination.as_local()? != local || !body.local_decls[local].ty.is_ref() {
+        return None;
+    }
+    let (callee, _) = func.const_fn_def()?;
+    let either_input = callee.as_local().filter(|id| tcx.hir_maybe_body_owned_by(*id).is_some()).is_some_and(|id| {
+        let inner = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, id).body;
+        inner.arg_count == 2 && inner.args_iter().all(|l| inner.local_decls[l].ty.is_ref())
+            && super::call_wording::return_origins(tcx, inner, None)
+                .is_some_and(|origins| origins == inner.args_iter().map(Some).collect())
+    });
+    Some((tcx.item_name(callee).to_string(), reborrow, either_input))
+}
+
 /// How a call with no normal successor uses this mutable argument. The
 /// formatter case requires a direct MIR path from the parameter to panic_display.
 pub(crate) fn terminal_argument<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, span: Span) -> Option<TerminalArgument> {
@@ -1469,6 +1526,27 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         .into_results_cursor(body);
     let borrows = Borrows::new(tcx, body, &bwf.region_inference_context, &bwf.borrow_set);
     let mut inscope = borrows.iterate_to_fixpoint(tcx, body, None).into_results_cursor(body);
+    let mut short_call_borrows = BTreeSet::new();
+    let mut other_sites = BTreeSet::new();
+    for (bb, data) in body.basic_blocks.iter_enumerated() {
+        let term = data.terminator();
+        let TerminatorKind::Call { args, target: Some(target), .. } = &term.kind else { continue };
+        inscope.seek_before_primary_effect(Location { block: *target, statement_index: 0 });
+        for (i, arg) in args.iter().enumerate() {
+            if arg.node.ty(&body.local_decls, tcx).ref_mutability() != Some(rustc_hir::Mutability::Mut) { continue; }
+            let issue = arg.node.place().and_then(|p| super::call_wording::operand_borrow(body, body.terminator_loc(bb), p));
+            let short = issue.and_then(|(loc, _)| bwf.borrow_set.location_map().get_index_of(&loc))
+                .is_some_and(|idx| !inscope.get().contains(BorrowIndex::from_usize(idx)));
+            let site = (term.source_info.span.with_parent(None), i);
+            if short {
+                short_call_borrows.insert(site);
+            } else {
+                other_sites.insert(site);
+            }
+        }
+    }
+    short_call_borrows.retain(|site| !other_sites.contains(site));
+
 
     let array_len = |place: Place<'tcx>| match place.ty(&body.local_decls, tcx).ty.kind() {
         TyKind::Array(_, len) => len.try_to_target_usize(tcx).and_then(|n| usize::try_from(n).ok()),
@@ -5720,6 +5798,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }).collect();
     BodyFacts {
         residual_drops,
+        short_call_borrows,
         drop_holders,
         switches,
         bindings: cx.names.bindings.into(),
@@ -5924,7 +6003,7 @@ fn field_paths_with<'tcx>(tcx: TyCtxt<'tcx>, ty: rustc_middle::ty::Ty<'tcx>, nam
 /// `place` with a leading dereference of a MIR temporary replaced by the
 /// user place the temporary refers to: `**_t` is `*gx` when the body's only
 /// assignment of `_t` is `_t = &gx`; `*_t` is `*r` when it is `_t = copy r`.
-fn resolve_temp_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Place<'tcx> {
+pub(super) fn resolve_temp_deref<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Place<'tcx> {
     resolve_deref(tcx, body, place, false)
 }
 

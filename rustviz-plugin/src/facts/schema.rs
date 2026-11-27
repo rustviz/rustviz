@@ -133,6 +133,9 @@ pub struct BodyBindings {
 
 #[derive(Serialize)]
 pub struct BodyFacts {
+    /// Mutable call operands whose own loan ends on the normal return edge.
+    #[serde(skip)]
+    pub short_call_borrows: BTreeSet<(rustc_span::Span, usize)>,
     /// Places a callee can write through a mutable operand, paired with
     /// the loans carried by the source operand at that exact MIR call.
     #[serde(skip)]

@@ -437,52 +437,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !self.tail_plain.contains(&e.hir_id) || self.tcx.hir_enclosing_body_owner(e.hir_id) != owner || !self.tcx.def_kind(owner).is_fn_like() {
       return;
     }
-    let returned: Option<String> = match e.kind {
-      ExprKind::Path(QPath::Resolved(None, path)) if path.segments.len() == 1 => Some(path.segments[0].ident.name.to_string()),
-      ExprKind::Lit(_) => None,
-      // `&self.s`: the parameter it reborrows through is the one returned.
-      _ => match self.reborrow_through_ref(e) {
-        Some(r) => Some(r.deref_rap().map(|r| r.name().to_string()).unwrap_or_default()),
-        None => return,
-      },
-    };
+    let Some(returned) = crate::facts::call_wording::return_origins(self.tcx, self.mir_body, Some(e.span)) else { return };
     let sig = self.tcx.liberate_late_bound_regions(owner.to_def_id(), self.tcx.fn_sig(owner).instantiate_identity().skip_norm_wip());
-    let out_regions: Vec<ty::Region<'tcx>> = sig.output().walk()
-      .filter_map(|g| match g.kind() { ty::GenericArgKind::Lifetime(r) if !r.is_static() => Some(r), _ => None })
-      .collect();
-    if out_regions.is_empty() {
+    let ty::Ref(result, ..) = sig.output().kind() else { return };
+    let name = result.to_string();
+    if result.is_static() || name == "'_" || !name.starts_with('\'') || !name[1..].chars().all(|c| c.is_alphanumeric() || c == '_') {
       return;
     }
-    let body = self.tcx.hir_body_owned_by(owner);
-    // A returned parameter is itself one the result borrows through.
-    let mut tied: Vec<(String, String)> = Vec::new();
-    for (param, input) in body.params.iter().zip(sig.inputs().iter()) {
-      let PatKind::Binding(_, _, ident, None) = param.pat.kind else { continue };
-      let ty::Ref(r, _, _) = input.kind() else { continue };
-      let name = format!("{r}");
-      if !out_regions.contains(r)
-        || name == "'_"
-        || !name.starts_with('\'')
-        || !name[1..].chars().all(|c| c.is_alphanumeric() || c == '_') {
-        continue;
-      }
-      tied.push((ident.name.to_string(), name));
-    }
-    if let Some(r) = &returned {
-      if !tied.iter().any(|(n, _)| n == r) {
-        return;
-      }
-    }
+    let mut regions = vec![*result];
+    self.include_outliving_regions(owner.to_def_id(), &mut regions);
+    let tied_input = |t: ty::Ty<'tcx>| t.walk().any(|g| g.as_region().is_some_and(|r| regions.contains(&r)));
+    let outer_tied = |t: ty::Ty<'tcx>| matches!(t.kind(), ty::Ref(r, ..) if regions.contains(r));
+    let inputs = TiedInputs {
+      count: sig.inputs().iter().filter(|t| tied_input(**t)).count(),
+      total: sig.inputs().len(),
+      reassigned: false,
+      nested: sig.inputs().iter().any(|t| tied_input(*t) && !outer_tied(*t)),
+    };
+    let tied = self.tcx.hir_body_owned_by(owner).params.iter().zip(sig.inputs())
+      .filter(|(_, t)| outer_tied(**t)).filter_map(|(param, _)| {
+        let PatKind::Binding(_, id, ..) = param.pat.kind else { return None };
+        let local = self.raps.bindings.declarations.get(&id)?;
+        (!returned.contains(&Some(*local))).then_some((id, *local))
+      }).collect::<Vec<_>>();
     let line = expr_to_line(e, &self.tcx);
-    for (name, lifetime) in tied {
-      if returned.as_deref() == Some(name.as_str()) {
-        continue;
-      }
-      let Some(rd) = self.raps.get(&name) else { continue };
+    for (binding, local) in tied {
+      let reassigned = self.mir_body.basic_blocks.iter().flat_map(|b| &b.statements).any(|s|
+        matches!(&s.kind, rustc_middle::mir::StatementKind::Assign(a) if a.0.as_local() == Some(local)));
+      let inputs = TiedInputs { reassigned, ..inputs };
+      let lifetime = name.clone();
+      let Some(rd) = self.raps.binding(binding) else { continue };
       let ro = rd.rap.to_owned();
       let id = *self.unique_id;
       *self.unique_id += 1;
-      self.add_external_event(line, ExternalEvent::TiedParamNote { ro, lifetime, id });
+      self.add_external_event(line, ExternalEvent::TiedParamNote { ro, lifetime, inputs, id });
     }
   }
 
@@ -1465,10 +1453,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // reference k's Box holds (`&mut **k`), as `r.push('!')` does
     // through r: k itself isn't borrowed, nor need it be `mut` (#1282).
     let through_held_ref = deep.as_ref().is_some_and(|d| d.held_mut.is_some());
-    let autoref = if is_method_autoref(rcvr, self.tcx.typeck(rcvr.hir_id.owner)) && !through_held_ref {
-      ImplicitRef::Autoref
-    } else {
-      ImplicitRef::No
+    let autoref = ImplicitRef::Receiver {
+      autoref: (is_method_autoref(rcvr, self.tcx.typeck(rcvr.hir_id.owner)) && !through_held_ref)
+        || (of_ref_var && !matches!(rcvr.kind, ExprKind::AddrOf(..))),
+      place: self.operand_label(expr, 0, rcvr),
     };
     match adjustment_map.get(rcvr.hir_id) {
       Some(adj_vec) => { 
@@ -1479,9 +1467,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 // `r.a.push_str(..)` with r a `&mut S`: a mutable
                 // reborrow of the field through r (#202).
                 AutoBorrowMutability::Mut{..} if matches!(rcvr_rty, ResourceTy::DerefField(..)) => {
-                  let typeck = self.tcx.typeck(name_and_generic_args.hir_id.owner);
-                  let result_has_lifetime = call_result_has_lifetime(expr, typeck);
-                  self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), true, result_has_lifetime, autoref, false);
+                  let ends_at_call = self.facts.is_some_and(|b| b.short_call_borrows.contains(&(expr.span.with_parent(None), 0)));
+                  self.add_pass_by_mref_ev(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), true, ends_at_call, autoref.clone(), false);
                   // `r.name.push(..)` with `r = &mut p`: the call
                   // modifies p.name, drawn on its column too (#1216).
                   self.write_field_behind_ref(&rcvr_rty, rcvr, line_num);
@@ -1505,8 +1492,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                       || is_coerced_ref_var_reborrow(rcvr, typeck),
                     _ => is_implicit_mut_reborrow(rcvr, typeck) || is_explicit_reborrow(rcvr, typeck),
                   };
-                  let result_has_lifetime = call_result_has_lifetime(expr, typeck);
-                  self.add_pass_by_mref_ev_deep(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, result_has_lifetime, autoref, of_ref_var, deep.clone());
+                  let ends_at_call = self.facts.is_some_and(|b| b.short_call_borrows.contains(&(expr.span.with_parent(None), 0)));
+                  self.add_pass_by_mref_ev_deep(line_num, ResourceTy::Value(fn_rap.clone()), ResourceTy::Value(rcvr_rap.clone()), is_reborrow, ends_at_call, autoref.clone(), of_ref_var, deep.clone());
                 },
                 AutoBorrowMutability::Not => {
                   let refcell_borrow_mut = self.is_refcell_borrow_mut_call(expr);
@@ -1515,7 +1502,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                   let rcvr_ty = self.tcx.typeck(rcvr.hir_id.owner).node_type(rcvr.hir_id);
                   let pointee_interior_mut = rcvr_rap.is_ref() && !of_ref_var && matches!(rcvr_rty, ResourceTy::Value(_))
                     && rcvr_ty.builtin_deref(true).is_some_and(|t| self.ty_has_interior_mut(t, rcvr.hir_id.owner) == InteriorMut::Yes);
-                  self.add_pass_by_sref_ev_full(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref, refcell_borrow_mut, pointee_interior_mut, of_ref_var, deep.clone());
+                  self.add_pass_by_sref_ev_full(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref.clone(), refcell_borrow_mut, pointee_interior_mut, of_ref_var, deep.clone());
                 }
                 _ => {}
               }
@@ -1641,7 +1628,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       ExprKind::MethodCall(_, recv, args, _) => {
         // `write!(dst, …)` is `dst.write_fmt(format_args!(…))`, which
-        // borrows `dst` mutably for the call.
+        // uses the resolved receiver type, including a by-value inherent method.
         if !recv.span.from_expansion()
           && matches!(innermost_macro(expr.span).as_deref(), Some("write" | "writeln"))
         {
@@ -1652,12 +1639,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.add_fn(name.clone());
             let to = ResourceTy::Value(self.raps.get(&fn_key(&name)).unwrap().rap.to_owned());
             let line_num = expr_to_line(recv, &self.tcx);
-            let id = *self.unique_id;
-            self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-              manually_takes: false, terminal: None, from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::MacroArg,
-              result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false, deep: None,
-            });
-            *self.unique_id += 1;
+            let typeck = self.tcx.typeck(recv.hir_id.owner);
+            match typeck.expr_ty_adjusted(recv).kind() {
+              rustc_middle::ty::Ref(_, _, m) if typeck.expr_adjustments(recv).iter().any(|adj|
+                matches!(adj.kind, Adjust::Borrow(AutoBorrow::Ref(_)))) => {
+                let implicit = ImplicitRef::MacroArg { place: self.operand_label(expr, 0, recv) };
+                if m.is_mut() {
+                  self.add_pass_by_mref_ev(line_num, to, from, false, false, implicit, false);
+                } else {
+                  self.add_pass_by_sref_ev(line_num, to, from, implicit, false, false);
+                }
+              }
+              _ => {
+                let copy = self.ty_is_copy(typeck.expr_ty_adjusted(recv), recv.hir_id.owner);
+                self.add_ev(line_num, if copy { Evt::Copy } else { Evt::Move }, to, from, false);
+              }
+            }
           }
         } else {
           self.descend_through_expansion(recv);
@@ -1677,7 +1674,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       {
         self.visit_expr(inner);
         if let Some(name) = user_macro_name(expr.span) {
-          self.macro_reads_arg(inner, name);
+          let formatting = matches!(expr.span.desugaring_kind(), Some(rustc_span::DesugaringKind::FormatLiteral { .. }));
+          self.macro_borrows_arg(inner, expr.span, name, formatting);
         }
       }
       ExprKind::AddrOf(_, _, inner)
@@ -1767,14 +1765,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   /// Record that the user-facing macro `name` (e.g. `println!`)
-  /// reads `arg` through a shared borrow for the duration of the
+  /// borrows `arg` through a shared reference for the duration of the
   /// call. Rendered like any `f(&x)` call: a function dot on `x`'s
-  /// timeline ("println! reads from x"), no arrow and no new column.
+  /// timeline, no arrow and no new column.
   /// Only place expressions (`x`, `x.f`, `*r`, `v[i]`) get an
   /// event; for `s.len()`, `x + 1`, etc. the visit of `arg` already
   /// records what the expression itself does. Repeated arguments
   /// (`println!("{} {}", x, x)`) collapse to one dot.
-  fn macro_reads_arg(&mut self, arg: &'tcx Expr<'tcx>, name: String) {
+  fn macro_borrows_arg(&mut self, arg: &'tcx Expr<'tcx>, borrow: rustc_span::Span, name: String, formatting: bool) {
     let Some(from) = place_rap(arg, &self.tcx, &self.raps) else { return };
     self.add_fn(name.clone());
     let line_num = expr_to_line(arg, &self.tcx);
@@ -1791,15 +1789,30 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         holds_value: self.ty_is_copy(ty, arg.hir_id.owner) || self.ty_is_plain(ty, arg.hir_id.owner),
         held_mut: None, elem: None })
     });
+    // rustc gives the synthetic borrow of a formatting operand the
+    // operand's span. Use its source spelling, including projections.
+    let typeck = self.tcx.typeck(arg.hir_id.owner);
+    let binding = match arg.kind {
+      ExprKind::Path(ref path) => match typeck.qpath_res(path, arg.hir_id) {
+        rustc_hir::def::Res::Local(id) => self.raps.bindings.declarations.get(&id).copied(),
+        _ => None,
+      },
+      _ => None,
+    };
+    let operand = crate::facts::call_wording::macro_operand(self.tcx, self.mir_body, borrow,
+      arg.span, typeck.expr_ty(arg), binding);
+    let place = operand.and_then(|_| self.tcx.sess.source_map().span_to_snippet(arg.span).ok());
+    let slot = operand == Some(true);
+    let implicit = if formatting { ImplicitRef::FormatArg { place } } else { ImplicitRef::MacroArg { place } };
     let already = self.preprocessed_events.iter().any(|(l, e)| {
       *l == line_num
-        && matches!(e, ExternalEvent::PassByStaticReference { from: f, to: t, deep: d, .. }
-          if *f == from && *t == to && d == &deep)
+        && matches!(e, ExternalEvent::PassByStaticReference { from: f, to: t, deep: d, implicit: i, .. }
+          if i == &implicit && *f == from && *t == to && d == &deep)
     });
     if !already {
       // format_args! takes `&arg`; the user didn't write the `&`.
       let id = *self.unique_id;
-      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep });
+      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: slot, deep });
       *self.unique_id += 1;
     }
   }
@@ -5607,16 +5620,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // borrowed for the call through a `&` that rustc inserts,
           // the way it auto-references a method receiver (`s.len()`),
           // and the dot says so, with the same short note (#366).
-          // A written `&a` is an ordinary argument. An operand that
-          // already is a reference (`r == q` with `r: &String`), or is
-          // reached through `*`, is read through, with no note, as for
-          // a receiver.
+          // The implicit borrow applies to every operand, including a
+          // reference binding or an explicitly constructed reference.
           let fn_name = op_name.to_owned();
           let typeck = self.tcx.typeck(expr.hir_id.owner);
-          for operand in operands {
+          for (index, operand) in operands {
+            if operand.span.from_expansion() { continue; }
+            let implicit = ImplicitRef::Comparison { place: self.operand_label(expr, index, operand) };
             if let ExprKind::AddrOf(_, _, inner) = operand.kind {
               if !matches!(get_rap(inner, &self.tcx, &self.raps), ResourceTy::Anonymous) {
-                self.match_arg(operand, fn_name.clone());
+                let from = get_rap(inner, &self.tcx, &self.raps);
+                self.add_fn(fn_name.clone());
+                let to = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.clone());
+                self.add_pass_by_sref_ev(expr_to_line(operand, &self.tcx), to, from, implicit, false, false);
               }
               continue;
             }
@@ -5629,9 +5645,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.add_fn(fn_name.clone());
             let line_num = expr_to_line(operand, &self.tcx);
             self.update_rap(&rap, line_num);
-            let implicit = if is_method_autoref(operand, typeck) { ImplicitRef::Autoref } else { ImplicitRef::No };
             let fn_rap = self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned();
-            self.add_pass_by_sref_ev(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), implicit, false, false);
+            let slot = crate::facts::call_wording::call_operand(self.mir_body, expr.span, index)
+              .and_then(|(at, op)| crate::facts::call_wording::operand_borrow(self.mir_body, at, op))
+              .is_some_and(|(_, p)| p.as_local().is_some_and(|l| self.mir_body.local_decls[l].ty.is_ref()));
+            self.add_pass_by_sref_ev_full(line_num, ResourceTy::Value(fn_rap), ResourceTy::Value(rap), implicit, false, false, slot, None);
           }
         }
       }
@@ -9778,6 +9796,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for to in lenders {
         let id = *self.unique_id;
         *self.unique_id += 1;
+        if let Some(payload) = self.raps.pattern_local(&name, arm.pat)
+          .and_then(|l| crate::facts::call_wording::payload_borrow(self.tcx, self.mir_body, l, &self.raps.bindings)) {
+          self.row_layout.pattern_payloads.insert(id, payload);
+        }
         let mut ext_ev = self.ext_ev_of_evt(e.clone(), to, from.clone(), id, false);
         if slot_loan.is_some() {
           if let ExternalEvent::MutableDie { of_ref_var, .. } | ExternalEvent::StaticDie { of_ref_var, .. } = &mut ext_ev {

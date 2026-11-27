@@ -100,7 +100,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c4_01_clone",
         must_contain: &[
-            "clone reads from s1 (implicitly borrowed)",
+            "s1 is passed to clone by shared reference (as self, implicitly borrowed). clone may read it",
             "Move from clone to s2",
             "s1 goes out of scope. Its resource is dropped.",
             "s2 goes out of scope. Its resource is dropped.",
@@ -146,10 +146,10 @@ const BOOK: &[Snippet] = &[
             "Immutable borrow from s to r2",
             "Mutable borrow from s to r3",
             "r3 holds a mutable reference; it can read and write the borrowed resource",
-            "Return mutably borrowed resource from r3 to s",
+            "r3's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "s goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["r3 is the owner of the resource"],
+        must_not_contain: &["r3 is the owner of the resource", "Return mutably borrowed resource from r3 to s"],
         ..E
     },
     Snippet {
@@ -161,7 +161,7 @@ const BOOK: &[Snippet] = &[
             // `}` (#1081).
             "L3 the value bytes points to is immutably borrowed by the `for` loop's iterator, through a copy of bytes, until the loop ends",
             "L7 the `for` loop's iterator no longer borrows the value bytes points to",
-            "L7 Return immutably borrowed resource from bytes to s",
+            "L7 If bytes holds a shared borrow affecting the data behind s, that borrow ends here. It no longer restricts access to the data behind s",
             "Copy of the value first_word() returns to word",
             // `==` on u8 copies item; it isn't an actor (#908).
             "L4 item's value is copied",
@@ -175,7 +175,7 @@ const BOOK: &[Snippet] = &[
             "L2 as_bytes no longer borrows the resource s points to",
             "the resource bytes points to",
             "L3 iter no longer borrows the value bytes points to",
-            "L3 Return immutably borrowed resource from bytes to s",
+            "L3 bytes's shared borrow of the data behind s ends",
             "L3 bytes's immutable borrow ends",
         ],
         ..E
@@ -185,8 +185,8 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Immutable borrow from s to hello",
             "Immutable borrow from s to world",
-            "Return immutably borrowed resource from hello to s",
-            "Return immutably borrowed resource from world to s",
+            "If hello holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "If world holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
         ],
         must_not_contain: &["hello is the owner of the resource", "world is the owner of the resource"],
         ..E
@@ -199,7 +199,7 @@ const BOOK: &[Snippet] = &[
             "a reference to s[..], reborrowed through s, is returned to the caller; the data it points to is not copied",
             "L13 word holds an immutable reference",
             "L13 Immutable borrow from my_string to word: first_word's signature gives the reference it returns the same lifetime as its argument",
-            "L14 Return immutably borrowed resource from word to my_string",
+            "L14 If word holds a shared borrow affecting my_string, that borrow ends here. It no longer restricts access to my_string",
             "my_string goes out of scope. Its resource is dropped.",
             // `==` on u8 copies item; it isn't an actor (#908).
             "L4 item's value is copied",
@@ -207,7 +207,7 @@ const BOOK: &[Snippet] = &[
             // `}` (#1081).
             "L3 the value bytes points to is immutably borrowed by the `for` loop's iterator, through a copy of bytes, until the loop ends",
             "L7 the `for` loop's iterator no longer borrows the value bytes points to",
-            "L7 Return immutably borrowed value from bytes to s",
+            "L7 If bytes holds a shared borrow affecting the data behind s, that borrow ends here. It no longer restricts access to the data behind s",
         ],
         must_not_contain: &[
             "Copy from item to ==",
@@ -215,7 +215,7 @@ const BOOK: &[Snippet] = &[
             "bytes is the owner of the resource",
             "word is the owner of the resource",
             "s's resource is moved to the caller",
-            "Return immutably borrowed resource from word to *word",
+            "word's shared borrow of *word ends",
             "the resource word points to",
             "Copy from first_word to word",
             "L13 my_string's resource is no longer immutably borrowed",
@@ -223,7 +223,7 @@ const BOOK: &[Snippet] = &[
             // reborrowed through s, not s's reference (#1071).
             "a reference from s is returned to the caller",
             "L3 iter no longer borrows the value bytes points to",
-            "L3 Return immutably borrowed value from bytes to s",
+            "L3 bytes's shared borrow of the data behind s ends",
             "L3 bytes's immutable borrow ends",
         ],
         ..E
@@ -244,8 +244,8 @@ const BOOK: &[Snippet] = &[
             "s is the owner of the resource",
             "s acquires ownership of a resource",
             "s's resource is copied",
-            "Return immutably borrowed resource from s to *s",
-            "Return immutably borrowed resource from t to *t",
+            "s's shared borrow of *s ends",
+            "t's shared borrow of *t ends",
         ],
         ..E
     },
@@ -254,7 +254,7 @@ const BOOK: &[Snippet] = &[
         status: Correct,
         must_contain: &[
             "Immutable borrow from a to slice",
-            "Return immutably borrowed value from slice to a",
+            "If slice holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
             "L2 a is bound to a copyable value",
             "a goes out of scope",
         ],
@@ -276,8 +276,8 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "some_string is a mutable borrow from the caller",
             "some_string holds a mutable reference; it can read and write the borrowed resource",
-            "push_str reads and writes through some_string (mutable reborrow — some_string can't be used until push_str returns)",
-            "change reads from/writes to s",
+            "A mutable reference through some_string is passed to push_str (as self). push_str may read or write through it (mutable reborrow — some_string can't be used until push_str returns)",
+            "s is passed to change by mutable reference. change may read or write it",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["some_string is the owner of the resource"],
@@ -368,7 +368,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "black is initialized with a Color value",
             "Copy from black.0 to r",
-            "println! reads from black.2 through an implicit reference, so black.2 isn't moved",
+            "println! borrows black.2 for formatting through an implicit shared reference, so black.2 isn't moved",
             "black goes out of scope",
         ],
         // #873: `Color(0, 0, 0)` builds a new value; the constructor is
@@ -383,7 +383,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "self is a mutable borrow from the caller",
             "self holds a mutable reference; it can read and write the borrowed value",
-            "inc reads from/writes to c (implicitly mutably borrowed)",
+            "c is passed to inc by mutable reference (as self, implicitly borrowed). inc may read or write it",
             "c goes out of scope",
         ],
         must_not_contain: &[
@@ -422,8 +422,8 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "self is an immutable borrow from the caller",
             "other is an immutable borrow from the caller",
-            "can_hold reads from rect1 (implicitly borrowed)",
-            "can_hold reads from rect2",
+            "rect1 is passed to can_hold by shared reference (as self, implicitly borrowed). can_hold may read it",
+            "rect2 is passed to can_hold by shared reference. can_hold may read it",
         ],
         must_not_contain: &["self is the owner of the resource", "other is the owner of the resource"],
         ..E
@@ -432,7 +432,7 @@ const BOOK: &[Snippet] = &[
         id: "c5_10_one_field_getter",
         must_contain: &[
             "self is an immutable borrow from the caller",
-            "get reads from c (implicitly borrowed)",
+            "c is passed to get by shared reference (as self, implicitly borrowed). get may read it",
             "Copy of the value get() returns to v",
         ],
         must_not_contain: &["self is the owner of the resource"],
@@ -442,7 +442,7 @@ const BOOK: &[Snippet] = &[
         id: "c5_11_derive_debug",
         must_contain: &[
             "rect1 is bound to a value",
-            "println! reads from rect1 through an implicit reference, so rect1 isn't moved",
+            "println! borrows rect1 for formatting through an implicit shared reference, so rect1 isn't moved",
             "rect1 goes out of scope",
         ],
         must_not_contain: &[
@@ -458,7 +458,7 @@ const BOOK: &[Snippet] = &[
         id: "c5_12_dbg_macro",
         must_contain: &[
             "scale is bound to a copyable value",
-            "dbg! reads from rect1",
+            "rect1 is passed to dbg! by shared reference. dbg! may read it",
             "rect1 goes out of scope",
         ],
         must_not_contain: &[
@@ -517,12 +517,12 @@ const BOOK: &[Snippet] = &[
         id: "c6_05_match_on_ref",
         must_contain: &[
             "Partial immutable borrow from opt to s",
-            "Return immutably borrowed resource from s to opt",
+            "s's shared borrow of the value inside opt ends. This borrow no longer restricts access to opt",
             "opt goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "L4+ s's immutable borrow ends",
             "L4+ opt's resource is no longer immutably borrowed",
         ],
-        must_not_contain: &["L4 s's immutable borrow ends", "L4 opt's resource is no longer immutably borrowed"],
+        must_not_contain: &["s's shared borrow of opt ends", "L4 s's immutable borrow ends", "L4 opt's resource is no longer immutably borrowed"],
         ..E
     },
     Snippet {
@@ -566,7 +566,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_09_option_unwrap_or",
-        must_contain: &["Copy of the value unwrap_or() returns to y", "is_some reads from x (implicitly borrowed)"],
+        must_contain: &["Copy of the value unwrap_or() returns to y", "x is passed to is_some by shared reference (as self, implicitly borrowed). is_some may read it"],
         ..E
     },
     Snippet {
@@ -581,7 +581,7 @@ const BOOK: &[Snippet] = &[
             "msg is the owner of the resource",
             "msg acquires ownership of a resource",
             "msg acquired ownership of a resource (in all branches above)",
-            "Return immutably borrowed resource from msg to *msg",
+            "msg's shared borrow of *msg ends",
         ],
         ..E
     },
@@ -590,7 +590,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "L9 self's immutable borrow ends",
             "L10 Partial immutable borrow from self to s",
-            "call reads from m (implicitly borrowed)",
+            "m is passed to call by shared reference (as self, implicitly borrowed). call may read it",
             "m goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "L10+ s no longer borrows the resource self points to",
             "L10+ s's immutable borrow ends",
@@ -611,7 +611,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_01_vec_new_push",
         must_contain: &[
             "Move from Vec::new to v",
-            "push reads from/writes to v (implicitly mutably borrowed)",
+            "v is passed to push by mutable reference (as self, implicitly borrowed). push may read or write it",
             "v goes out of scope. Its resource is dropped.",
         ],
         ..E
@@ -620,7 +620,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_02_vec_index_ref",
         must_contain: &[
             "Immutable borrow from v to third",
-            "Return immutably borrowed resource from third to v",
+            "If third holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
         ],
         must_not_contain: &["third is the owner of the resource"],
         ..E
@@ -629,7 +629,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_03_vec_get_match",
         status: Correct,
         must_contain: &[
-            "get reads from v (implicitly borrowed)",
+            "get takes a shared reference (as self, implicitly borrowed). It may read through that reference",
             "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third's value can hold a reference (third isn't a reference itself)",
             "L5 third₂ is initialized with a copy of a value inside third",
             "L5 a value inside third is copied",
@@ -639,7 +639,7 @@ const BOOK: &[Snippet] = &[
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "Return immutably borrowed resource from third to third",
+            "third's shared borrow of third ends",
             "third isn't a reference, but its value holds one",
             "L3 v's resource is no longer immutably borrowed",
             "=L5 Partial copy from third to third",
@@ -658,7 +658,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_04_vec_for_ref",
         must_contain: &[
             "Immutable borrow from v to i",
-            "Return immutably borrowed resource from i to v",
+            "If i holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["i is the owner of the resource"],
@@ -670,7 +670,7 @@ const BOOK: &[Snippet] = &[
             "Mutable borrow from v to i",
             "i holds a mutable reference; it can read and write the borrowed value",
             "the value i points to is modified through *i",
-            "Return mutably borrowed resource from i to v",
+            "If i holds a mutable borrow affecting v, that borrow ends here. It no longer restricts access to v",
         ],
         must_not_contain: &["i is the owner of the resource", "*i acquires ownership of a resource"],
         ..E
@@ -679,7 +679,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_06_vec_push_string",
         must_contain: &[
             "Move from s to push",
-            "push reads from/writes to v (implicitly mutably borrowed)",
+            "v is passed to push by mutable reference (as self, implicitly borrowed). push may read or write it",
             "s goes out of scope. No resource is dropped.",
             "v goes out of scope. Its resource is dropped (including every String it holds).",
         ],
@@ -688,7 +688,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c8_07_vec_index_copy",
         must_contain: &[
-            "push reads from/writes to v (implicitly mutably borrowed)",
+            "v is passed to push by mutable reference (as self, implicitly borrowed). push may read or write it",
             "first is initialized with a copy of v[0]",
             "L6 first goes out of scope",
         ],
@@ -697,7 +697,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c8_08_string_push_char",
-        must_contain: &["push reads from/writes to s (implicitly mutably borrowed)", "s goes out of scope. Its resource is dropped."],
+        must_contain: &["s is passed to push by mutable reference (as self, implicitly borrowed). push may read or write it", "s goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -706,7 +706,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Move from s1 to +",
             "Move from + to s3",
-            "+ reads from s2",
+            "s2 is passed to + by shared reference. + may read it",
             "s1 goes out of scope. No resource is dropped.",
             "s2 goes out of scope. Its resource is dropped.",
             "s3 goes out of scope. Its resource is dropped.",
@@ -727,7 +727,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_11_string_chars",
         note: "the Chars iterator borrows s until the loop ends (was: s unborrowed again on the for line, #868; its segment names the loop's iterator, #871)",
         must_contain: &[
-            "chars reads from s (implicitly borrowed)",
+            "chars takes a shared reference (as self, implicitly borrowed). It may read through that reference",
             "L5 s's resource is no longer immutably borrowed",
             "s's resource is immutably borrowed by the `for` loop's iterator; s is read-only until the loop ends",
             "s goes out of scope. Its resource is dropped.",
@@ -742,9 +742,9 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c8_12_hashmap_insert_get",
         must_contain: &[
-            "insert reads from/writes to scores (implicitly mutably borrowed)",
-            "get reads from scores (implicitly borrowed)",
-            "get reads from team_name",
+            "scores is passed to insert by mutable reference (as self, implicitly borrowed). insert may read or write it",
+            "scores is passed to get by shared reference (as self, implicitly borrowed). get may read it",
+            "team_name is passed to get by shared reference. get may read it",
             "Copy of the value unwrap_or() returns to score",
         ],
         ..E
@@ -763,7 +763,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_14_hashmap_entry",
         must_contain: &[
             "text is bound to an immutable reference",
-            "split_whitespace reads from text",
+            "split_whitespace takes a shared reference (as self). It may read through that reference",
             // The loop's iterator reads through text until the loop's
             // `}` (#1081).
             "L6 the value text points to is immutably borrowed by the `for` loop's iterator, through a copy of text, until the loop ends",
@@ -773,7 +773,7 @@ const BOOK: &[Snippet] = &[
             // passes it on (it named `or_insert` before).
             "L7 Mutable borrow from map to count: entry's signature gives the value it returns the same lifetime as the value it was called on and its argument (the other is a value with no column here), so map stays borrowed while count is in use; or_insert passes the borrow on",
             "the value count points to is modified through *count",
-            "Return mutably borrowed resource from count to map",
+            "If count holds a mutable borrow affecting map, that borrow ends here. It no longer restricts access to map",
             "map goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
@@ -781,10 +781,10 @@ const BOOK: &[Snippet] = &[
             "text acquires ownership of a resource",
             "*count acquires ownership of a resource",
             "map goes out of scope. No resource is dropped.",
-            "Return immutably borrowed resource from text to *text",
+            "text's shared borrow of *text ends",
             "text's immutable borrow ends (what it borrows from isn't shown)",
             // split_whitespace is a method, not a lender (#868).
-            "Return immutably borrowed resource from word to split_whitespace",
+            "word's shared borrow of split_whitespace ends",
             "L6 split_whitespace no longer borrows the value text points to",
             "L6 text's borrow of the string literal ends (string literals live for the whole program)",
         ],
@@ -802,9 +802,9 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c8_16_as_str",
         must_contain: &[
-            "as_str reads from s (implicitly borrowed)",
+            "s is passed to as_str by shared reference (as self, implicitly borrowed). as_str may read it",
             "Immutable borrow from s to t: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
-            "Return immutably borrowed resource from t to s",
+            "If t holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
         ],
         must_not_contain: &["t is the owner of the resource", "L3 s's resource is no longer immutably borrowed"],
         ..E
@@ -850,17 +850,17 @@ const BOOK: &[Snippet] = &[
         note: "renders since #155 (was a crash in the probe). x (from v.first()?) borrows *v until L3: the `?` passes first's borrow on, as unwrap does (#1352)",
         must_contain: &[
             "v is an immutable borrow from the caller",
-            "first reads from v",
+            "first takes a shared reference (as self). It may read through that reference",
             "x holds an immutable reference; it can read the borrowed value",
             "L2 Immutable borrow from v to x: first's signature gives the value it returns the same lifetime as the value it was called on; the `?` passes the borrow on",
-            "L3 Return immutably borrowed resource from x to v",
+            "L3 If x holds a shared borrow affecting the data behind v, that borrow ends here. It no longer restricts access to the data behind v",
             "L3 v's immutable borrow ends",
-            "first_plus_one reads from v",
+            "v is passed to first_plus_one by shared reference. first_plus_one may read it",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "x is the owner of the resource",
-            "Return immutably borrowed resource from x to *x",
+            "x's shared borrow of *x ends",
             "L2 v's resource is no longer immutably borrowed",
             "L2 v's immutable borrow ends",
             "x's immutable borrow ends (what it borrows from isn't shown)",
@@ -883,7 +883,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c9_06_panic_branch",
-        must_contain: &["len reads from v (implicitly borrowed)", "v goes out of scope. Its resource is dropped."],
+        must_contain: &["v is passed to len by shared reference (as self, implicitly borrowed). len may read it", "v goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -892,7 +892,7 @@ const BOOK: &[Snippet] = &[
         note: "renders since #155 (was a crash in the probe); the tail `Ok(n * 2)` is not shown as returned",
         must_contain: &[
             "s is an immutable borrow from the caller",
-            "parse reads from s",
+            "A shared reference through s is passed to parse (as self). parse may read through it",
             "Move from double to r",
             "r goes out of scope",
         ],
@@ -918,12 +918,12 @@ const BOOK: &[Snippet] = &[
             "list is an immutable borrow from the caller",
             "Immutable reborrow from list to largest",
             "a reference from largest is returned to the caller; the data it points to is not copied",
-            "largest reads from number_list",
+            "number_list is passed to largest by shared reference. largest may read it",
             "item's reference is copied (not the resource it points to)",
             "L5 largest is assigned a copy of item's reference",
             "L13 result holds an immutable reference",
             "L13 Immutable borrow from number_list to result: largest's signature gives the reference it returns the same lifetime as its argument",
-            "L14 Return immutably borrowed resource from result to number_list",
+            "L14 If result holds a shared borrow affecting number_list, that borrow ends here. It no longer restricts access to number_list",
             "number_list goes out of scope. Its resource is dropped.",
             // #754: list's borrow goes on in the caller, through result.
             "the resource list points to is immutably borrowed by largest",
@@ -933,7 +933,7 @@ const BOOK: &[Snippet] = &[
             "item's resource is copied",
             "list's immutable borrow ends",
             "Immutable borrow from list to largest",
-            "Return immutably borrowed resource from result to *result",
+            "result's shared borrow of *result ends",
             "L5 largest is initialized with a copy of item",
             "Copy from largest to result",
             "L13 number_list's resource is no longer immutably borrowed",
@@ -942,7 +942,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c10_02_generic_struct_method",
-        must_contain: &["self is an immutable borrow from the caller", "x reads from p (implicitly borrowed)"],
+        must_contain: &["self is an immutable borrow from the caller", "p is passed to x by shared reference (as self, implicitly borrowed). x may read it"],
         must_not_contain: &["self is the owner of the resource"],
         ..E
     },
@@ -950,19 +950,19 @@ const BOOK: &[Snippet] = &[
         id: "c10_03_trait_impl",
         must_contain: &[
             "self is an immutable borrow from the caller",
-            "summarize reads from t (implicitly borrowed)",
+            "t is passed to summarize by shared reference (as self, implicitly borrowed). summarize may read it",
             "t.username goes out of scope. Its resource is dropped.",
         ],
         ..E
     },
     Snippet {
         id: "c10_04_trait_default",
-        must_contain: &["summarize reads from a (implicitly borrowed)", "Move from summarize to s", "a.title goes out of scope. Its resource is dropped."],
+        must_contain: &["a is passed to summarize by shared reference (as self, implicitly borrowed). summarize may read it", "Move from summarize to s", "a.title goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
         id: "c10_05_impl_trait_param",
-        must_contain: &["item is an immutable borrow from the caller", "notify reads from s"],
+        must_contain: &["item is an immutable borrow from the caller", "s is passed to notify by shared reference. notify may read it"],
         ..E
     },
     Snippet {
@@ -970,10 +970,10 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "x is an immutable borrow from the caller",
             "string2 is bound to an immutable reference",
-            "as_str reads from string1 (implicitly borrowed)",
+            "string1 is passed to as_str by shared reference (as self, implicitly borrowed). as_str may read it",
             "L8 string2's borrow of the string literal ends (string literals live for the whole program)",
             "L8 Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments (the other is a value with no column here), so string1 stays borrowed while result is in use",
-            "L9 Return immutably borrowed resource from result to string1",
+            "L9 If result holds a shared borrow affecting string1, that borrow ends here. It no longer restricts access to string1",
             // Each branch of the tail `if` returns its reference (#674).
             "a reference from x is returned to the caller; the data it points to is not copied",
             "a reference from y is returned to the caller; the data it points to is not copied",
@@ -981,8 +981,8 @@ const BOOK: &[Snippet] = &[
         must_not_contain: &[
             "string2 is the owner of the resource",
             "string2 acquires ownership of a resource",
-            "Return immutably borrowed resource from string2 to *string2",
-            "Return immutably borrowed resource from result to *result",
+            "string2's shared borrow of *string2 ends",
+            "result's shared borrow of *result ends",
             "L8 string1's resource is no longer immutably borrowed",
             "string2's immutable borrow ends (what it borrows from isn't shown)",
         ],
@@ -991,13 +991,13 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c10_07_longest_inner_scope",
         must_contain: &[
-            "longest reads from string1",
-            "longest reads from string2",
+            "string1 is passed to longest by shared reference. longest may read it",
+            "string2 is passed to longest by shared reference. longest may read it",
             "L9 result holds an immutable reference",
-            "L9 Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while result is in use",
-            "L9 Immutable borrow from string2 to result: longest's signature gives the reference it returns the same lifetime as both arguments, so it may point into either, and both stay borrowed while result is in use",
-            "L10 Return immutably borrowed resource from result to string1",
-            "L10 Return immutably borrowed resource from result to string2",
+            "L9 Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments. The code in longest has return paths from both tied inputs. At the caller, both stay borrowed while result is in use",
+            "L9 Immutable borrow from string2 to result: longest's signature gives the reference it returns the same lifetime as both arguments. The code in longest has return paths from both tied inputs. At the caller, both stay borrowed while result is in use",
+            "L10 If result holds a shared borrow affecting string1, that borrow ends here. It no longer restricts access to string1",
+            "L10 If result holds a shared borrow affecting string2, that borrow ends here. It no longer restricts access to string2",
             "L11 string2 goes out of scope. Its resource is dropped.",
             // Each branch of the tail `if` returns its reference (#674).
             "a reference from x is returned to the caller; the data it points to is not copied",
@@ -1005,7 +1005,7 @@ const BOOK: &[Snippet] = &[
         ],
         must_not_contain: &[
             "result is the owner of the resource",
-            "Return immutably borrowed resource from result to *result",
+            "result's shared borrow of *result ends",
             "the resource result points to",
             "L9 string1's resource is no longer immutably borrowed",
             "L9 string2's resource is no longer immutably borrowed",
@@ -1051,7 +1051,7 @@ const BOOK: &[Snippet] = &[
         id: "c13_03_fnmut_counter",
         must_contain: &[
             "Closure capture (mutable borrow) from count to inc",
-            "Return mutably borrowed value from inc to count",
+            "If inc holds a mutable borrow affecting count, that borrow ends here. It no longer restricts access to count",
         ],
         must_not_contain: &["Return mutably borrowed resource from inc to count"],
         ..E
@@ -1081,7 +1081,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c13_06_iter_map_collect",
-        must_contain: &["iter reads from v1 (implicitly borrowed)", "Move from collect to v2", "v1 goes out of scope. Its resource is dropped."],
+        must_contain: &["iter takes a shared reference (as self, implicitly borrowed). It may read through that reference", "Move from collect to v2", "v1 goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -1101,9 +1101,9 @@ const BOOK: &[Snippet] = &[
         status: Correct,
         note: "x's mutable borrow returns to v at the end of the loop (was 'returned' to iter_mut, #171; #789), and v isn't unborrowed on the for line (#868)",
         must_contain: &[
-            "iter_mut reads from/writes to v (implicitly mutably borrowed)",
+            "iter_mut takes a mutable reference (as self, implicitly borrowed). It may read or write through that reference",
             "the value x points to is modified through *x",
-            "Return mutably borrowed resource from x to v",
+            "If x holds a mutable borrow affecting v, that borrow ends here. It no longer restricts access to v",
             // x's borrow of v, on the `for` line (#1347).
             "Mutable borrow from v to x",
             "x's mutable borrow ends",
@@ -1112,23 +1112,23 @@ const BOOK: &[Snippet] = &[
         ],
         must_not_contain: &[
             "*x acquires ownership of a resource",
-            "Return mutably borrowed resource from x to iter_mut",
+            "x's mutable borrow of iter_mut ends",
             "L3 v's resource is no longer mutably borrowed",
         ],
         ..E
     },
     Snippet {
         id: "c13_09_iter_sum",
-        must_contain: &["iter reads from v1 (implicitly borrowed)", "Copy of the value sum() returns to total"],
+        must_contain: &["iter takes a shared reference (as self, implicitly borrowed). It may read through that reference", "Copy of the value sum() returns to total"],
         ..E
     },
     Snippet {
         id: "c13_10_iter_next",
         must_contain: &[
-            "iter reads from v1 (implicitly borrowed)",
-            "next reads from/writes to v1_iter (implicitly mutably borrowed)",
+            "iter takes a shared reference (as self, implicitly borrowed). It may read through that reference",
+            "v1_iter is passed to next by mutable reference (as self, implicitly borrowed). next may read or write it",
             "L3 Immutable borrow from v1 to v1_iter: iter's signature gives the value it returns the same lifetime as the value it was called on; v1_iter isn't a reference, but its value holds one",
-            "L5 Return immutably borrowed resource from v1_iter to v1",
+            "L5 If v1_iter holds a shared borrow affecting v1, that borrow ends here. It no longer restricts access to v1",
         ],
         must_not_contain: &["L3 v1's resource is no longer immutably borrowed"],
         ..E
@@ -1137,7 +1137,7 @@ const BOOK: &[Snippet] = &[
         id: "c13_11_sort_by_key_fnmut",
         status: Missing,
         note: "the closure's &mut capture of num_sort_operations is not shown",
-        must_contain: &["sort_by_key reads from/writes to list (implicitly mutably borrowed)", "list is bound to a copyable value", "list goes out of scope"],
+        must_contain: &["sort_by_key takes a mutable reference (as self, implicitly borrowed). It may read or write through that reference", "list is bound to a copyable value", "list goes out of scope"],
         must_not_contain: &["list goes out of scope. No resource is dropped."],
         ..E
     },
@@ -1145,7 +1145,7 @@ const BOOK: &[Snippet] = &[
         id: "c13_12_closure_borrow_then_use",
         must_contain: &[
             "Closure capture (immutable borrow) from list to only_borrows",
-            "Return immutably borrowed resource from only_borrows to list",
+            "If only_borrows holds a shared borrow affecting list, that borrow ends here. It no longer restricts access to list",
             "list goes out of scope. Its resource is dropped.",
         ],
         ..E
@@ -1171,7 +1171,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c15_03_ref_deref",
-        must_contain: &["Immutable borrow from x to y", "Return immutably borrowed value from y to x"],
+        must_contain: &["Immutable borrow from x to y", "y's shared borrow of x ends. This borrow no longer restricts access to x. Ending the borrow doesn't move the value"],
         must_not_contain: &["y is the owner of the resource", "Return immutably borrowed resource from y to x"],
         ..E
     },
@@ -1182,7 +1182,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "self is an immutable borrow from the caller",
             "name is an immutable borrow from the caller",
-            "hello reads from m",
+            "m is passed to hello by shared reference. hello may read it",
             "m.0 goes out of scope. Its resource is dropped.",
         ],
         ..E
@@ -1190,7 +1190,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c15_05_rc_strong_count",
         must_contain: &[
-            "Rc::clone reads from a",
+            "a is passed to Rc::clone by shared reference. Rc::clone may read it",
             "Move from Rc::new to a",
             "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
             "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
@@ -1203,7 +1203,7 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c15_06_rc_method_clone",
         must_contain: &[
-            "clone reads from a (implicitly borrowed)",
+            "a is passed to clone by shared reference (as self, implicitly borrowed). clone may read it",
             "Move from Rc::new to a",
             "b goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
             "clone makes another Rc to the same value (nothing is copied), now owned by b",
@@ -1221,7 +1221,7 @@ const BOOK: &[Snippet] = &[
             "borrow_mut borrows c immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "c goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["borrow_mut reads from c", "borrow reads from c"],
+        must_not_contain: &["c is passed to borrow_mut by shared reference", "c is passed to borrow by shared reference"],
         ..E
     },
     Snippet {
@@ -1233,13 +1233,13 @@ const BOOK: &[Snippet] = &[
             "Rc::clone borrows value immutably (a shared borrow); value has interior mutability, so its contents can change even through a shared borrow",
             "borrow_mut borrows value immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "Rc::clone makes another Rc to the same value (nothing is copied), now owned by a",
-            "println! reads from a through an implicit reference, so a isn't moved",
+            "println! borrows a for formatting through an implicit shared reference, so a isn't moved",
             "a goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
             "value goes out of scope. Its resource is dropped (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
         ],
         must_not_contain: &[
-            "borrow_mut reads from value",
-            "Rc::clone reads from value",
+            "value is passed to borrow_mut by shared reference",
+            "value is passed to Rc::clone by shared reference",
             "Move from Rc::clone to a",
             "a goes out of scope. Its resource is dropped.",
             "value goes out of scope. Its resource is dropped.",
@@ -1273,7 +1273,7 @@ const BOOK: &[Snippet] = &[
         note: "the second `spaces` is its own column, `spaces₂` (#173)",
         must_contain: &[
             "spaces is bound to an immutable reference",
-            "len reads from spaces",
+            "A shared reference through spaces is passed to len (as self). len may read through it",
             "L3 spaces's borrow of the string literal ends (string literals live for the whole program)",
             "L3 spaces₂ is initialized with the value len() returns",
             "L5 spaces₂ goes out of scope",
@@ -1281,7 +1281,7 @@ const BOOK: &[Snippet] = &[
         must_not_contain: &[
             "spaces is the owner of the resource",
             "spaces acquires ownership of a resource",
-            "Return immutably borrowed resource from spaces to *spaces",
+            "spaces's shared borrow of *spaces ends",
             "L4 spaces's borrow of the string literal ends (string literals live for the whole program)",
             "L4 spaces's immutable borrow ends",
             "L3 spaces is assigned the result of len",
@@ -1304,7 +1304,7 @@ const BOOK: &[Snippet] = &[
         id: "m_03_nested_block_borrow",
         must_contain: &[
             "Immutable borrow from a to r",
-            "Return immutably borrowed resource from r to a",
+            "r's shared borrow of a ends. This borrow no longer restricts access to a. Ending the borrow doesn't move the resource",
             "L7 b goes out of scope. Its resource is dropped.",
             "L9 a goes out of scope. Its resource is dropped.",
         ],
@@ -1322,7 +1322,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_05_while_let_pop",
-        must_contain: &["pop reads from/writes to stack (implicitly mutably borrowed)", "Copy of the value inside the Option pop() returns to top", "stack goes out of scope. Its resource is dropped."],
+        must_contain: &["stack is passed to pop by mutable reference (as self, implicitly borrowed). pop may read or write it", "Copy of the value inside the Option pop() returns to top", "stack goes out of scope. Its resource is dropped."],
         ..E
     },
     Snippet {
@@ -1331,7 +1331,7 @@ const BOOK: &[Snippet] = &[
             "Copy from tup.0 to x",
             "z is initialized with a copy of tup.2",
             "Copy from tup.0 to five_hundred",
-            "println! reads from five_hundred through an implicit reference, so five_hundred isn't moved",
+            "println! borrows five_hundred for formatting through an implicit shared reference, so five_hundred isn't moved",
         ],
         ..E
     },
@@ -1378,7 +1378,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_12_method_chain_trim_len",
-        must_contain: &["trim reads from s (implicitly borrowed)", "Copy of the value len() returns to n"],
+        must_contain: &["trim takes a shared reference (as self, implicitly borrowed). It may read through that reference", "Copy of the value len() returns to n"],
         ..E
     },
     Snippet {
@@ -1386,16 +1386,16 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "v is an immutable borrow from the caller",
             "a reference to v[0], reborrowed through v, is returned to the caller; the data it points to is not copied",
-            "first reads from v",
+            "v is passed to first by shared reference. first may read it",
             "L7 f holds an immutable reference",
             "L7 Immutable borrow from v to f: first's signature gives the reference it returns the same lifetime as its argument",
-            "L8 Return immutably borrowed resource from f to v",
+            "L8 If f holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
             "v goes out of scope. Its resource is dropped (including every String it holds).",
         ],
         must_not_contain: &[
             "v's resource is moved to the caller",
             "f is the owner of the resource",
-            "Return immutably borrowed resource from f to *f",
+            "f's shared borrow of *f ends",
             "L7 v's resource is no longer immutably borrowed",
             // `&v[0]` is a reference to one element, reborrowed through
             // v, not v's reference (#1071).
@@ -1414,8 +1414,8 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "self is a mutable borrow from the caller",
             "self holds a mutable reference; it can read and write the borrowed resource",
-            "push reads from/writes to s (implicitly mutably borrowed)",
-            "len reads from s.items (implicitly borrowed)",
+            "s is passed to push by mutable reference (as self, implicitly borrowed). push may read or write it",
+            "s.items is passed to len by shared reference (as self, implicitly borrowed). len may read it",
             "s.items goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["self is the owner of the resource"],
@@ -1432,7 +1432,7 @@ const BOOK: &[Snippet] = &[
             "Mutable borrow from x to r",
             "r holds a mutable reference; it can read and write the borrowed value",
             "the value r points to is modified through *r",
-            "Return mutably borrowed value from r to x",
+            "r's mutable borrow of x ends. This borrow no longer restricts access to x. Ending the borrow doesn't move the value",
             "Copy from x to y",
         ],
         must_not_contain: &["r is the owner of the resource", "*r acquires ownership of a resource", "Return mutably borrowed resource from r to x"],
@@ -1467,8 +1467,8 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "self is a mutable borrow from the caller",
             "L13 c.n is mutably borrowed along with c by reset, which may change c.n; the borrow ends here",
-            "reset reads from/writes to c (implicitly mutably borrowed)",
-            "println! reads from c.n through an implicit reference, so c.n isn't moved",
+            "c is passed to reset by mutable reference (as self, implicitly borrowed). reset may read or write it",
+            "println! borrows c.n for formatting through an implicit shared reference, so c.n isn't moved",
         ],
         ..E
     },
@@ -1480,7 +1480,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "c is a mutable borrow from the caller",
             "L11 c.n is mutably borrowed along with c by inc, which may change c.n; the borrow ends here",
-            "inc reads from/writes to c",
+            "c is passed to inc by mutable reference. inc may read or write it",
             "c goes out of scope",
         ],
         must_not_contain: &["c goes out of scope. Its resource is dropped."],
@@ -1490,7 +1490,7 @@ const BOOK: &[Snippet] = &[
         id: "x04_tuple_field_simple",
         status: Missing,
         note: "was a crash at c2037dd. `let t = (1, 2)` and `let a = t.0` have no events (#189)",
-        must_contain: &["println! reads from a through an implicit reference, so a isn't moved"],
+        must_contain: &["println! borrows a for formatting through an implicit shared reference, so a isn't moved"],
         ..E
     },
     Snippet {
@@ -1500,12 +1500,12 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "borrow_mut borrows c immutably (a shared borrow); exclusive access to its contents is checked at runtime (a second borrow_mut while this one is live would panic)",
             "Move from RefCell::new to c",
-            "println! reads from c through an implicit reference, so c isn't moved",
+            "println! borrows c for formatting through an implicit shared reference, so c isn't moved",
             "c goes out of scope",
         ],
         must_not_contain: &[
             "c goes out of scope. Its resource is dropped.",
-            "borrow_mut reads from c",
+            "c is passed to borrow_mut by shared reference",
         ],
         ..E
     },
@@ -1528,7 +1528,7 @@ const BOOK: &[Snippet] = &[
             "Mutable borrow from n to r",
             "r holds a mutable reference; it can read and write the borrowed value",
             "the value r points to is modified through *r",
-            "Return mutably borrowed value from r to n",
+            "r's mutable borrow of n ends. This borrow no longer restricts access to n. Ending the borrow doesn't move the value",
         ],
         must_not_contain: &["*r acquires ownership of a resource", "r is the owner of the resource", "Return mutably borrowed resource from r to n"],
         ..E
@@ -1541,11 +1541,11 @@ const BOOK: &[Snippet] = &[
             "L4 Copy from GREETING to g",
             "L4 g is initialized with a copy of GREETING",
             "L6 GREETING is a static: it lives for the whole program and is never dropped",
-            "println! reads from g through an implicit reference, so g isn't moved",
+            "println! borrows g for formatting through an implicit shared reference, so g isn't moved",
             "L5 g's borrow of what the static GREETING points to ends (it lives for the whole program)",
         ],
         must_not_contain: &[
-            "Return immutably borrowed resource from g to *g",
+            "g's shared borrow of *g ends",
             "g's immutable borrow ends (what it borrows from isn't shown)",
             "GREETING goes out of scope",
         ],
@@ -1605,7 +1605,7 @@ const BOOK: &[Snippet] = &[
         id: "x15_question_in_main_style",
         status: Missing,
         note: "renders since #155 (was a crash in the probe); the tail `Ok(x + y)` is not shown as returned",
-        must_contain: &["a is an immutable borrow from the caller", "parse reads from a", "parse reads from b"],
+        must_contain: &["a is an immutable borrow from the caller", "A shared reference through a is passed to parse (as self). parse may read through it", "A shared reference through b is passed to parse (as self). parse may read through it"],
         ..E
     },
     Snippet {
@@ -1994,7 +1994,7 @@ fn check_book_paths(id: &str, timeline: &str) {
                 near((write_lend.0, give_back.1), give_back)
                     && tooltip(give_back_dot).contains("s no longer borrows the resource self points to")
                     && geo.arrow_connects("s", "self", "10", (payload_end, give_back), |tip| {
-                        clean_tooltip(tip) == "Return immutably borrowed resource from s to self"
+                        clean_tooltip(tip) == "s's shared borrow of the value inside *self ends. This borrow no longer restricts access to *self"
                     }),
                 "{id}: the payload borrow must return from s to self on Write's leg"
             );
