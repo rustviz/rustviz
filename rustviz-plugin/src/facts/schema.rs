@@ -48,6 +48,10 @@ pub struct BodyFacts {
     /// The places that get a state of their own: variables, their field
     /// paths (`p.a`, `t.0`) and Box payloads (`*b`, `b.a`).
     pub columns: Vec<ColumnInfo>,
+    /// Columns whose MIR places all have the same Option reference type
+    /// classification, including where a boundary has no state.
+    #[serde(skip)]
+    pub uniform_option_refs: BTreeMap<String, bool>,
     pub loans: Vec<LoanInfo>,
     pub rows: Vec<Row>,
     /// Temporaries that hold a value needing drop.
@@ -279,6 +283,14 @@ pub struct Lent {
     pub current: BTreeSet<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HolderType {
+    /// The local matters when different bindings share a display column.
+    OptionRef { local: usize, copy: bool },
+    /// A primitive sharing a column with an Option cannot hold borrows.
+    Primitive,
+}
+
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Parts {
     /// Field paths moved out on every path.
@@ -314,6 +326,13 @@ pub struct State {
     /// loan in `h`, and a copy made before it (`let old = h.r`) gets `b`'s
     /// too, as rustc counts them.
     pub holds: BTreeMap<String, Vec<usize>>,
+    /// Active MIR types for Option reference holders and primitives that
+    /// share their display columns.
+    #[serde(skip)]
+    pub holder_types: BTreeMap<String, HolderType>,
+    /// Loans live through an Option field or a reference to the whole Option.
+    #[serde(skip)]
+    pub option_holds: BTreeMap<String, Vec<usize>>,
     /// Borrow checking includes an unreachable path skipping initialization.
     /// The place is initialized on every executable path to this boundary.
     #[serde(skip)]

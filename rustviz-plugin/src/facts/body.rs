@@ -807,6 +807,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         TyKind::Ref(..) => "shared_ref",
         _ => "owner",
     };
+    let option_ref_region = |ty: rustc_middle::ty::Ty<'tcx>| {
+        let TyKind::Adt(def, args) = ty.kind() else { return None };
+        if !tcx.is_diagnostic_item(rustc_span::sym::Option, def.did()) { return None; }
+        let TyKind::Ref(region, ..) = args.type_at(0).kind() else { return None };
+        Some(*region)
+    };
     let mut vars: Vec<VarInfo> = Vec::new();
     for (local, name) in &cx.names.locals {
         let decl = &body.local_decls[*local];
@@ -2765,6 +2771,34 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // live loans, the column is only possibly borrowed there. Checking
     // the set together handles arms that each borrow the same column.
     let issued: BTreeMap<_, _> = bwf.borrow_set.location_map().iter().enumerate().map(|(i, (loc, _))| (*loc, i)).collect();
+    let option_places: Vec<_> = columns.iter().chain(&synth).filter_map(|(_, place, name)| {
+        let ty = place.ty(&body.local_decls, tcx).ty;
+        let region = option_ref_region(ty)?;
+        Some((*place, name, ty_info(ty).0, region_vid(region).map(Origin::from)))
+    }).collect();
+    let option_columns: BTreeSet<&str> = option_places.iter().map(|(_, name, _, _)| name.as_str()).collect();
+    let option_copy = |place| option_places.iter().find(|(p, _, _, _)| *p == place).map(|(_, _, copy, _)| *copy);
+    let mut uniform_option_refs = BTreeMap::new();
+    for (_, place, name) in columns.iter().chain(&synth).filter(|(_, _, name)| option_columns.contains(name.as_str())) {
+        let copy = option_copy(*place);
+        uniform_option_refs.entry(name.clone()).and_modify(|previous| {
+            if *previous != copy { *previous = None; }
+        }).or_insert(copy);
+    }
+    let uniform_option_refs = uniform_option_refs.into_iter().filter_map(|(name, copy)| Some((name, copy?))).collect();
+    let option_borrows: Vec<_> = bwf.borrow_set.location_map().iter().enumerate().filter_map(|(id, (loc, borrow))| {
+        let (place, name, _, origin) = option_places.iter().find(|(p, _, _, _)| *p == borrow.borrowed_place())?;
+        Some((id, *loc, place.local, *name, (*origin)?))
+    }).collect();
+    let option_refs: Vec<_> = cx.names.locals.keys().filter_map(|&local| {
+        let TyKind::Ref(outer, inner, _) = body.local_decls[local].ty.kind() else { return None };
+        let inner = option_ref_region(*inner)?;
+        Some((local, Origin::from(region_vid(*outer)?), Origin::from(region_vid(inner)?)))
+    }).collect();
+    let option_fields: Vec<_> = option_places.iter().filter_map(|(p, name, _, origin)| {
+        (!p.projection.is_empty()).then_some((p.local, *name, (*origin)?))
+    })
+        .collect();
     // (Only a path that never takes them, from the fn's entry: giving
     // their holder another value proves neither that the loan ended, `r =
     // r` keeps it, nor that a reborrow made from it did.)
@@ -2821,6 +2855,25 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     };
     let mut state_at = |exits: &[Location], after: bool| -> State {
         let mut st = State::default();
+        let mut active = BTreeMap::new();
+        let mut declared = |local| *active.entry(local).or_insert_with(|| {
+            exits.iter().any(|e| {
+                if after { storage.seek_after_primary_effect(*e); } else { storage.seek_before_primary_effect(*e); }
+                storage.get().contains(local)
+            })
+        });
+        let mut holder_types = BTreeMap::new();
+        let mut record_type = |name: &str, place: Place<'tcx>| {
+            if !option_columns.contains(name) { return; }
+            let holder_type = option_copy(place)
+                .map(|copy| HolderType::OptionRef { local: place.local.index(), copy })
+                .or_else(|| place.ty(&body.local_decls, tcx).ty.is_primitive().then_some(HolderType::Primitive));
+            // Sibling bindings can share a column. Only describe a type
+            // when the active places agree on the binding.
+            holder_types.entry(name.to_owned()).and_modify(|prev| {
+                if *prev != holder_type { *prev = None; }
+            }).or_insert(holder_type);
+        };
         // The row's exits on code that runs (an arm an earlier `_` arm
         // shadows is reached only by borrowck's imaginary edges): what runs
         // is read there only.
@@ -2881,15 +2934,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             };
             // A variable is a column from its declaration (`let r;`: storage
             // live, no value yet) to its scope's end.
-            let declared = |storage: &mut ResultsCursor<'_, 'tcx, MaybeStorageLive<'_>>| {
-                exits.iter().any(|e| {
-                    if after { storage.seek_after_primary_effect(*e); } else { storage.seek_before_primary_effect(*e); }
-                    storage.get().contains(place.local)
-                })
-            };
             // Out of its scope (its storage dead): no column, whatever its
             // fields' history says.
-            if !declared(&mut storage) {
+            if !declared(place.local) {
                 continue;
             }
             if !rt_exits.is_empty() && place.ty(&body.local_decls, tcx).ty.needs_drop(tcx, typing_env) {
@@ -2901,6 +2948,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 continue;
             }
             st.state.insert(name.clone(), w);
+            record_type(name, *place);
             if w == "maybe" {
                 // Moved on some way here, or only never assigned?
                 let moved = exits.iter().any(|e| {
@@ -3035,10 +3083,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
             }
             st.state.insert(name.clone(), if pw == "partly" { "own" } else { pw });
+            if declared(fp.local) {
+                record_type(name, *fp);
+            }
             if let Some(c) = st.cause.get(&pn).copied() {
                 st.cause.insert(name.clone(), c);
             }
         }
+        st.holder_types = holder_types.into_iter().filter_map(|(name, ty)| Some((name, ty?))).collect();
         // Loans in scope where the next row starts on the same path: in
         // scope after the exit and still at the successor (a loan whose last
         // use is on this row is out of scope there; another path's loan
@@ -3179,6 +3231,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         if let Some(t) = table {
             let known: BTreeSet<usize> = loans.iter().map(|l| l.loan).collect();
             let mut holds: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+            let mut option_holds: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
             // A block more than one way of code that runs comes into (a
             // join).
             let preds = body.basic_blocks.predecessors();
@@ -3207,7 +3260,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 // through it).
                 let mut after_join: BTreeSet<usize> = BTreeSet::new();
                 let mut seen: BTreeSet<Location> = BTreeSet::new();
-                let mut work: Vec<(Location, Option<Point>)> = vec![(*e, None)];
+                let mut work: Vec<(Location, Option<Point>)> = Vec::new();
+                if after {
+                    work.push((*e, None));
+                } else {
+                    // The snapshot is at entry, before this row can issue
+                    // any loans or assign a new holder.
+                    legs.push((t.start_index(*e), false, None));
+                }
                 while let Some((l, frozen)) = work.pop() {
                     if !seen.insert(l) {
                         continue;
@@ -3264,11 +3324,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         } else {
                             BTreeSet::new()
                         };
-                        for (local, os) in &origins_of {
-                            let name = &cx.names.locals[local];
-                            if !matches!(st.state.get(name), Some(&"own" | &"partly")) {
-                                continue;
-                            }
+                        let held_between = |os: &[Origin]| {
                             let mut held = if frozen { before_join.clone() } else { at(last, os) };
                             if let Some((first, _)) = nx {
                                 let there = at(first, os);
@@ -3276,14 +3332,51 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             } else if frozen {
                                 held.retain(|l| at(last, os).contains(l));
                             }
-                            if !held.is_empty() {
-                                holds.entry(name.clone()).or_default().extend(held);
+                            held
+                        };
+                        for (local, os) in &origins_of {
+                            let name = &cx.names.locals[local];
+                            if declared(*local) && matches!(st.state.get(name), Some(&"own" | &"partly")) {
+                                let held = held_between(os);
+                                if !held.is_empty() {
+                                    holds.entry(name.clone()).or_default().extend(held);
+                                }
+                            }
+                        }
+                        let active_option = |local: Local, name: &str| {
+                            matches!(st.holder_types.get(name), Some(HolderType::OptionRef { local: i, .. }) if *i == local.index())
+                                && st.state.get(name) == Some(&"own")
+                        };
+                        for &(local, name, origin) in &option_fields {
+                            if active_option(local, name) {
+                                option_holds.entry(name.clone()).or_default().extend(held_between(&[origin]));
+                            }
+                        }
+                        // A reference to the whole Option can keep its
+                        // contents alive after the Option's own origin dies.
+                        // The outer origin identifies that borrow. The inner
+                        // origin tracks the contents, limited to what this
+                        // exact borrow could see when it was taken.
+                        for &(id, loc, local, name, origin) in &option_borrows {
+                            if !active_option(local, name) || !live.contains(&id) { continue; }
+                            let initial = at(t.start_index(loc), &[origin]);
+                            if initial.is_empty() { continue; }
+                            let Some(tracked) = &pol else { continue };
+                            let via = |p, outer| tracked.origin_contains_loan_at.get(&p)
+                                .and_then(|m| m.get(&outer))
+                                .is_some_and(|ls| ls.contains(&BorrowIndex::from_usize(id)));
+                            for &(borrower, outer, inner) in &option_refs {
+                                if declared(borrower) && via(last, outer) && nx.is_none_or(|(p, _)| via(p, outer)) {
+                                    option_holds.entry(name.clone()).or_default()
+                                        .extend(held_between(&[inner]).intersection(&initial).copied());
+                                }
                             }
                         }
                     }
                 }
             }
             st.holds = holds.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+            st.option_holds = option_holds.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
         }
         for (name, loans) in &st.lent {
             let exclusive = loans.iter().any(|l| matches!(l.kind, "mut" | "unique"));
@@ -3493,6 +3586,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         last_line,
         vars,
         columns: column_info,
+        uniform_option_refs,
         loans,
         rows: out_rows,
         temps,
