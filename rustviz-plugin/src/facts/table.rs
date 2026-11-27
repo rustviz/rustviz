@@ -519,22 +519,6 @@ impl StateTable {
             && cells.get(column).is_some_and(|c| c.init == Init::Maybe && c.cause == Some("moved")))
     }
 
-    /// A normal scope-end drop (the column can already be out of storage
-    /// in the row's after-cell). Several sites must agree.
-    pub fn local_scope_drop(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>) -> Option<&'static str> {
-        let events = self.bodies.get(&function.body)?.rows.get(&row)?.why.get(column)?.iter()
-            .filter(|(_, why)| local.is_none() || matches!(why, Why::Dropped { local: l, .. } if *l == local));
-        if events.clone().any(|(_, w)| matches!(w, Why::Dropped { how: "drops_if_init", early_exit: None, at_reassign: false, route: DropRoute::Shared, .. })) {
-            return None;
-        }
-        let mut drops = events.filter_map(|(_, w)| match w {
-            Why::Dropped { how, early_exit: None, at_reassign: false, route: DropRoute::Normal | DropRoute::Shared, .. } => Some(*how),
-            _ => None,
-        });
-        let how = drops.next()?;
-        drops.all(|h| h == how).then_some(how)
-    }
-
     /// A drop on the residual edge of this compiler span, scoped to the
     /// exact local even when different bindings share a column.
     pub fn try_drop(&self, function: FunctionStart, column: &str, local: rustc_middle::mir::Local, span: rustc_span::Span) -> Option<(&'static str, bool)> {
@@ -1025,6 +1009,7 @@ mod tests {
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
+            scope_ends: Default::default(),
             residual_drops: Vec::new(),
             short_call_borrows: Default::default(),
             drop_holders: Default::default(),

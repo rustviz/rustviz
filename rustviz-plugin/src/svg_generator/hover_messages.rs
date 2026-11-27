@@ -140,6 +140,17 @@ pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String 
 
 // A Box can be empty, refilled, replaced, or moved away on different paths.
 // Only the value still present at the actual drop or overwrite is dropped.
+pub fn event_dot_box_payload_conditional(my_name: &str, tested: bool) -> String {
+    let flag = if tested { " A runtime drop flag tracks whether the Box still holds its contents." } else { "" };
+    format!("{} goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here.{flag}", styled_name_html(my_name))
+}
+
+pub fn event_dot_box_maybe_moved_go_out_of_scope(my_name: &str, contents_need_drop: bool) -> String {
+    let contents = if contents_need_drop { "Any contents still in the Box are dropped." }
+        else { "Its contents may have been moved out above. They need no drop either way." };
+    format!("{} goes out of scope. {contents} On paths where the Box is still here, its heap allocation, if it has one, is freed.", styled_name_html(my_name))
+}
+
 pub fn event_dot_box_paths_go_out_of_scope(my_name: &str) -> String {
     format!("{} goes out of scope. Whatever it still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
@@ -3482,7 +3493,7 @@ pub fn state_maybe_init(name: &str, cell: &crate::facts::table::Cell) -> String 
 pub fn event_dot_partial_scope_drop(
     name: &String, split: &crate::facts::schema::PartialDrop, plain: bool, boxed: bool,
 ) -> String {
-    if split.refilled.is_empty() && !split.one_of_two
+    if (plain || split.conditional.is_empty() || split.flag) && split.refilled.is_empty() && !split.one_of_two
         && split.payloads_moved.is_empty() && split.payloads_conditional.is_empty()
         && split.payloads_empty.is_empty() && !split.incomplete
     {
@@ -3526,7 +3537,7 @@ pub fn event_dot_partial_scope_drop(
                 out.push_str(&format!(" Of {fields}, only the fields that still hold a value are dropped here."));
             }
         }
-        if !split.conditional.is_empty() || !split.payloads_conditional.is_empty() {
+        if split.flag && (!split.conditional.is_empty() || !split.payloads_conditional.is_empty()) {
             out.push_str(" Rust uses drop flags to drop the values that are still there.");
         } else if split.incomplete && split.drops_resource {
             out.push_str(" Any remaining initialized fields that need dropping are dropped.");
@@ -3555,6 +3566,8 @@ pub fn event_dot_partial_scope_drop(
             VariantPayload::Empty => format!(" {variant} carries no payload."),
             VariantPayload::Copy(ty) => format!(" {variant} holds a value of type {} that needs no drop.", styled_name_html(ty)),
             VariantPayload::Moved(ty) => format!(" For {variant}, the {} payload was moved out.", styled_name_html(ty)),
+            VariantPayload::Conditional(ty) if !drop.payload_flag => format!(
+                " For {variant}, the {} payload is dropped if it is still present.", styled_name_html(ty)),
             VariantPayload::Conditional(ty) => format!(
                 " For {variant}, a runtime drop flag tracks whether {column} still holds its {} payload.",
                 styled_name_html(ty),
@@ -4628,7 +4641,7 @@ pub fn event_dot_branch_merge_temp_moved_out(my_name: &String) -> String {
 /// The join after branches some of which took elements out of the array
 /// with a slice pattern (`[a, _, _] => …`, #1285): the array can't be used
 /// as a whole after it, but the elements no pattern takes stay in it.
-pub fn event_dot_branch_merge_elems_moved(my_name: &String, moved: &[String], left: &[String]) -> String {
+pub fn event_dot_branch_merge_elems_moved(my_name: &String, moved: &[String], left: &[String], payloads: &std::collections::BTreeMap<String, bool>) -> String {
     let list = |names: &[String]| {
         let fmt: Vec<String> = names.iter().map(|m| styled_name_html(m)).collect();
         match fmt.as_slice() {
@@ -4641,9 +4654,14 @@ pub fn event_dot_branch_merge_elems_moved(my_name: &String, moved: &[String], le
     } else {
         format!("; {} {} still in it", list(left), if left.len() > 1 { "are" } else { "is" })
     };
+    if moved.iter().any(|n| payloads.contains_key(n)) {
+        let what = if matches!(moved, [one] if payloads.get(one) == Some(&true)) { format!("the payload of {}", list(moved)) }
+            else { format!("values from {}", list(moved)) };
+        return format!("A branch above may have moved {what}, so {} can't be used as a whole{rest}", styled_name_html(my_name));
+    }
     format!(
-        "{1} may have been moved out of {0} in a branch above, so {0} can't be used as a whole{2}",
-        styled_name_html(my_name), list(moved), rest
+        "{1} may have been moved out of {0} in a branch above, so {0} can't be used as a whole{rest}",
+        styled_name_html(my_name), list(moved)
     )
 }
 

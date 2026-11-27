@@ -108,3 +108,6 @@ pub fn dump(facts: &CrateFacts) -> Option<serde_json::Value> {
     }
     Some(v)
 }
+
+#[cfg(test)]
+mod scope_tests;

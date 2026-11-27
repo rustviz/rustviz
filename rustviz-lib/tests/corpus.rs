@@ -2857,7 +2857,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "md goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
             "h.a goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
             "h.b goes out of scope. Its resource is dropped.",
-            "md2 goes out of scope. No resource is dropped.",
+            "md2 goes out of scope. No resource is dropped. A ManuallyDrop never drops the value inside it automatically.",
         ],
         must_not_contain: &[
             "md goes out of scope. Its resource is dropped.",
@@ -3393,13 +3393,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from opt to x",
             "Move from s to take",
             "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.",
-            "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out.",
             "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, and execution reaches the end of s's scope with the resource still held, it is dropped there.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
             "x goes out of scope. No resource is dropped.",
         ],
-        must_not_contain: &[
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "=opt goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "opt goes out of scope. No resource is dropped.",
             "s goes out of scope. No resource is dropped.",
@@ -4344,7 +4344,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (#410), which ends their columns there instead of a bar;
         // `return_drops_what_the_branch_owns` counts the drops.
         must_contain: &[
-            "t goes out of scope. Its resource is dropped.",
+            "t goes out of scope. Its resource is dropped. The drop code uses a runtime drop flag.",
         ],
         must_not_contain: &[],
     },
@@ -5199,7 +5199,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "rw's resource is immutably borrowed by read",
             "cv acquires ownership of a resource",
             "sh acquires ownership of a resource",
-            "m goes out of scope. Its resource is dropped.",
+            // The scope end follows the target std library's drop glue (pinned below).
         ],
         must_not_contain: &[
             "m is bound to a value",
@@ -8075,9 +8075,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r's resource is moved",
             "s acquires ownership of a resource",
             "s goes out of scope. Its resource is dropped.",
-            "r goes out of scope. No value inside r remains to drop here. No resource is dropped. For Ok, the String payload was moved out. Rust tracks the move with a runtime drop flag. For Err, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "r goes out of scope. No value inside r remains to drop here. No resource is dropped. For Ok, the String payload was moved out. For Err, the String payload was moved out.",
         ],
-        must_not_contain: &["r goes out of scope. Its resource is dropped."],
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.", "r goes out of scope. Its resource is dropped."],
     },
     TooltipExpect {
         name: "or_pattern_arms",
@@ -8087,7 +8087,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Partial move from o to s",
             "s goes out of scope. Its resource is dropped.",
-            "o goes out of scope. Its resource (including the Result<String, String> it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "o goes out of scope. No payload remains to drop. None carries no payload. The drop code uses a runtime drop flag.",
             "Partial immutable borrow from r to t",
             "t immutably borrows a resource",
             "r goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is).",
@@ -8095,6 +8095,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "k is initialized with a copy of a value inside n",
         ],
         must_not_contain: &[
+            "o goes out of scope. Its resource (including the Result<String, String> it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "o goes out of scope. Its resource is dropped.",
             "=r goes out of scope. Its resource is dropped.",
             // #866: a copy of the value inside, not of the whole.
@@ -9162,9 +9163,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from x to a",
             "Move from a to consume",
             "x may have been moved: when the condition moves x to a and then turns out false, the else branch runs after that move, so x can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "x goes out of scope. No value inside x remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "x goes out of scope. No value inside x remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out.",
         ],
-        must_not_contain: &[
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "=x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             // The condition, not a branch, may have moved it (maintainer, #581).
             "only if no branch above moved it",
@@ -9180,9 +9181,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from x to a",
             "x may have been moved: when the condition moves x to a and then turns out false, the body is skipped but the move has happened, so x can't be used after the if. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "x goes out of scope. No value inside x remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "x goes out of scope. No value inside x remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out.",
         ],
-        must_not_contain: &[
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "=x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             // The condition, not a branch, may have moved it (maintainer, #581).
             "only if no branch above moved it",
@@ -9253,10 +9254,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_field_move",
         must_contain: &[
             "p.name may have been moved: when the condition moves p.name to a and then turns out false, the else branch runs after that move, so p.name can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "p goes out of scope. No value inside p.name remains to drop here. p.id is dropped. p.name's None variant carries no payload. For p.name's Some variant, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
-            "p.name goes out of scope. No value inside p.name remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "p goes out of scope. No value inside p.name remains to drop here. p.id is dropped. p.name's None variant carries no payload. For p.name's Some variant, the String payload was moved out.",
+            "p.name goes out of scope. No value inside p.name remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out.",
         ],
-        must_not_contain: &["Rust uses drop flags to drop the values that are still there.", "only if no branch above moved it", "moved out in at least one branch above"],
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.", "Rust uses drop flags to drop the values that are still there.", "only if no branch above moved it", "moved out in at least one branch above"],
     },
     TooltipExpect {
         name: "edition2024/if_let_chain_closure_move",
@@ -10233,10 +10234,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x acquires ownership of a resource",
             "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.0, t.0's resource is moved into x here; otherwise t.0 still owns it (Rust tracks this with a runtime drop flag).",
             "x is bound from t.0 or t.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1, t.1's resource is moved into x here; otherwise t.1 still owns it (Rust tracks this with a runtime drop flag).",
-            "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out.",
             "t.1 goes out of scope. A value inside t.1 may have been moved out above. Rust uses drop flags to drop the values that are still there. None carries no payload. For Some, a runtime drop flag tracks whether t.1 still holds its String payload.",
         ],
-        must_not_contain: &[
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "=t.0 goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "Move from t.0 to x",
             "Move from t to x",
@@ -10586,7 +10587,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_box_move",
         must_contain: &[
             "*b may have been moved: when the condition moves *b to take and then turns out false, the else branch runs after that move, so *b can't be used here",
-            "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "b goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
         ],
         must_not_contain: &[
             // #736: the drop flag decides only the String; the Box's
@@ -11055,9 +11056,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_reused_name",
         must_contain: &[
             "p may have been moved: when the condition moves p to a and then turns out false, the else branch runs after that move, so p can't be used here. When the condition fails after that move, a goes out of scope and its resource is dropped.",
-            "p goes out of scope. No value inside p remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "p goes out of scope. No value inside p remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out.",
         ],
-        must_not_contain: &[
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "=p goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "=p goes out of scope. Its resource is dropped.",
             // The word order before #660 moved the parenthetical.
@@ -11433,7 +11434,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // k is dropped only on the `break j` path (drawn in that
             // branch's lane); on the `break k` path it is moved, and
             // after #680 that lane no longer gets its own scope-end dot.
-            "k goes out of scope. Its resource is dropped.",
+            "k goes out of scope. Its resource is dropped. The drop code uses a runtime drop flag.",
             "r acquires ownership of a resource (from whichever break ended the loop)",
             "r goes out of scope. Its resource is dropped.",
             "Move from String::from to w, if the loop ended with break String::from(\"one\")",
@@ -12559,10 +12560,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is bound from t.1.0 or t.1.1, whichever alternative of the pattern matches. If it's the alternative that binds x from t.1.1, t.1.1's resource is moved into x here; otherwise t.1.1 still owns it (Rust tracks this with a runtime drop flag).",
             "x acquires ownership of a resource",
             "n is initialized with a copy of t.0",
-            "t.1.0 goes out of scope. No value inside t.1.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
-            "t.1 goes out of scope. A value inside t.1.1 may have been moved out above. No value inside t.1.0 remains to drop here. Rust uses drop flags to drop the values that are still there. t.1.1's None variant carries no payload. For t.1.1's Some variant, a runtime drop flag tracks whether t.1.1 still holds its String payload. t.1.0's None variant carries no payload. For t.1.0's Some variant, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "t.1.0 goes out of scope. No value inside t.1.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out.",
+            "t.1 goes out of scope. A value inside t.1.1 may have been moved out above. No value inside t.1.0 remains to drop here. Rust uses drop flags to drop the values that are still there. t.1.1's None variant carries no payload. For t.1.1's Some variant, a runtime drop flag tracks whether t.1.1 still holds its String payload. t.1.0's None variant carries no payload. For t.1.0's Some variant, the String payload was moved out.",
         ],
-        must_not_contain: &[
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "=t.1.0 goes out of scope. Its resource (including the String it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "Move from t.1 to x",
             "=t.1.0 goes out of scope. Its resource is dropped.",
@@ -12752,7 +12753,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Box is dropped; the Box's own heap allocation is freed on every
         // path, so the scope end has to say so.
         must_contain: &[
-            "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "b goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
         ],
         must_not_contain: &[
             // Read as "nothing is freed if the branch moved *b".
@@ -16184,11 +16185,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. Its resource is dropped.",
             "x.n acquires ownership of a resource",
             "x.n goes out of scope. Its resource is dropped.",
-            "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the P payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload. For Some, the P payload was moved out.",
             "t.1 goes out of scope. A value inside t.1 may have been moved out above. Rust uses drop flags to drop the values that are still there. None carries no payload. For Some, a runtime drop flag tracks whether t.1 still holds its P payload.",
-            "t goes out of scope. A value inside t.1 may have been moved out above. No value inside t.0 remains to drop here. Rust uses drop flags to drop the values that are still there. t.1's None variant carries no payload. For t.1's Some variant, a runtime drop flag tracks whether t.1 still holds its P payload. t.0's None variant carries no payload. For t.0's Some variant, the P payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "t goes out of scope. A value inside t.1 may have been moved out above. No value inside t.0 remains to drop here. Rust uses drop flags to drop the values that are still there. t.1's None variant carries no payload. For t.1's Some variant, a runtime drop flag tracks whether t.1 still holds its P payload. t.0's None variant carries no payload. For t.0's Some variant, the P payload was moved out.",
         ],
-        must_not_contain: &[
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "=t.0 goes out of scope. Its resource (including the P it holds, if any) is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "Move from t.0 to x",
             "Move from t.1 to x",
@@ -16309,9 +16310,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x.n goes out of scope. Its resource is dropped.",
             "t.0 goes out of scope. No value inside t.0 remains to drop here. No resource is dropped. None carries no payload.",
             "t.1 goes out of scope. A value inside t.1 may have been moved out above. Rust uses drop flags to drop the values that are still there. For Some, a runtime drop flag tracks whether t.1 still holds its P payload.",
-            "t goes out of scope. A value inside t.1 may have been moved out above. No value inside t.0 remains to drop here. Rust uses drop flags to drop the values that are still there. For t.1's Some variant, a runtime drop flag tracks whether t.1 still holds its P payload. t.0's None variant carries no payload. For t.0's Some variant, the P payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "t goes out of scope. A value inside t.1 may have been moved out above. No value inside t.0 remains to drop here. Rust uses drop flags to drop the values that are still there. For t.1's Some variant, a runtime drop flag tracks whether t.1 still holds its P payload. t.0's None variant carries no payload. For t.0's Some variant, the P payload was moved out.",
         ],
-        must_not_contain: &[
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "=t.0 goes out of scope. Its resource (including the P it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "Move from t.0 to x",
             "Move from t.1 to x",
@@ -17225,8 +17226,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // either way. main drew the move as unconditional and said only
         // the allocation was freed there.
         must_contain: &[
-            "e goes out of scope. Whatever it still holds (if anything) is dropped here.",
-            "e2 goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "e goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
+            "e2 goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
         ],
         must_not_contain: &[
             "e goes out of scope. Its contents were moved out earlier",
@@ -17254,10 +17255,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s goes out of scope. Its resource is dropped.",
             "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload.",
-            "k goes out of scope. Its resource is dropped.",
-            "r goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is).",
+            "k goes out of scope. Its resource is dropped. The drop code uses a runtime drop flag.",
+            "r goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is). The drop code uses a runtime drop flag.",
             "p.a goes out of scope. No value inside p.a remains to drop here. No resource is dropped. None carries no payload.",
-            "o goes out of scope. Its resource is dropped (including the String it holds, if any).",
+            // The failed and successful pattern exits are pinned separately by dot ID below.
             "s isn't moved in any of the branches above",
             "k isn't moved in any of the branches above",
             "p goes out of scope. No value inside p.a remains to drop here. p.b is dropped. p.a's None variant carries no payload.",
@@ -17271,7 +17272,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This segment leads into the Some(t) branch.",
             "This segment leads into the Ok(n) branch.",
         ],
-        must_not_contain: &[],
+        must_not_contain: &[
+            "o goes out of scope. Its resource is dropped (including the String it holds, if any).",],
     },
     // ─── `keep(&mut v, &x)` may store `&x` (x a reference) (#960) ───
     TooltipExpect {
@@ -21548,10 +21550,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_rebox_branch_1220",
         must_contain: &[
-            "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "b goes out of scope. Whatever it still holds (if anything) is dropped here. The drop code uses a runtime drop flag.",
             "b was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). The Box may no longer hold its original contents.",
-            "f goes out of scope. Whatever it still holds (if anything) is dropped here.",
-            "g goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "f goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
+            "g goes out of scope. Any contents still in the Box are dropped. On paths where the Box is still here, its heap allocation, if it has one, is freed. The drop code uses a runtime drop flag.",
             "g was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). The Box may no longer hold its original contents.",
             "j acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
         ],
@@ -21634,9 +21636,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from trio[2] to last",
             "trio[0]'s resource is moved",
             "trio[2]'s resource is moved",
-            "trio goes out of scope. trio[0] and trio[2] were moved out in some of the branches above; \
-             each is dropped here only if no branch above moved it (Rust tracks this with runtime drop \
-             flags). trio[1] is dropped.",
+            "trio goes out of scope. trio[0] and trio[2] were moved out earlier, so only trio[1] is dropped.",
             "duo goes out of scope. duo[0] was moved out earlier, so only duo[1] is dropped.",
             "three goes out of scope. three[0] was moved out earlier, so only three[1] and three[2] are dropped.",
             "Move from duo[0] to d",
@@ -21648,6 +21648,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x is initialized with a copy of a value inside nums",
         ],
         must_not_contain: &[
+            "trio goes out of scope. trio[0] and trio[2] were moved out in some of the branches above; \
+             each is dropped here only if no branch above moved it (Rust tracks this with runtime drop \
+             flags). trio[1] is dropped.",
             "arr goes out of scope. Its resource is dropped",
             "pair goes out of scope. Its resource is dropped",
             "trio goes out of scope. Its resource is dropped",
@@ -23586,15 +23589,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "pair goes out of scope. pair[0] was moved out earlier, so only pair[1] is dropped.",
             "three is partially moved: three[0] was moved out, so three can't be used as a whole; three[1] and three[2] are still in it",
             "Move from opts[0] to a",
-            "opts[0] may have been moved out of opts in a branch above, so opts can't be used as a whole; opts[1] is still in it",
-            "opts goes out of scope. opts[0] was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). opts[1] is dropped.",
+            "A branch above may have moved the payload of opts[0], so opts can't be used as a whole; opts[1] is still in it",
+            "opts goes out of scope. No payload remains to drop in opts[0]. opts[1] is dropped.",
             "Move from arr[0] to a",
             "Move from arr[1] to b",
             "arr[0] and arr[1] may have been moved out of arr in a branch above, so arr can't be used as a whole; arr[2] is still in it",
             "arr is partially moved: arr[0] and arr[1] may have been moved out, so arr can't be used as a whole; arr[2] is still in it",
             "arr goes out of scope. arr[0] and arr[1] were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags). arr[2] is dropped.",
             "Move from opts[0] to c",
-            "opts goes out of scope. opts[0] was moved out earlier, so only opts[1] is dropped.",
             "Move from pair[1] to last",
             "pair goes out of scope. pair[1] was moved out earlier, so only pair[0] is dropped.",
             // A parameter's slice pattern: what `_` / `..` leaves is dropped
@@ -23604,6 +23606,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "first acquires ownership from the caller. The pattern doesn't bind the argument's [1] and [2], so they stay in the parameter and are dropped when param_rest returns",
         ],
         must_not_contain: &[
+            "opts goes out of scope. opts[0] was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag). opts[1] is dropped.",
+            "opts goes out of scope. opts[0] was moved out earlier, so only opts[1] is dropped.",
             "pair's resource is moved",
             "three's resource is moved",
             "opts's resource is moved",
@@ -27501,7 +27505,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s isn't moved in any of the branches above",
             "s2 goes out of scope. Its resource is dropped.",
             "s2 isn't moved in any of the branches above",
-            "s3 goes out of scope. Its resource is dropped.",
+            "s3 goes out of scope. Its resource is dropped. The drop code uses a runtime drop flag.",
             "s3 isn't moved in any of the branches above",
             "If the `?` here returns early, s4's resource is dropped. If the `?` succeeds, nothing happens to s4 here.",
         ],
@@ -28114,7 +28118,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "box_zst_drop_1608",
         must_contain: &[
             "b's contents may have been moved out above, so b can't be used from here on.",
-            "b goes out of scope. Whatever it still holds (if anything) is dropped here.",
+            "b goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
             "If the `?` here returns early, whatever pending still holds (if anything) is dropped here.",
             "old acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
         ],
@@ -29169,8 +29173,8 @@ fn scope_exit_sites_1904() {
     let exits = rv_elements(&svg, "p@L107:dot:owner_go_out_of_scope");
     let texts: Vec<_> = exits.iter().map(|(_, text, ..)| text.as_str()).collect();
     assert_eq!(texts, [
-        "p goes out of scope. p.a was moved out earlier, so only p.b is dropped.",
-        "p goes out of scope. Its resource is dropped.",
+        "p goes out of scope. p.a was moved out earlier, so only p.b is dropped. The drop code uses a runtime drop flag.",
+        "p goes out of scope. Its resource is dropped. The drop code uses a runtime drop flag.",
     ]);
     // The private u8 has no destructor. In MIR the only String was moved.
     check_review_tip(&svg, "p@L119:dot:owner_go_out_of_scope",
@@ -35175,7 +35179,7 @@ fn return_drops_what_the_branch_owns() {
         ("diverging_branch_stops", &[("s", 2), ("t", 1)][..]),
         ("return_in_arm_drops", &[("v", 2), ("w", 1)][..]),
         // `consume`'s parameter `s` is dropped once more.
-        ("match_diverging_arm", &[("s", 3), ("t", 1)][..]),
+        ("match_diverging_arm", &[("s", 3), ("t:SharedFlag", 1)][..]),
         ("exit_panic_drops", &[("s", 3), ("t", 3)][..]),
         ("exit_unreachable_else", &[("s", 2), ("t", 2)][..]),
         // `b`: at the `break 'outer` and at the end of the outer body
@@ -35185,7 +35189,7 @@ fn return_drops_what_the_branch_owns() {
         // `guess`: at the `continue`, at the `break` in the `if` without
         // `else` (#429) and at the end of the loop body (#256).
         ("exit_continue_in_match", &[("guess", 3), ("secret", 1)][..]),
-        ("exit_return_borrowed_value", &[("s", 2), ("t", 2), ("u", 2), ("v", 2)][..]),
+        ("exit_return_borrowed_value", &[("s", 2), ("t", 2), ("u", 2), ("v", 1), ("v:SharedFlag", 1)][..]),
         ("exit_return_after_nested_if", &[("s", 2), ("t", 2)][..]),
         // `m` (moved on one path above): the drop-flag wording at the
         // `return` (#1194: main drew nothing there) and at the end of `g`.
@@ -35242,6 +35246,8 @@ fn return_drops_what_the_branch_owns() {
                 format!("{} goes out of scope. No resource is dropped.", v)
             } else if let Some(v) = var.strip_suffix(":Strings") {
                 format!("{} goes out of scope. Its resource is dropped (including every String it holds).", v)
+            } else if let Some(v) = var.strip_suffix(":SharedFlag") {
+                format!("{v} goes out of scope. Its resource is dropped. The drop code uses a runtime drop flag.")
             } else if let Some(v) = var.strip_suffix(":Flag") {
                 format!(
                     "{} goes out of scope. Its resource is dropped here only if no branch above \
@@ -44706,4 +44712,148 @@ fn closure_capture_ends_follow_their_own_loan_1909() {
     let svg = run_with_local_backend("rv3_issues/1759_closure_moved_in_one_arm").timeline_panel_string();
     assert!(tooltip_of_id(&svg, "g>s@L8:arrow:static_die").unwrap().contains("shared borrow affecting s"));
     assert!(tooltip_of_id(&svg, "g>s@L11:arrow:static_die").is_none());
+}
+
+#[test]
+fn shared_scope_drop_flags_follow_the_exit_operand() {
+    let svg = run_with_local_backend("scope_drop_edges").timeline_panel_string();
+    // Drop-printing visit(…, 0) drops spare in the callee, while route 1
+    // returns it to the caller. Both go through the same flag switch in
+    // ElaborateDrops. Normal continuation has its own unconditional drop.
+    check_review_tip(&svg, "spare@L12:dot:owner_go_out_of_scope",
+        &["Its resource is dropped.", "runtime drop flag"], &["only if spare still holds it"]);
+    assert!(rv_elements(&svg, "spare@L13:dot:owner_go_out_of_scope").is_empty());
+    check_review_tip(&svg, "spare@L18:dot:owner_go_out_of_scope",
+        &["Its resource is dropped."], &["drop flag"]);
+    // A flag guards maybe on each route. Moving a field before returning
+    // leaves its sibling in pair, and the normal return moves the other one.
+    for row in [12, 13, 18] {
+        check_review_tip(&svg, &format!("maybe@L{row}:dot:owner_go_out_of_scope"),
+            &["only if maybe was assigned", "runtime drop flag"], &["Its resource is dropped."]);
+    }
+    check_review_tip(&svg, "pair@L12:dot:owner_go_out_of_scope",
+        &["pair.a was moved out earlier", "only pair.b is dropped", "runtime drop flag"], &["only pair.a is dropped"]);
+    check_review_tip(&svg, "pair@L18:dot:owner_go_out_of_scope",
+        &["pair.b was moved out earlier", "only pair.a is dropped"], &["only pair.b is dropped"]);
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    for (column, triangle) in [("pair.a", true), ("pair.b", false)] {
+        let id = format!("{column}@L18:dot:owner_go_out_of_scope");
+        let dot = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(&id)).unwrap();
+        assert_eq!(dot.descendants().any(|n| n.has_tag_name("polygon")), triangle, "{id}");
+    }
+}
+
+#[test]
+fn scope_end_of_a_lock_uses_the_targets_drop_glue() {
+    use std::sync::{Condvar, Mutex, RwLock};
+    let svg = run_with_local_backend("sync_lock_resource").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    for (name, needs_drop) in [
+        ("m", std::mem::needs_drop::<Mutex<i32>>()),
+        ("rw", std::mem::needs_drop::<RwLock<i32>>()),
+        ("cv", std::mem::needs_drop::<Condvar>()),
+        ("sh.count", std::mem::needs_drop::<Mutex<i32>>()),
+    ] {
+        let id = format!("{name}@L22:dot:owner_go_out_of_scope");
+        let dot = doc.descendants().find(|node| node.attribute("data-rv-id") == Some(&id)).unwrap();
+        let (yes, no) = ("Its resource is dropped.", "This value needs no drop glue.");
+        let (want, forbid) = if needs_drop { (yes, no) } else { (no, yes) };
+        check_review_tip(&svg, &id, &[want], &[forbid]);
+        assert_eq!(dot.descendants().any(|node| node.has_tag_name("polygon")), needs_drop, "{name}");
+    }
+    for (fixture, needs_drop) in [("closure_mutex_795", std::mem::needs_drop::<Mutex<i32>>()),
+                                  ("closure_rwlock_795", std::mem::needs_drop::<RwLock<i32>>())] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let (yes, no) = ("Its 1 captured resource is dropped.", "Its captures need no drop glue.");
+        let (want, forbid) = if needs_drop { (yes, no) } else { (no, yes) };
+        check_review_tip(&svg, "g@L15:dot:owner_go_out_of_scope", &[want], &[forbid]);
+    }
+}
+
+#[test]
+fn scope_end_of_array_and_box_fields_keeps_the_remaining_resource() {
+    let svg = run_with_local_backend("known_bugs/1711_struct_inner_moves").timeline_panel_string();
+    // Moving p.a[0] leaves index 1 in place. Moving *p.q transfers the
+    // String but leaves the allocation in the enclosing Box.
+    check_review_tip(&svg, "p.a@L9:dot:owner_go_out_of_scope",
+        &["p.a[0] was moved out earlier", "only p.a[1] is dropped"], &["No resource is dropped."]);
+    check_review_tip(&svg, "p.q@L9:dot:owner_go_out_of_scope",
+        &["Its contents were moved out earlier", "only its heap allocation"], &["No resource is dropped."]);
+    // Both Strings in Some((x, y)) move. None has no payload.
+    let svg = run_with_local_backend("arrow_heads_1316").timeline_panel_string();
+    check_review_tip(&svg, "o@L29:dot:owner_go_out_of_scope",
+        &["No payload remains to drop."], &["only if no branch above moved it", "drop flags to drop"]);
+}
+
+#[test]
+fn scope_review_box_allocation_and_payload_have_separate_drops() {
+    let svg = run_with_local_backend("scope_drop_review").timeline_panel_string();
+    check_review_tip(&svg, "b@L9:dot:owner_go_out_of_scope",
+        &["On paths where the Box is still here", "heap allocation", "runtime drop flag"],
+        &["The Box's heap allocation, if it has one, is freed here."]);
+    let svg = run_with_local_backend("box_maybe_moved_branch").timeline_panel_string();
+    check_review_tip(&svg, "b@L15:dot:owner_go_out_of_scope",
+        &["contents are dropped only if they are still in the Box", "allocation, if it has one, is freed here", "runtime drop flag"],
+        &["Whatever it still holds"]);
+}
+
+#[test]
+fn scope_review_array_replacement_and_remaining_range() {
+    let svg = run_with_local_backend("scope_drop_review").timeline_panel_string();
+    check_review_tip(&svg, "a@L17:dot:owner_go_out_of_scope",
+        &["only if a[0] still holds it", "a[1] is dropped", "runtime drop flag"],
+        &["only if no branch above moved it"]);
+    check_review_tip(&svg, "a@L22:dot:owner_go_out_of_scope",
+        &["a[0] was moved out earlier", "only a[1..65] is dropped"], &["Any remaining initialized parts"]);
+    check_review_tip(&svg, "a@L26:dot:owner_go_out_of_scope", &["No resource is dropped"], &["Any remaining initialized parts"]);
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let dot = doc.descendants().find(|n| n.attribute("data-rv-id") == Some("a@L26:dot:owner_go_out_of_scope")).unwrap();
+    assert!(!dot.descendants().any(|n| n.has_tag_name("polygon")));
+}
+
+#[test]
+fn scope_review_boolean_switch_guards_only_its_field() {
+    let svg = run_with_local_backend("ref_binding_name_reused").timeline_panel_string();
+    check_review_tip(&svg, "r@L11:dot:owner_go_out_of_scope",
+        &["For Ok, the String payload was moved out"], &["drop flag"]);
+    let svg = run_with_local_backend("scope_drop_review").timeline_panel_string();
+    check_review_tip(&svg, "p.answer@L32:dot:owner_go_out_of_scope",
+        &["For Ok, the String payload was moved out"], &["drop flag"]);
+    check_review_tip(&svg, "p.other@L32:dot:owner_go_out_of_scope",
+        &["only if", "runtime drop flag"], &["Its resource is dropped."]);
+}
+
+#[test]
+fn scope_review_let_else_dots_describe_the_selected_pattern() {
+    let svg = run_with_local_backend("slice_elem_moves_1285").timeline_panel_string();
+    check_review_tip(&svg, "opts@L21:dot:branch_join", &["payload of opts[0]", "opts can't be used as a whole", "opts[1] is still in it"],
+        &["opts[0] may have been moved out"]);
+    for row in [22, 32, 34] {
+        check_review_tip(&svg, &format!("opts@L{row}:dot:owner_go_out_of_scope"),
+            &["No payload remains to drop in opts[0]", "opts[1] is dropped"], &["so only opts[1] is dropped", "drop flag"]);
+    }
+    check_review_tip(&svg, "opts@L32:dot:owner_go_out_of_scope", &["opts[0] holds None"], &["payload of opts[0] was moved out"]);
+    check_review_tip(&svg, "opts@L34:dot:owner_go_out_of_scope", &["payload of opts[0] was moved out"], &["opts[0] holds None"]);
+    let svg = run_with_local_backend("let_else_exit_drops_906").timeline_panel_string();
+    check_review_tip(&svg, "o@L52:dot:owner_go_out_of_scope", &["None carries no payload"], &["payload was moved out"]);
+    check_review_tip(&svg, "o@L54:dot:owner_go_out_of_scope", &["For Some, the String payload was moved out"], &["None carries no payload"]);
+}
+
+#[test]
+fn scope_review_partial_field_drops_have_triangles() {
+    let svg = run_with_local_backend("known_bugs/1711_struct_inner_moves").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    check_review_tip(&svg, "p.a@L6:dot:move", &["part of p.a", "p.a[0]"], &["p.a's resource is moved"]);
+    for name in ["p.a", "p.q"] {
+        let id = format!("{name}@L9:dot:owner_go_out_of_scope");
+        let dot = doc.descendants().find(|node| node.attribute("data-rv-id") == Some(&id)).unwrap();
+        assert!(dot.descendants().any(|node| node.has_tag_name("polygon")), "{id}");
+    }
+}
+
+#[test]
+fn scope_review_nonreturning_call_ends_the_reference_column() {
+    let svg = run_with_local_backend("diverging_field_holder_1884").timeline_panel_string();
+    check_review_tip(&svg, "guard.0@L39:dot:ref_go_out_of_scope",
+        &["ends here because this call never returns"], &["goes out of scope", "is dropped"]);
 }

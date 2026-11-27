@@ -136,6 +136,10 @@ pub struct BodyFacts {
     /// Mutable call operands whose own loan ends on the normal return edge.
     #[serde(skip)]
     pub short_call_borrows: BTreeSet<(rustc_span::Span, usize)>,
+    /// Executable ends of named locals and their owned field columns, including
+    /// storage with no drop glue. Each binding keeps its own MIR identity.
+    #[serde(skip)]
+    pub(crate) scope_ends: ScopeEnds,
     /// Places a callee can write through a mutable operand, paired with
     /// the loans carried by the source operand at that exact MIR call.
     #[serde(skip)]
@@ -303,8 +307,8 @@ pub struct JoinChange {
 }
 
 pub struct BindingSource {
-    /// The array element or subslice containing the moved operand.
-    pub array_element: Option<(rustc_middle::mir::Local, String)>,
+    /// Source local, pictured column, and the part taken by the binding.
+    pub projected_move: Option<(rustc_middle::mir::Local, String, String)>,
     pub location: rustc_middle::mir::Location,
     pub runs: bool,
     pub declaration: rustc_middle::mir::Local,
@@ -614,6 +618,8 @@ pub struct ResidualDrop {
 /// drop site. These lists come from the executable CFG at that site.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PartialDrop {
+    /// The elaborated drop ladder for this place tests a Boolean.
+    pub flag: bool,
     pub moved: Vec<String>,
     pub conditional: Vec<String>,
     /// Only a replacement can reach the drop of these fields.
@@ -638,9 +644,10 @@ pub struct VariantDrop {
     pub column: String,
     pub variant: String,
     pub payload: VariantPayload,
-    /// Drop elaboration allocates a flag for this downcast move path.
-    /// The drop ladder can still have no field to drop for the variant.
+    /// The drop ladder tests a Boolean guarding the downcast move path.
     pub tracks_variant_init: bool,
+    /// A tested Boolean guards the variant payload.
+    pub payload_flag: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -806,6 +813,132 @@ pub struct SwitchExit {
     pub tested_pattern: Option<usize>,
     /// Drawn arm entered, when this test commits to one.
     pub arm: Option<usize>,
+}
+
+/// The effect of drop elaboration on one displayed place. Ending storage
+/// is a separate event from running drop glue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScopeDrop {
+    Storage,
+    ExitStorage,
+    ByPath,
+    Empty,
+    Whole,
+    Conditional,
+    Remaining,
+}
+
+impl ScopeDrop {
+    pub(crate) fn runs(self) -> bool {
+        matches!(self, Self::Whole | Self::Conditional | Self::Remaining | Self::ByPath)
+    }
+
+    pub(super) fn from_how(how: &str) -> Self {
+        match how {
+            "drops" => Self::Whole,
+            "drops_if_init" => Self::Conditional,
+            "drops_rest" => Self::Remaining,
+            "nothing_to_drop" => Self::Empty,
+            _ => unreachable!("unexpected drop kind {how}"),
+        }
+    }
+}
+
+/// Initialized and missing array slots at one MIR drop. Names label typed
+/// ConstantIndex projections, including indices expanded from a Subslice.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScopeArray {
+    pub empty_payload: Vec<String>,
+    pub moved_payload: Vec<String>,
+    pub absent_variant: Vec<(String, String)>,
+    pub may_be_refilled: bool,
+    pub moved: Vec<String>,
+    pub conditional: Vec<String>,
+    pub left: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScopeEnd {
+    /// This edge is an alternative to the normal return of a call.
+    pub optional_unwind: bool,
+    pub legs: Vec<rustc_span::Span>,
+    pub array: Option<ScopeArray>,
+    pub partial: Option<PartialDrop>,
+    pub span: rustc_span::Span,
+    /// Ordinary storage boundary, also when an inline exit stands in for it.
+    pub boundary: usize,
+    pub has_value: bool,
+    pub payload_moved: bool,
+    pub payload_maybe: bool,
+    pub box_contents_need_drop: Option<bool>,
+    pub row: usize,
+    pub site: Option<rustc_span::Span>,
+    pub effect: ScopeDrop,
+    /// At a shared destructor this can be true even when this particular
+    /// exit always (or never) supplies the value.
+    pub flag: bool,
+    pub flag_on_some_paths: bool,
+    /// Field indices in declaration order within this MIR local.
+    pub field_order: Vec<usize>,
+    pub moved: bool,
+    pub unassigned: bool,
+}
+
+impl ScopeEnd {
+    /// A collapsed column can summarize several incoming edges of one
+    /// destructor. Keep only the properties shared by those occurrences.
+    pub(crate) fn across(ends: &[&Self]) -> Option<Self> {
+        let mut end = (*ends.iter().min_by_key(|e| (e.span, e.boundary, e.row))?).clone();
+        let same_site = ends.iter().all(|e| e.site == end.site);
+        if !ends.iter().all(|e| e.span == end.span) && !(same_site && end.site.is_some()) { return None; }
+        end.legs.retain(|leg| ends.iter().all(|e| e.legs.contains(leg)));
+        if !ends.iter().all(|e| e.array == end.array) { end.array = None; }
+        if !ends.iter().all(|e| e.partial == end.partial) { end.partial = None; }
+        end.flag = ends.iter().all(|e| e.flag);
+        end.flag_on_some_paths = !end.flag && ends.iter().any(|e| e.flag || e.flag_on_some_paths);
+        if !ends.iter().all(|e| e.effect == end.effect) {
+            end.effect = if end.flag && !ends.iter().any(|e| e.effect == ScopeDrop::ByPath) {
+                ScopeDrop::Conditional
+            } else if ends.iter().all(|e| e.site.is_none()) {
+                ScopeDrop::ByPath
+            } else { return None };
+        }
+        end.moved = ends.iter().any(|e| e.moved);
+        end.unassigned = ends.iter().any(|e| e.unassigned);
+        end.payload_moved = ends.iter().all(|e| e.payload_moved);
+        end.payload_maybe = ends.iter().any(|e| e.payload_maybe || e.payload_moved != end.payload_moved);
+        end.has_value = ends.iter().any(|e| e.has_value);
+        end.optional_unwind = ends.iter().all(|e| e.optional_unwind);
+        if !same_site { end.site = None; }
+        Some(end)
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub(crate) struct ScopeEnds {
+    /// Calls with no normal successor, observed while the local's storage is live.
+    /// These mark the end of a timeline even when no destructor executes.
+    pub(crate) terminal_calls: BTreeMap<rustc_middle::mir::Local, Vec<(rustc_span::Span, usize)>>,
+    pub(crate) boundaries: BTreeMap<rustc_middle::mir::Local, rustc_span::Span>,
+    places: BTreeMap<rustc_middle::mir::Local, BTreeMap<String, Vec<ScopeEnd>>>,
+}
+
+impl ScopeEnds {
+    pub(super) fn insert(&mut self, local: rustc_middle::mir::Local, column: &str, end: ScopeEnd) {
+        let ends = self.places.entry(local).or_default().entry(column.to_owned()).or_default();
+        if !ends.contains(&end) { ends.push(end); }
+    }
+
+    pub(crate) fn for_place(&self, local: rustc_middle::mir::Local, column: &str) -> &[ScopeEnd] {
+        self.places.get(&local).and_then(|paths| paths.get(column)).map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn at_exit(&self, site: rustc_span::Span) -> impl Iterator<Item = (rustc_middle::mir::Local, &str, ScopeEnd)> {
+        self.places.iter().flat_map(move |(&local, paths)| paths.iter().filter_map(move |(name, ends)| {
+            let incoming: Vec<_> = ends.iter().filter(|end| end.site == Some(site)).collect();
+            Some((local, name.as_str(), ScopeEnd::across(&incoming)?))
+        }))
+    }
 }
 
 /// One execution site in this body. Drops on two early exits can execute the

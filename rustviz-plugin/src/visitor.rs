@@ -2539,8 +2539,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .any(|m| place_within(m, rap.name()) && m != rap.name());
     // (What the value moves on some paths only gets its own dot below.)
     let handed_on: BTreeSet<String> = moved.union(&moved_some).cloned().collect();
-    let droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &handed_on, true, line, false)
+    let ordinary_exit = matches!(how, "return" | "break" | "continue" | "panic") && no_drop_exit.is_none();
+    let exit_facts = self.body_facts.filter(|_| ordinary_exit)
+      .map(|body| body.scope_ends.at_exit(site.source_callsite()).collect::<Vec<_>>())
+      .unwrap_or_default();
+    let mut droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &handed_on, true, line, false, ordinary_exit)
       .into_iter().filter(|(_, rap)| !declared_outside(rap)).collect();
+    // The in-scope order interleaves locals with temporary tuple drops.
+    // Membership and initialization of ordinary places come from the
+    // exit's MIR occurrences, including drops of an aggregate's fields.
+    let order: BTreeMap<_, _> = self.scope_names(from, end).into_iter().map(|(i, n)| (n, i)).collect();
+    for (local, name, effect) in &exit_facts {
+      let (local, name) = (*local, *name);
+      if (!effect.effect.runs() && !effect.has_value) || moved_some.contains(name) || self.skip_raps.contains(name) { continue; }
+      if let Some(rd) = self.raps.place(local, name).filter(|rd| rd.rap.owner_local() == Some(local) && !rd.rap.never_drops()) {
+        if let Some(&i) = order.get(name) {
+          let root = self.body_facts.and_then(|f| f.bindings.locals.get(&local))
+            .and_then(|root| order.get(root.as_str())).copied().unwrap_or(i);
+          droppable.push((root, rd.rap.clone()));
+        }
+      }
+    }
+    droppable.sort_by_cached_key(|(i, rap)| {
+      let field_order = exit_facts.iter().find(|(local, name, _)|
+        Some(*local) == rap.owner_local() && *name == rap.name()).map(|(_, _, e)| e.field_order.clone());
+      (std::cmp::Reverse(*i), field_order)
+    });
     // A Copy value or a reference declared in the branch the exit is in
     // (in the outermost one, if they nest) has nothing to drop, but its
     // scope ends here too: the `}` that would end it is never reached
@@ -2569,7 +2593,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             && !declared_outside(&rd.rap)
             && !before_branch(&rd.rap)
             // (A reference holds a value once it has a lender.)
-            && if rd.rap.is_ref() { self.borrow_map.contains_key(rd.rap.name()) } else { self.ownership_here(*rd.rap.hash(), false) != OwnHere::No })
+            && if ordinary_exit && rd.rap.scope_local().is_some() {
+                exit_facts.iter().any(|(l, n, end)| Some(*l) == rd.rap.scope_local() && *n == rd.rap.name() && end.has_value)
+            } else if rd.rap.is_ref() {
+                self.borrow_map.contains_key(rd.rap.name())
+            } else {
+                self.ownership_here(*rd.rap.hash(), false) != OwnHere::No
+            })
           .map(|rd| rd.rap.clone())
           .collect()
       }
@@ -2620,6 +2650,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // An unbound temporary's drop is stated by its own event (#457),
       // which says what it is (and whether a `let` pattern's literal
       // built it, #439); the exit drops it before its scope's end.
+      if let Some((_, _, end)) = exit_facts.iter().find(|(l, n, _)| Some(*l) == rap.owner_local() && *n == rap.name()) {
+        self.row_layout.scope_ends.insert(id, end.clone());
+      }
       let temp_ty = rap.is_unbound_temporary().then(|| self.preprocessed_events.iter()
         .find_map(|(_, e)| match e {
           ExternalEvent::TemporaryDrop { ro, ty, literal, part, .. } if ro == &rap => ty.clone().map(|ty| (ty, *literal, part.clone())),
@@ -2723,7 +2756,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// non-`Copy` references (`&mut T`). A temporary whose scope ended
   /// before `line` was dropped already. Each comes with its index in
   /// `in_scope`.
-  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, binds: bool) -> Vec<(usize, ResourceAccessPoint)> {
+  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, binds: bool, pictured_by_facts: bool) -> Vec<(usize, ResourceAccessPoint)> {
     if from >= end {
       return Vec::new();
     }
@@ -2731,7 +2764,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut out = Vec::new();
     for (idx, name) in self.scope_names(from, end).into_iter().rev().filter(|(_, n)| seen.insert(n)) {
       let Some(rd) = self.raps.get(name) else { continue };
-      if rd.rap.never_drops() || rd.rap.is_fn() || (!refs && rd.rap.is_ref())
+      if pictured_by_facts && rd.rap.scope_local().is_some() && !rd.rap.is_ref() || rd.rap.never_drops() || rd.rap.is_fn() || (!refs && rd.rap.is_ref())
         || moved.iter().any(|m| place_within(name, m)) || self.skip_raps.contains(name) {
         continue;
       }
@@ -2823,7 +2856,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // An outer `let x;` first assigned inside the block also registered
     // a column inside it. Its declaration still owns its drop scope.
     let outer = self.scope_names(0, locals_from).into_iter().map(|(_, name)| name.to_owned()).collect();
-    for (idx, rap) in self.droppable_locals_at(locals_from, end, &outer, false, line, true) {
+    for (idx, rap) in self.droppable_locals_at(locals_from, end, &outer, false, line, true, false) {
       while tuples.last().is_some_and(|t| idx < t.len) {
         let t = tuples.pop().unwrap();
         self.drop_tuple_if_try_returns(&t, line);
@@ -8679,11 +8712,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
             let left = self.left_at_exits(leaves_fn || leaves_branch, &if_decl);
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
-                self.preprocessed_events.push((
-                    if_end,
-                    ExternalEvent::GoOutOfScope { ro: var.clone(), exit_site: None, id: *self.unique_id, early: None },
-                ));
-                *self.unique_id += 1;
+                if let Some(event) = self.scope_event(var.clone(), if_end, Some(if_expr.span)) {
+                    self.preprocessed_events.push(event);
+                }
             }
             // The tuple scrutinee of a pattern that always matches
             // (#981) is dropped at the end of the body, as on the
@@ -8768,13 +8799,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let if_left = self.left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
     let else_left = self.left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
     for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
-      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), exit_site: None, id: *self.unique_id, early: None }));
-      *self.unique_id += 1;
+      if_ev.extend(self.scope_event(var.clone(), if_end, Some(if_expr.span)));
     }
 
     for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v) && !else_left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), exit_site: None, id: *self.unique_id, early: None }));
-      *self.unique_id += 1;
+      else_ev.extend(self.scope_event(var.clone(), merge, else_expr.map(|e| e.span)));
     }
     if_decl.extend(if_inner);
     if_decl.extend(if_scoped);
@@ -9324,9 +9353,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // too, #1004.)
       let arm_left = self.left_at_exits((!inline || leaves_fn || leaves_branch) && self.ends_at_exits(arm.body, true), &arm_decls);
       for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
-        let id = *self.unique_id;
-        *self.unique_id += 1;
-        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), exit_site: None, id, early: None };
+        let Some((end, gos)) = self.scope_event(r.clone(), end, Some(arm.body.span)) else { continue };
         if inline {
           self.add_external_event(end, gos);
         } else {
@@ -13094,8 +13121,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let left = self.left_at_exits(self.block_ends_at_exits(els, true), &decl);
     for var in in_decl_order(&decl).into_iter().filter(|v| needs_scope_end(v) && !scoped.contains(v) && !left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), exit_site: None, id: *self.unique_id, early: None }));
-      *self.unique_id += 1;
+      else_ev.extend(self.scope_event(var.clone(), merge, Some(els.span)));
     }
     decl_vars.extend(decl);
     let (diverges, exits, break_carries) = self.branch_divergence(BranchBody::LetElse(els), &else_ev, &decl_vars);
