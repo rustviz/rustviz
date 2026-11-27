@@ -1098,14 +1098,14 @@ fn one_row_layout(visualization_data: &mut VisualizationData) -> BTreeSet<usize>
                 if branch_is_collapsed(*split_point, *merge_point) {
                     #[expect(clippy::disallowed_methods, reason = "collected into a sorted set")]
                     let names: BTreeSet<String> = live_vars.iter().map(|r| r.name().to_owned()).collect();
-                    // (This conditional's own arms, by their source spans: not
+                    // (This conditional's own arms, by compiler identity: not
                     // a sibling conditional's on the same line.)
-                    let spans: Vec<_> = branches.iter().map(|b| b.source_span).collect();
-                    if table.arms_disagree(*body, *split_point, &names, &spans) {
+                    let sources: Vec<_> = branches.iter().map(|b| b.source).collect();
+                    if table.arms_disagree(*body, *split_point, &names, &sources) {
                         out.insert(*id);
                     }
                     for (i, arm) in branches.iter().enumerate() {
-                        if arm.diverges && arm.source_span.is_some_and(|span| table.arm_has_exit(*body, *split_point, span)) {
+                        if arm.diverges && arm.source.is_some_and(|source| table.arm_has_exit(*body, *split_point, source)) {
                             exits.insert((*id, i));
                         }
                     }

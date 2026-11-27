@@ -64,10 +64,6 @@ impl Order<'_, '_> {
         self.facts.loans.iter().find(|l| l.loan == id)
     }
 
-    fn location(&self, fact: &Ev) -> Location {
-        Location { block: self.body.basic_blocks.reverse_postorder()[fact.order.0], statement_index: fact.order.1 }
-    }
-
     fn matches(&self, ev: &E, f: &Ev) -> bool {
         let owner = match (ev, &f.fact) {
             (E::GoOutOfScope { ro, .. } | E::OwnerDropAtReassign { ro, .. }, _) => Some(ro),
@@ -130,17 +126,12 @@ impl Order<'_, '_> {
         }
         let source = self.spans.get(&ev.get_id());
         let blocks = self.body.basic_blocks.reverse_postorder();
-        if matches!(ev, E::Branch { .. }) {
-            let span = source?;
-            let mut switches = blocks.iter().enumerate().filter_map(|(rank, &bb)| {
-                let data = &self.body.basic_blocks[bb];
-                let term = data.terminator();
-                (matches!(term.kind, TerminatorKind::SwitchInt { .. })
-                    && (span.contains(term.source_info.span) || term.source_info.span.contains(*span)))
-                .then_some((rank, data.statements.len(), 0))
-            });
-            let at = switches.next()?;
-            return switches.next().is_none().then_some(at);
+        if let E::Branch { branches, .. } = ev {
+            let owner = branches.first()?.source?.branch;
+            let tests = self.facts.tests_of(owner);
+            let switch = *tests.first().filter(|_| tests.len() == 1)?;
+            let rank = blocks.iter().position(|&bb| bb == switch.block)?;
+            return Some((rank, switch.statement_index, 0));
         }
         let is_end = end(ev);
         // A whole-value store also replaces each field. The displayed
@@ -171,7 +162,7 @@ impl Order<'_, '_> {
                     if path != root {
                         return false;
                     }
-                    let loc = self.location(e);
+                    let loc = e.occurrence.at;
                     let hir = rustc_utils::BodyExt::location_to_hir_id(self.body, loc);
                     let rustc_hir::Node::Expr(expr) = self.tcx.hir_node(hir) else {
                         return false;
@@ -235,7 +226,7 @@ impl Order<'_, '_> {
                         return false;
                     };
                     let Some(info) = self.loan(*loan) else { return false };
-                    let loc = self.location(f);
+                    let loc = f.occurrence.at;
                     let site = self.body.source_info(loc).span;
                     if source.is_some_and(|span| span.contains(site)) && names_lender(from, info) {
                         return true;
@@ -393,7 +384,7 @@ impl Order<'_, '_> {
             .copied()
             .filter(|e| {
                 source.is_some_and(|s| {
-                    let mir = self.body.source_info(self.location(e)).span;
+                    let mir = self.body.source_info(e.occurrence.at).span;
                     s.contains(mir) || s.source_callsite().contains(mir.source_callsite())
                 })
             })
@@ -541,7 +532,7 @@ impl Order<'_, '_> {
         let dst = place(to)?;
         let source = self.spans.get(&ev.get_id())?;
         let mut reads = normal_facts(row).filter(|e| {
-            let loc = self.location(e);
+            let loc = e.occurrence.at;
             if !source.contains(self.body.source_info(loc).span) {
                 return false;
             }
@@ -758,31 +749,7 @@ impl Order<'_, '_> {
                 continue;
             };
             let blocks = self.body.basic_blocks.reverse_postorder();
-            let data = &self.body.basic_blocks[blocks[rank]];
-            let TerminatorKind::SwitchInt { targets, .. } = &data.terminator().kind else {
-                continue;
-            };
-            let successors = targets.all_targets();
-            if successors.len() != 2 {
-                continue;
-            }
-            let dominates = self.body.basic_blocks.dominators();
-            let leg_bb = |bb: rustc_middle::mir::BasicBlock| successors.iter().position(|s| dominates.dominates(*s, bb));
-            let leg = |block: usize| leg_bb(blocks[block]);
-            // Relate each HIR arm to a switch successor using its located
-            // MIR effects. Empty or ambiguous arms supply no evidence.
-            let witness: Vec<_> = branches
-                .iter()
-                .map(|arm| {
-                    arm.e_data
-                        .iter()
-                        .filter_map(|(_, e)| self.point(e, row, false).and_then(|p| leg(p.0)))
-                        .collect::<BTreeSet<_>>()
-                })
-                .collect();
-            if witness.iter().any(|arms| arms.len() > 1) {
-                continue;
-            }
+            let switch = Location { block: blocks[rank], statement_index: at };
             let mut edits = Vec::new();
             for (_, e) in events.iter().filter(|(l, e)| l == line && end(e)) {
                 let Some(&[id]) = self.ends.get(&e.get_id()).map(Vec::as_slice) else {
@@ -813,14 +780,16 @@ impl Order<'_, '_> {
                     .collect();
                 let mut dests = BTreeMap::new();
                 for edge in &edges {
-                    let entry = (edge.order.0, edge.order.1) == (rank, at);
-                    let Some(which) = (if entry { edge.end_successor.and_then(|l| leg_bb(l.block)) } else { leg(edge.order.0) })
-                    else {
-                        break;
+                    let entry = edge.location == switch;
+                    let source = if entry {
+                        self.facts.entered(switch, edge.occurrence.successor)
+                    } else {
+                        edge.arm.and_then(|i| row.arms.get(i)).and_then(|a| {
+                            self.facts.entered(a.edge.switch, Some(a.edge.successor.start_location()))
+                        })
                     };
-                    let mut arms = witness.iter().enumerate().filter(|(_, w)| w.len() == 1 && w.contains(&which));
-                    let Some((arm, _)) = arms.next() else { break };
-                    if arms.next().is_some() || dests.insert(arm, (entry, fact_point(edge))).is_some() {
+                    let Some(arm) = source.and_then(|s| branches.iter().position(|b| b.source == Some(s))) else { break };
+                    if dests.insert(arm, (entry, fact_point(edge))).is_some() {
                         break;
                     }
                 }
@@ -912,7 +881,7 @@ impl Order<'_, '_> {
                         Fact::Repoint { holder, new, .. } if holder == field.name() && ids.iter().any(|id| new.contains(id))));
                     return (!issued_here && ids.iter().all(|id| incoming.contains(id))).then_some((f, incoming.as_slice()));
                 }
-                let hir = rustc_utils::BodyExt::location_to_hir_id(self.body, self.location(f));
+                let hir = rustc_utils::BodyExt::location_to_hir_id(self.body, f.occurrence.at);
                 let rustc_hir::Node::Expr(expr) = self.tcx.hir_node(hir) else {
                     return None;
                 };
@@ -1131,7 +1100,7 @@ impl Order<'_, '_> {
         let mut ends = BTreeSet::new();
         for e in &row.facts {
             let Fact::BorrowEnd { loan, .. } = e.fact else { continue };
-            let (Some(l), Some(succ)) = (self.loan(loan), e.end_successor) else { continue };
+            let (Some(l), Some(succ)) = (self.loan(loan), e.occurrence.successor) else { continue };
             let at = fact_point(e);
             if child_at.is_none_or(|p| p == at) && l.through.as_ref() == Some(r.name()) && names_lender(through, l)
                 && (l.direct_holders.contains(&h) || l.via_call.contains(&h) || l.holders.contains(&h))
@@ -1516,14 +1485,13 @@ mod tests {
                 end_places: Vec::new(),
                 drop_route: DropRoute::Unwind,
                 place_local: None,
-                end_successor: None,
+                occurrence: crate::facts::Occurrence::at(Location::START),
                 col: 1,
                 arm: None,
                 fact: Fact::Drop {
                     path: "call_s".into(), how: "drops", at_reassign: false, early_exit: None, also_on_exits: Vec::new(),
                 },
                 order: (0, 0, 0),
-                site: None,
             }],
             ..Row::default()
         };

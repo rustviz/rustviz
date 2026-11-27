@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub struct ArmSpec {
     /// The `SwitchInt` terminator.
-    pub switch: Location,
+    pub edge: super::SwitchEdge,
     pub branch: usize,
     pub arm: usize,
     pub parent: Option<usize>,
@@ -47,8 +47,6 @@ pub struct ArmSpec {
     /// Loop exits are included conservatively: a break can rejoin an arm
     /// after leaving a loop inside it.
     pub continuing: Vec<Location>,
-    pub switch_col: usize,
-    pub code_spans: BTreeSet<(usize, usize)>,
     pub col_lo: usize,
     pub col_hi: usize,
 }
@@ -431,7 +429,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         }
     }
 
-    pub fn build(&self) -> RowModel {
+    pub fn build(&self, switches: &[super::SwitchExit]) -> RowModel {
         let body = self.body;
         let rpo_v: Vec<BasicBlock> = body.basic_blocks.reverse_postorder().to_vec();
         let rpo: BTreeMap<BasicBlock, usize> = rpo_v.iter().enumerate().map(|(i, b)| (*b, i)).collect();
@@ -816,6 +814,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         // Rule 5.
         let doms = body.basic_blocks.dominators();
         let mut arms: BTreeMap<usize, Vec<ArmSpec>> = BTreeMap::new();
+        let mut common_entries = BTreeMap::new();
         for (&loc, &r) in &row {
             let data = &body.basic_blocks[loc.block];
             if loc.statement_index != data.statements.len() {
@@ -834,14 +833,11 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
             let sw_span = self.span_of(loc);
             let mut specs: Vec<ArmSpec> = Vec::new();
             for (i, t) in targets.iter().enumerate() {
-                // Entered from this switch only (an earlier arm's imaginary
-                // `FalseEdge` into a match arm doesn't run).
-                let real_preds = preds[*t]
-                    .iter()
-                    .filter(|p| !matches!(&body.basic_blocks[**p].terminator().kind,
-                        TerminatorKind::FalseEdge { imaginary_target, .. } if imaginary_target == t))
-                    .count();
-                if real_preds != 1 {
+                // Several values can use one edge. Several different tests
+                // can also enter the same source arm (e.g. either false
+                // operand of &&). A general CFG join is not an arm.
+                let incoming = real_predecessors(body, *t);
+                if incoming.len() != 1 && super::control::common_entry(switches, body, *t, &incoming).is_none() {
                     continue;
                 }
                 let locs: BTreeSet<Location> = row
@@ -852,19 +848,40 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 if locs.is_empty() {
                     continue;
                 }
-                let arm_exits: Vec<Location> = locs
+                let edge = super::SwitchEdge { switch: loc, successor: *t };
+                // Alternative patterns can join in the same arm before the
+                // row ends. Their common tail is outside either target's
+                // dominance region. Sample its effects on both paths, while
+                // keeping instruction-to-edge identity on the exclusive code.
+                let mut through = locs.clone();
+                if let Some(arm) = super::control::entered(switches, edge) {
+                    let mut next: Vec<_> = locs.iter().filter(|&&l| l == body.terminator_loc(l.block))
+                        .flat_map(|&l| self.real_succs(l)).collect();
+                    while let Some(l) = next.pop() {
+                        if row.get(&l) != Some(&r) || through.contains(&l) { continue; }
+                        if l.statement_index == 0 {
+                            let common = common_entries.entry(l.block).or_insert_with(|| {
+                                let preds = real_predecessors(body, l.block);
+                                super::control::common_entry(switches, body, l.block, &preds)
+                            });
+                            if *common != Some(arm) { continue; }
+                        }
+                        through.insert(l);
+                        next.extend(self.real_succs(l));
+                    }
+                }
+                let arm_exits: Vec<Location> = through
                     .iter()
                     .copied()
                     .filter(|l| {
                         let ss = self.real_succs(*l);
-                        ss.is_empty() || ss.iter().any(|s| !locs.contains(s))
+                        ss.is_empty() || ss.iter().any(|s| !through.contains(s))
                     })
                     .collect();
                 // The arm's own code: spans on this row that don't cover
                 // the whole branch (MIR gives some gotos the `if`'s span).
                 let mut lo = usize::MAX;
                 let mut hi = 0;
-                let mut code_spans = BTreeSet::new();
                 for l in &locs {
                     let sp = self.span_of(*l);
                     if sp.contains(sw_span) || self.line_lo(sp) != r || self.line_hi(sp) != r {
@@ -874,9 +891,6 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                     let end = self.col_hi(sp);
                     lo = lo.min(start);
                     hi = hi.max(end);
-                    if start < end && (!passes(*l) || self.exit_kind(*l).is_some()) {
-                        code_spans.insert((start, end));
-                    }
                 }
                 if lo == usize::MAX {
                     lo = 0;
@@ -884,10 +898,10 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
                 let continuing = arm_exits.iter().copied().filter(|&l| {
                     self.exit_kind(l) != Some(true)
                         && origin.get(&l).is_none_or(|from| from.is_empty() || from.iter().any(|&r| r >= LOOP_EXIT))
-                        && self.real_succs(l).iter().any(|s| !locs.contains(s))
+                        && self.real_succs(l).iter().any(|s| !through.contains(s))
                 }).collect();
-                specs.push(ArmSpec { switch: loc, branch: 0, arm: i, parent: None, locs, exits: arm_exits,
-                    continuing, switch_col: self.col_lo(sw_span), code_spans, col_lo: lo, col_hi: hi });
+                specs.push(ArmSpec { edge, branch: 0, arm: i, parent: None, locs, exits: arm_exits,
+                    continuing, col_lo: lo, col_hi: hi });
             }
             if specs.len() >= 2 {
                 arms.entry(r).or_default().extend(specs);
@@ -895,20 +909,20 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         }
         for specs in arms.values_mut() {
             // Branches in evaluation order; nested ones get their parent.
-            specs.sort_by_key(|s| (rpo.get(&s.switch.block).copied().unwrap_or(usize::MAX), s.arm));
+            specs.sort_by_key(|s| (rpo.get(&s.edge.switch.block).copied().unwrap_or(usize::MAX), s.arm));
             let mut branch_of: Vec<Location> = Vec::new();
             for s in specs.iter_mut() {
-                if !branch_of.contains(&s.switch) {
-                    branch_of.push(s.switch);
+                if !branch_of.contains(&s.edge.switch) {
+                    branch_of.push(s.edge.switch);
                 }
-                s.branch = branch_of.iter().position(|x| *x == s.switch).unwrap();
+                s.branch = branch_of.iter().position(|x| *x == s.edge.switch).unwrap();
             }
             let n = specs.len();
             for i in 0..n {
-                let sw = specs[i].switch;
+                let sw = specs[i].edge.switch;
                 // The innermost other arm containing this branch's switch.
                 let parent = (0..n)
-                    .filter(|&j| specs[j].switch != sw && specs[j].locs.contains(&sw))
+                    .filter(|&j| specs[j].edge.switch != sw && specs[j].locs.contains(&sw))
                     .min_by_key(|&j| specs[j].locs.len());
                 specs[i].parent = parent;
             }
@@ -916,6 +930,11 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
 
         RowModel { rpo, row, event_row, early_exit, shared_exits, exit_only, col, exits, arms }
     }
+}
+
+pub(super) fn real_predecessors(body: &Body<'_>, target: BasicBlock) -> BTreeSet<BasicBlock> {
+    body.basic_blocks.predecessors()[target].iter().copied()
+        .filter(|&bb| real_successor_blocks(body, bb).contains(&target)).collect()
 }
 
 /// The non-cleanup successors the terminator can take at runtime.
@@ -961,6 +980,14 @@ impl RowModel {
         let r = self.row.get(&l)?;
         let specs = self.arms.get(r)?;
         specs.iter().enumerate().filter(|(_, s)| s.locs.contains(&l)).min_by_key(|(_, s)| s.locs.len()).map(|(i, _)| i)
+    }
+
+    pub fn edge_at(&self, loc: Location) -> Option<super::SwitchEdge> {
+        let arm = self.arm_of(loc)?;
+        let specs = &self.arms[&self.row[&loc]];
+        let edge = specs[arm].edge;
+        // A loan issued in a shared target has no unique incoming edge.
+        (!specs.iter().any(|s| s.edge != edge && s.edge.successor == edge.successor)).then_some(edge)
     }
 
     /// Evaluation order of a location: (reverse postorder of its block,

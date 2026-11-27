@@ -23,7 +23,7 @@ impl ExprVisitor<'_, '_> {
     let Some(facts) = self.body_facts else { return };
     let mut slots = Vec::new();
     templates_in(self.preprocessed_events, &mut Vec::new(), None, &mut slots);
-    if slots.is_empty() || self.branch_conditions.is_empty() {
+    if slots.is_empty() || facts.switches.is_empty() {
       return;
     }
     let edges = self.exit_edges(facts, &slots);
@@ -196,12 +196,12 @@ impl ExprVisitor<'_, '_> {
         if slots.iter().any(|(_, e, p)| {
           p == path && ends(e) == Some((&giver, to))
             && self.end_loans.get(&e.get_id()).is_some_and(|ids| ids.contains(&edge.loan))
-        }) || !placed.insert((slot_id, edge.loan, edge.fact.location, edge.fact.end_successor, path.clone(), holder.clone())) {
+        }) || !placed.insert((slot_id, edge.loan, edge.fact.location, edge.fact.occurrence.successor, path.clone(), holder.clone())) {
           continue;
         }
         // One drawn release can stand for several loans only at the
         // same boundary, with the same holder and the same end kind.
-        copies.entry((path.clone(), holder.clone(), edge.fact.location, edge.fact.end_successor, edge.own))
+        copies.entry((path.clone(), holder.clone(), edge.fact.location, edge.fact.occurrence.successor, edge.own))
           .or_insert_with(|| (giver, holder, edge, Vec::new())).3.push(edge.loan);
       }
       let list = events_at(self.preprocessed_events, orig).unwrap();
@@ -322,7 +322,7 @@ impl ExprVisitor<'_, '_> {
       let entry = self.locate(
         self.preprocessed_events,
         &switches,
-        self.site_span(ev.display_location),
+        ev.display_location,
         ev,
         next,
         &mut site,

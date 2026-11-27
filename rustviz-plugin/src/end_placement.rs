@@ -2,12 +2,11 @@
 //! The source of an ending edge can precede the switch even when it is the
 //! assignment in a successor that prompted the walk to draw a give-back.
 use crate::expr_visitor::ExprVisitor;
-use crate::facts::table::ArmSpan;
 use crate::facts::{Ev, Fact, LoanInfo};
 use crate::svg_generator::data::{ExternalEvent, ResourceTy, StaticLender};
-use rustc_middle::mir::{Body, Location, TerminatorKind};
+use rustc_middle::mir::{Body, Location};
 use rustc_span::Span;
-use rustc_utils::SpanExt;
+use rustc_utils::BodyExt;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod exit;
@@ -44,7 +43,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// boundary before the renderer expands one-line arms into drawing rows.
   pub(crate) fn place_arm_local_ends(&mut self) {
     let Some(facts) = self.body_facts else { return };
-    let conditions = self.branch_conditions.iter().map(|(&id, &span)| (id, self.span_positions(span))).collect();
     let mut destinations = BTreeMap::new();
     for (line, e) in self.preprocessed_events.iter() {
       let r = match e {
@@ -57,18 +55,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let Some(r) = r else { continue };
       let Some(col) = facts.columns.iter().find(|c| &c.name == r.name()) else { continue };
       let body = &self.bwf.body;
-      let paths_of = |span| {
+      let path_of = |mut arms: Vec<crate::facts::SourceArm>, scope| {
+        arms.extend(crate::facts::enclosing_arms(self.tcx, scope, true));
         let mut path = Vec::new();
-        declared_at(self.preprocessed_events, r, span, &mut path, &conditions).then_some(path)
+        declared_at(self.preprocessed_events, r, &arms, &mut path).then_some(path)
       };
-      let decls: BTreeSet<_> = facts
-        .vars
-        .iter()
-        .filter(|v| v.name == col.root)
-        .filter_map(|v| {
-          paths_of(self.span_positions(body.local_decls[rustc_middle::mir::Local::from_usize(v.local)].source_info.span))
-        })
-        .collect();
+      let locals = facts.bindings.columns.get(&col.root);
+      let decls: BTreeSet<_> = locals.into_iter().flatten().filter_map(|&local| {
+        if r.ref_local().is_some_and(|l| l != local) { return None; }
+        let pat = body.local_decls[local].source_info.scope.lint_root(&body.source_scopes)?;
+        path_of(Vec::new(), pat)
+      }).collect();
       let Some(row) = facts.rows.iter().find(|row| row.line == *line) else { continue };
       let mut paths = BTreeSet::new();
       let emitted = self.end_loans.get(&e.get_id());
@@ -80,16 +77,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           Fact::ScopeEnd { path, .. } => path == &col.name || path == &col.root,
           _ => false,
         };
-        if !related {
+        if !related || r.ref_local().zip(ev.place_local).is_some_and(|(r, p)| p != r) {
           continue;
         }
-        let span = ev
-          .arm
-          .and_then(|i| row.arms.get(i))
-          .filter(|a| a.col_lo != 0)
-          .map(|a| ArmSpan { start: (*line, a.col_lo), end: (*line, a.col_hi) })
-          .unwrap_or_else(|| self.site_span(ev.location));
-        if let Some(path) = paths_of(span) {
+        let arms = crate::facts::location_arms(self.tcx, body, facts, ev.display_location);
+        if let Some(path) = path_of(arms, body.location_to_hir_id(ev.display_location)) {
           paths.insert(path);
         }
       }
@@ -102,14 +94,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             Fact::Copy { path, .. } | Fact::Move { path, .. } | Fact::Init { path, .. } => path == &col.name || path == &col.root,
             _ => false,
           };
-          if use_here {
-            if let Some(path) = paths_of(self.site_span(ev.location)) {
+          if use_here && !r.ref_local().zip(ev.place_local).is_some_and(|(r, p)| p != r) {
+            if let Some(path) = path_of(crate::facts::location_arms(self.tcx, body, facts, ev.location), body.location_to_hir_id(ev.location)) {
               paths.insert(path);
             }
           }
         }
       }
-      // A source span shared by the nested fork and its parent may only
+      // A compiler source scope for nested bookkeeping may only
       // identify an ancestor. The local's MIR declaration disambiguates
       // that ancestor's arm when all the edge evidence agrees with it.
       if decls.len() == 1 && paths.iter().all(|p| decls.first().unwrap().starts_with(p)) {
@@ -255,14 +247,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             continue;
           }
           let mut site = Site { path: Vec::new(), before: None, row: row.line };
-          let source = self.site_span(edge.location);
-          let src = row
-            .arms
-            .get(edge.arm.unwrap_or(usize::MAX))
-            .filter(|a| a.col_lo != 0)
-            .map(|a| ArmSpan { start: (row.line, a.col_lo), end: (row.line, a.col_hi) })
-            .unwrap_or(source);
-          self.locate(self.preprocessed_events, &switches, src, edge, *next, &mut site);
+          self.locate(self.preprocessed_events, &switches, edge.display_location, edge, *next, &mut site);
           // Region inference can keep b restricted after x = &b; x = y.
           // If MIR ended x's holding and overwrote that value on every path
           // here, the eventual loan end belongs on b alone (#1742).
@@ -382,7 +367,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let mut others = BTreeSet::new();
       for (row, e, h, next) in ends {
         let mut site = Site { path: Vec::new(), before: None, row };
-        self.locate(self.preprocessed_events, &switches, self.site_span(e.location), e, next, &mut site);
+        self.locate(self.preprocessed_events, &switches, e.location, e, next, &mut site);
         if h == r.name() {
           mine.insert(site);
         } else if slots.iter().any(|(_, ae, arm)| {
@@ -427,7 +412,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           continue;
         }
         let mut site = Site { path: Vec::new(), before: None, row: *row };
-        self.locate(self.preprocessed_events, &switches, self.site_span(e.location), e, *to_line, &mut site);
+        self.locate(self.preprocessed_events, &switches, e.location, e, *to_line, &mut site);
         if !others.contains(&site.path) {
           continue;
         }
@@ -474,17 +459,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // Match and closure callbacks emit their own slots. Require a
         // single local declared in this arm and a single MIR loan of
         // the drawn lender that reached this binding.
-        let mut locals = facts.vars.iter().filter(|v| {
-          &v.name == holder && {
-            let decl = self.bwf.body.local_decls[rustc_middle::mir::Local::from_usize(v.local)].source_info.span;
-            arm.source_span.is_some_and(|sp| contains(sp, self.span_positions(decl)))
-              || self.arm_patterns.get(&id).is_some_and(|ps| ps.iter().any(|(idx, pat)| *idx == a && pat.contains(decl)))
-          }
+        let mut locals = facts.bindings.columns.get(holder).into_iter().flatten().filter(|&&local| {
+          let scope = self.bwf.body.local_decls[local].source_info.scope;
+          scope.lint_root(&self.bwf.body.source_scopes).is_some_and(|pat|
+            arm.source.is_some_and(|source| crate::facts::enclosing_arms(self.tcx, pat, true).contains(&source)))
         });
-        let Some(local) = locals.next() else { continue };
-        if locals.next().is_some() {
-          continue;
-        }
+        let Some(&local) = locals.next() else { continue };
+        if locals.next().is_some() { continue; }
         let inits: Vec<_> = facts
           .rows
           .iter()
@@ -494,7 +475,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let block = &self.bwf.body.basic_blocks[f.location.block];
             let stmt = block.statements.get(f.location.statement_index)?;
             let rustc_middle::mir::StatementKind::Assign(pair) = &stmt.kind else { return None };
-            (path == holder && pair.0.local.index() == local.local).then_some(f.location)
+            (path == holder && pair.0.local == local).then_some(f.location)
           })
           .collect();
         let matched: Vec<_> = facts
@@ -531,19 +512,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           continue;
         }
         let mut site = Site { path: Vec::new(), row, before: None };
-        let src = e
-          .arm
-          .and_then(|i| facts.rows.iter().find(|r| r.line == row)?.arms.get(i))
-          .filter(|a| a.col_lo != 0)
-          .map(|a| ArmSpan { start: (row, a.col_lo), end: (row, a.col_hi) })
-          .unwrap_or_else(|| self.site_span(e.location));
-        self.locate(&arm.e_data, &switches, src, e, next, &mut site);
+        self.locate(&arm.e_data, &switches, e.display_location, e, next, &mut site);
         // The branch into an arm may first pass an imaginary edge or a
         // discriminant test. Its first executable successor has the arm span.
         if site.path.is_empty() {
-          if let Some(next_loc) = e.end_successor {
+          if let Some(next_loc) = e.occurrence.successor {
             let mut after = Site { path: Vec::new(), row: next, before: None };
-            self.locate(&arm.e_data, &switches, self.site_span(next_loc), e, next, &mut after);
+            self.locate(&arm.e_data, &switches, next_loc, e, next, &mut after);
             if !after.path.is_empty() {
               site = after;
             }
@@ -566,7 +541,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if let Some(&(id, a)) = site.path.last() {
           if let Some((_, ExternalEvent::Branch { branches, .. })) = branch_at(&arm.e_data, id, &mut Vec::new()) {
             let entered = &branches[a];
-            if next == site.row && !entered.source_span.is_some_and(|sp| contains(sp, self.site_span(e.location))) {
+            if next == site.row && !entered.source.is_some_and(|s| crate::facts::location_arms(self.tcx, &self.bwf.body, facts, e.location).contains(&s)) {
               site.before = entered.e_data.iter().find(|(l, _)| *l >= site.row).map(|(_, e)| e.get_id());
             }
           }
@@ -600,23 +575,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   fn branch_switches(&self) -> BTreeMap<usize, Vec<Location>> {
-    let body = &self.bwf.body;
-    let mut switches = BTreeMap::new();
-    for (bb, data) in body.basic_blocks.iter_enumerated() {
-      if !matches!(data.terminator().kind, TerminatorKind::SwitchInt { .. }) {
-        continue;
-      }
-      let at = Location { block: bb, statement_index: data.statements.len() };
-      let span = body.source_info(at).span;
-      for (&id, cond) in &self.branch_conditions {
-        if cond.contains(span)
-          || span.contains(*cond)
-          || self.arm_patterns.get(&id).is_some_and(|v| v.iter().any(|(_, p)| p.contains(span)))
-        {
-          switches.entry(id).or_insert_with(Vec::new).push(at);
+    fn walk(events: &Events, facts: &crate::facts::BodyFacts, switches: &mut BTreeMap<usize, Vec<Location>>) {
+      for (_, event) in events {
+        let ExternalEvent::Branch { id, branches, .. } = event else { continue };
+        if let Some(source) = branches.first().and_then(|b| b.source) {
+          switches.insert(*id, facts.tests_of(source.branch).into_iter().collect());
         }
+        for b in branches { walk(&b.e_data, facts, switches); }
       }
     }
+    let mut switches = BTreeMap::new();
+    if let Some(facts) = self.body_facts { walk(self.preprocessed_events, facts, &mut switches); }
     switches
   }
 
@@ -645,7 +614,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             continue;
           }
           let mut site = Site { path: Vec::new(), before: None, row: row.line };
-          self.locate(self.preprocessed_events, &switches, self.site_span(end.location), end, *to_line, &mut site);
+          self.locate(self.preprocessed_events, &switches, end.location, end, *to_line, &mut site);
           if let Some(&(id, a)) = site.path.last() {
             if switches.get(&id).is_some_and(|ss| ss.contains(&end.location)) {
               if let Some((_, ExternalEvent::Branch { branch_type, branches, .. })) = branch_at(self.preprocessed_events, id, &mut Vec::new()) {
@@ -730,7 +699,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let lender = endpoints(event).1.name();
           let mut ends = row.facts.iter().filter(|e| matches!(&e.fact,
             Fact::BorrowEnd { loan, lender: from, .. } if ids.contains(loan) && *from == lender));
-          if let Some(end) = ends.next().filter(|first| ends.all(|e| e.location == first.location && e.end_successor == first.end_successor)) {
+          if let Some(end) = ends.next().filter(|first| ends.all(|e| e.location == first.location && e.occurrence.successor == first.occurrence.successor)) {
             effects.insert(id, end);
           }
         }
@@ -741,9 +710,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // precedes a later effect on a path through that successor.
         if !effects.windows(2).all(|w| {
           let (a, b) = (w[0].1, w[1].1);
-          if a.order == b.order { return a.end_successor == b.end_successor; }
+          if a.order == b.order { return a.occurrence.successor == b.occurrence.successor; }
           dominates(&self.bwf.body, a.location, b.location)
-            && a.end_successor.is_none_or(|next| dominates(&self.bwf.body, next, b.location))
+            && a.occurrence.successor.is_none_or(|next| dominates(&self.bwf.body, next, b.location))
         }) {
           continue;
         }
@@ -770,15 +739,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let lender = to.real_name();
       let mut bound = BTreeSet::new();
       for &(id, a) in &path {
-        if let Some(patterns) = self.arm_patterns.get(&id) {
-          for (&loc, ids) in &facts.binding_loans {
-            let data = &self.bwf.body.basic_blocks[loc.block];
-            let rustc_middle::mir::StatementKind::Assign(asg) = &data.statements[loc.statement_index].kind else { continue };
-            let decl = self.bwf.body.local_decls[asg.0.local].source_info.span;
-            if patterns.iter().any(|(arm, p)| *arm == a && p.contains(decl))
-              && facts.vars.iter().any(|v| v.local == asg.0.local.index() && v.name == holder)
-            {
-              bound.extend(ids);
+        if let Some(patterns) = self.arm_bindings.get(&id) {
+          let local = from.extract_rap().and_then(|r| r.ref_local().or_else(|| r.owner_local()));
+          for &(_, local) in patterns.iter().filter(|&&(arm, p)| arm == a && Some(p) == local) {
+            if let Some(inits) = facts.binding_loans.get(&local) {
+              bound.extend(inits.values().flatten().copied());
             }
           }
         }
@@ -795,9 +760,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let Fact::BorrowEnd { loan, holder: h, lender: l, to_line, .. } = &e.fact else { continue };
           if !bound.contains(loan) || *l != lender || !h.split('|').any(|n| n == holder) { continue; }
           let mut site = Site { path: Vec::new(), before: None, row: r.line };
-          self.locate(self.preprocessed_events, switches, self.site_span(e.location), e, *to_line, &mut site);
+          self.locate(self.preprocessed_events, switches, e.location, e, *to_line, &mut site);
           if site.matches(self.preprocessed_events, &path, row, ev.get_id()) {
-            candidates.push((*loan, e.location, e.end_successor));
+            candidates.push((*loan, e.location, e.occurrence.successor));
           }
         }
       }
@@ -810,14 +775,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// edge that skips the binding. The holder on that edge may be the
   /// scrutinee itself or a call result without a column.
   pub(crate) fn place_scrutinee_ends(&mut self) {
-    if self.arm_patterns.is_empty() { return; }
+    if self.arm_bindings.is_empty() { return; }
     let Some(facts) = self.body_facts else { return };
     let switches = self.branch_switches();
     let body = &self.bwf.body;
     let mut put = Vec::new();
     let mut remove = BTreeSet::new();
     let mut represented = self.represented_edges(&switches);
-    for (&id, patterns) in &self.arm_patterns {
+    for (&id, patterns) in &self.arm_bindings {
+      if self.let_else_branches.contains(&id) { continue; }
       let mut parent = Vec::new();
       let Some((_, ExternalEvent::Branch { branches, branch_type, .. })) = branch_at(self.preprocessed_events, id, &mut parent)
       else {
@@ -826,25 +792,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for loan in &facts.loans {
         // The declaration identifies a pattern binding even when sibling
         // patterns use the same spelling. Keep its local and its arm.
-        let bindings: Vec<_> = facts.vars.iter().filter_map(|v| {
-          let local = rustc_middle::mir::Local::from_usize(v.local);
-          let decl = body.local_decls[local].source_info.span;
-          let (a, _) = patterns.iter().find(|(_, pat)| pat.contains(decl))?;
-          let carries = loan.direct_holders.contains(&v.name) || loan.via_call.contains(&v.name)
-            || facts.columns.iter().any(|c| c.root == v.name && loan.via_call.contains(&c.name));
-          carries.then_some((local, &v.name, *a))
+        let bindings: Vec<_> = patterns.iter().copied().filter(|&(_, local)| {
+          facts.binding_loans.get(&local).is_some_and(|inits| inits.values().any(|loans| loans.contains(&loan.loan)))
         }).collect();
-        if !bindings.iter().any(|(_, _, a)| represented.arm_loans.contains(&(id, *a, loan.loan))) { continue; }
-        let binding = |name: &String| bindings.iter().any(|(_, n, _)| *n == name);
-        if bindings.is_empty() || loan.source != "borrow"
-          || (loan.via_call.is_empty() && loan.direct_holders.iter().all(binding)) { continue; }
-        let Some(lender) = self.raps.get(&loan.lender).map(|r| &r.rap) else { continue };
-        let inits: Vec<_> = facts.rows.iter().flat_map(|r| &r.facts).filter_map(|e| {
-          let Fact::Init { .. } = e.fact else { return None };
-          let stmt = body.basic_blocks[e.location.block].statements.get(e.location.statement_index)?;
-          let rustc_middle::mir::StatementKind::Assign(pair) = &stmt.kind else { return None };
-          bindings.iter().find(|(l, _, _)| pair.0.as_local() == Some(*l)).map(|(_, _, a)| (*a, e.location))
-        }).collect();
+        if loan.source != "borrow" || !bindings.iter().any(|(arm, _)| represented.arm_loans.contains(&(id, *arm, loan.loan))) {
+          continue;
+        }
+        let binding = |local| bindings.iter().any(|&(_, p)| p == local);
+        // A loan first issued directly to a pattern binding cannot be
+        // outstanding on the path that skipped the binding.
+        if loan.via_call.is_empty() && loan.direct_locals.iter().all(|&local| binding(local)) { continue; }
+        let Some(lender) = loan.lender_local.and_then(|l| self.raps.place(l, &loan.lender)).map(|r| &r.rap) else { continue };
         let Some(issue) = facts.rows.iter().flat_map(|r| &r.facts).find(|e|
           matches!(e.fact, Fact::Borrow { loan: id, .. } if id == loan.loan)) else { continue };
         let ends: Vec<_> = facts
@@ -859,39 +817,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           .collect();
         for (row, e, h, next) in &ends {
           let mut site = Site { path: Vec::new(), before: None, row: *row };
-          self.locate(self.preprocessed_events, &switches, self.site_span(e.location), e, *next, &mut site);
+          self.locate(self.preprocessed_events, &switches, e.location, e, *next, &mut site);
           let entry = switches.get(&id).is_some_and(|ss| ss.contains(&e.location));
-          let mut index = site.path.iter().find(|(b, _)| *b == id).map(|(_, a)| *a);
-          if entry && branches.len() == 2 {
-            if let Some(to) = e.end_successor {
-              let matches: BTreeSet<_> = inits
-                .iter()
-                .filter(|(_, l)| body.basic_blocks.dominators().dominates(to.block, l.block))
-                .map(|(a, _)| *a)
-                .collect();
-              if matches.len() == 1 {
-                index = matches.first().copied();
-              } else if matches.is_empty() {
-                let other: BTreeSet<_> = body.basic_blocks[e.location.block]
-                  .terminator()
-                  .successors()
-                  .filter(|&t| t != to.block)
-                  .flat_map(|t| {
-                    inits.iter().filter(move |(_, l)| body.basic_blocks.dominators().dominates(t, l.block)).map(|(a, _)| *a)
-                  })
-                  .collect();
-                if other.len() == 1 {
-                  index = other.first().map(|&a| 1 - a);
-                }
-              }
-            }
-          }
+          let index = site.path.iter().find(|(b, _)| *b == id).map(|(_, a)| *a);
           let Some(a) = index else { continue };
-          if a >= branches.len() || bindings.iter().any(|(_, _, i)| *i == a) {
+          if a >= branches.len() || bindings.iter().any(|(i, _)| *i == a) {
             continue;
           }
           let arm = &branches[a];
-          if !entry && !arm.source_span.is_some_and(|sp| contains(sp, self.site_span(e.location))) {
+          if !entry && !arm.source.is_some_and(|s| crate::facts::location_arms(self.tcx, body, facts, e.location).contains(&s)) {
             continue;
           }
           // A conditional constructor may never have issued this loan
@@ -910,38 +844,36 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // A Copy gives the successful arm two real holders in turn.
           // Its own P2-1b slot records that the binding keeps the loan.
           let copy_into_binding = facts.rows.iter().flat_map(|r| &r.facts).any(|f| {
-            let Fact::Copy { to, .. } = &f.fact else { return false };
-            if !binding(to) {
-              return false;
-            }
+            if !matches!(f.fact, Fact::Copy { .. }) { return false; }
             let Some(st) = body.basic_blocks[f.location.block].statements.get(f.location.statement_index) else { return false };
             let rustc_middle::mir::StatementKind::Assign(pair) = &st.kind else { return false };
             let rustc_middle::mir::Rvalue::Use(rustc_middle::mir::Operand::Copy(src)) = &pair.1 else { return false };
-            facts.vars.iter().any(|v| v.name == **h && v.local == src.local.index())
+            binding(pair.0.local) && e.end_places.iter().any(|p| p.local == src.local.index())
           });
-          if copy_into_binding || represented.edges.contains(&(loan.loan, e.location, e.end_successor)) {
+          if copy_into_binding || represented.edges.contains(&(loan.loan, e.location, e.occurrence.successor)) {
             continue;
           }
-          let existed = facts
-            .rows
-            .iter()
-            .flat_map(|r| &r.facts)
-            .any(|f| matches!(&f.fact,Fact::Init {path,..} if path==*h) && dominates(body, f.location, e.location));
+          let initialized = |local| facts.rows.iter().flat_map(|r| &r.facts).any(|f|
+            f.place_local == Some(local) && matches!(&f.fact, Fact::Init {path, ..} if path == *h)
+              && dominates(body, f.location, e.location));
           // After it.next() a temporary carries the loan into the
           // switch. Its previous holder already crossed a HoldEnd.
           let handed_on = facts.rows.iter().flat_map(|r| &r.facts).any(|f| {
             matches!(&f.fact,Fact::HoldEnd{loan:id,holder,..} if *id==loan.loan && holder==*h)
-              && f.end_successor.is_some_and(|s| dominates(body, s, e.location))
+              && f.occurrence.successor.is_some_and(|s| dominates(body, s, e.location))
           });
-          let from = if !existed || handed_on || binding(h) || !loan.holders.contains(h) {
+          // A skipped binding can still be the presentation label on the
+          // end. Only draw an arrow from a named slot that carried this loan.
+          let named = e.end_places.iter().filter(|p| &p.name == *h).map(|p| rustc_middle::mir::Local::from_usize(p.local));
+          let mut named = named.filter(|&l| !binding(l));
+          let from = if handed_on || !loan.holders.contains(h) {
             ResourceTy::Anonymous
-          } else if let Some(r) = self.raps.get(*h) {
-            if r.rap.is_ref() || !r.rap.holds_borrow() {
-              continue;
-            }
+          } else if let Some(local) = named.next().filter(|&l| named.next().is_none() && initialized(l)) {
+            let Some(r) = self.raps.place(local, h) else { continue };
+            if r.rap.is_ref() || !r.rap.holds_borrow() { continue; }
             ResourceTy::Value(r.rap.clone())
           } else {
-            continue;
+            ResourceTy::Anonymous
           };
           let to = ResourceTy::Value(lender.clone());
           let id_ev = *self.unique_id;
@@ -976,7 +908,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             site.row = branch_type.get_start_end(a).0;
             site.before = arm.e_data.first().map(|(_, e)| e.get_id());
           }
-          represented.edges.insert((loan.loan, e.location, e.end_successor));
+          represented.edges.insert((loan.loan, e.location, e.occurrence.successor));
           self.end_loans.insert(id_ev, vec![loan.loan]);
           put.push((site.path, site.before, (site.row, event)));
           if from.extract_rap().is_some() {
@@ -1011,23 +943,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut covered = self.represented_edges(&switches).edges;
     let mut put = Vec::new();
     for &id in &self.let_else_branches {
-      let Some(pattern) = self.branch_conditions.get(&id) else { continue };
+      let Some(bindings) = self.arm_bindings.get(&id) else { continue };
       let mut path = Vec::new();
       let Some((_, ExternalEvent::Branch { branches, branch_type, live_vars, .. })) =
         branch_at(self.preprocessed_events, id, &mut path)
       else {
         continue;
       };
-      let vars: BTreeSet<_> = facts
-        .vars
-        .iter()
-        .filter(|v| {
-          let l = rustc_middle::mir::Local::from_usize(v.local);
-          pattern.contains(self.bwf.body.local_decls[l].source_info.span)
-        })
-        .map(|v| &v.name)
-        .collect();
-      let Some(else_span) = branches[0].source_span else { continue };
+      let vars: BTreeSet<_> = bindings.iter().filter_map(|(_, l)| facts.bindings.locals.get(l)).collect();
+      let Some(els) = branches[0].source else { continue };
       path.push((id, 0));
       for loan in &facts.loans {
         if loan.source != "borrow" || !loan.holders.iter().any(|h| vars.contains(h)) {
@@ -1045,18 +969,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if !live_vars.contains(lender) {
           continue;
         }
-        // The successor containing the initialization of the pattern
-        // binding is the successful path. The other real successor
-        // enters else, including a bare return with no visible statement.
-        let binds: Vec<_> = facts
-          .rows
-          .iter()
-          .flat_map(|r| &r.facts)
-          .filter_map(|ev| match &ev.fact {
-            Fact::Init { path, .. } if vars.contains(path) && loan.holders.contains(path) => Some(ev.location),
-            _ => None,
-          })
-          .collect();
         for row in &facts.rows {
           for ev in &row.facts {
             let Fact::BorrowEnd { loan: n, holder, .. } = &ev.fact else { continue };
@@ -1065,17 +977,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             if *n != loan.loan || !dominates(&self.bwf.body, issue.location, ev.location) {
               continue;
             }
-            let on_entry = switches.get(&id).is_some_and(|ss| ss.contains(&ev.location))
-              && ev.end_successor.is_some_and(|dest| {
-                let doms = self.bwf.body.basic_blocks.dominators();
-                !binds.is_empty()
-                  && binds.iter().all(|b| !doms.dominates(dest.block, b.block))
-                  && self.bwf.body.basic_blocks[ev.location.block]
-                    .terminator()
-                    .successors()
-                    .any(|other| other != dest.block && binds.iter().any(|b| doms.dominates(other, b.block)))
-              });
-            if !on_entry && !contains(else_span, self.site_span(ev.location)) {
+            let on_entry = facts.entered(ev.location, ev.occurrence.successor)
+              .is_some_and(|arm| Some(arm) == branches[0].source);
+            if !on_entry && !crate::facts::location_arms(self.tcx, &self.bwf.body, facts, ev.location).contains(&els) {
               continue;
             }
             let from = if vars.contains(holder) {
@@ -1090,9 +994,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               site.row = branch_type.get_start_end(0).0;
               site.before = branches[0].e_data.first().map(|(_, e)| e.get_id());
             } else if let Fact::BorrowEnd { to_line, .. } = ev.fact {
-              self.locate(&branches[0].e_data, &switches, self.site_span(ev.location), ev, to_line, &mut site);
+              self.locate(&branches[0].e_data, &switches, ev.location, ev, to_line, &mut site);
             }
-            if !covered.insert((loan.loan, ev.location, ev.end_successor)) { continue; }
+            if !covered.insert((loan.loan, ev.location, ev.occurrence.successor)) { continue; }
             let id = *self.unique_id;
             *self.unique_id += 1;
             self.end_loans.insert(id, vec![loan.loan]);
@@ -1112,106 +1016,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  fn site_span(&self, at: Location) -> ArmSpan {
-    let body = &self.bwf.body;
-    self.span_positions(body.source_info(at).span)
-  }
-
-  fn span_positions(&self, span: Span) -> ArmSpan {
-    let sp = span.as_local(self.bwf.body.span).unwrap_or(span).source_callsite();
-    let pos = |p| {
-      let c = self.tcx.sess.source_map().lookup_char_pos(p);
-      (c.line, c.col.0 + 1)
-    };
-    ArmSpan { start: pos(sp.lo()), end: pos(sp.hi()) }
-  }
-
   /// Returns true when the ending edge itself enters the selected arm.
   fn locate(
     &self,
     events: &Events,
     switches: &BTreeMap<usize, Vec<Location>>,
-    src: ArmSpan,
+    at: Location,
     end: &Ev,
     next: usize,
     site: &mut Site,
   ) -> bool {
     let body = &self.bwf.body;
+    let Some(facts) = self.body_facts else { return false };
+    let entered = facts.entered(end.location, end.occurrence.successor);
+    let path = crate::facts::location_arms(self.tcx, body, facts, at);
     for (_, e) in events {
       let ExternalEvent::Branch { id, branches, branch_type, split_point, merge_point, .. } = e else { continue };
       let sw = switches.get(id).map(Vec::as_slice).unwrap_or(&[]);
-      let mut entry = None;
-      for &switch in sw {
-        let Some(to) = end.end_successor else { continue };
-        if switch != end.location {
-          continue;
-        }
-        let mut remaining: BTreeSet<usize> = (0..branches.len()).collect();
-        let mut unknown = Vec::new();
-        for t in body.basic_blocks[switch.block].terminator().successors() {
-          if body.basic_blocks[t].is_cleanup || matches!(body.basic_blocks[t].terminator().kind, TerminatorKind::Unreachable) {
-            continue;
-          }
-          let mut candidates = BTreeSet::new();
-          let mut boundary_effects = BTreeSet::new();
-          for (bb, data) in body.basic_blocks.iter_enumerated() {
-            if data.is_cleanup || !body.basic_blocks.dominators().dominates(t, bb) {
-              continue;
-            }
-            for statement_index in 0..=data.statements.len() {
-              let span = self.site_span(Location { block: bb, statement_index });
-              let effect = match data.statements.get(statement_index) {
-                Some(st) => matches!(&st.kind, rustc_middle::mir::StatementKind::Assign(pair)
-                  if !matches!(&pair.1, rustc_middle::mir::Rvalue::Use(rustc_middle::mir::Operand::Constant(c)) if c.const_.ty().is_unit())),
-                None => matches!(data.terminator().kind, TerminatorKind::Call { .. } | TerminatorKind::SwitchInt { .. }),
-              };
-              for (a, b) in branches.iter().enumerate() {
-                // A cleanup or a unit assignment spanned over the entire block or its
-                // closing brace also runs on the empty arm of an if without else.
-                if b.source_span.is_some_and(|s| s.start < span.start && span.end < s.end) {
-                  candidates.insert(a);
-                } else if effect && b.source_span.is_some_and(|s| contains(s, span)) {
-                  boundary_effects.insert(a);
-                }
-              }
-            }
-          }
-          if candidates.is_empty() {
-            // A call may occupy its whole arm, e.g. _ => panic!().
-            candidates = boundary_effects;
-          }
-          if candidates.len() == 1 {
-            let a = *candidates.first().unwrap();
-            if t == to.block {
-              entry = Some(a);
-            }
-            remaining.remove(&a);
-          } else {
-            unknown.push(t);
-          }
-        }
-        if unknown == [to.block] && remaining.len() == 1 {
-          entry = remaining.first().copied();
-        }
-        // Empty exit arms can leave only bookkeeping after the switch.
-        // For an if testing the boolean computed at its condition, MIR
-        // identifies both arms directly (0 is false, 1 is true).
-        if entry.is_none() && remaining.len() == 2 && branches.len() == 2
-          && matches!(branch_type, crate::svg_generator::data::BranchType::If(..))
-        {
-          let data = &body.basic_blocks[switch.block];
-          if let TerminatorKind::SwitchInt { discr, targets } = &data.terminator().kind {
-            let span = data.terminator().source_info.span;
-            if self.branch_conditions.get(id) == Some(&span) && discr.ty(&body.local_decls, self.tcx).is_bool()
-              && data.statements.iter().rev().any(|st| st.source_info.span == span
-                && matches!(&st.kind, rustc_middle::mir::StatementKind::Assign(a) if Some(a.0) == discr.place()))
-            {
-              entry = (0..=1).find(|&v| targets.target_for_value(v) == to.block).map(|v| (1 - v) as usize);
-            }
-          }
-        }
-      }
-      if let Some(a) = entry {
+      if let Some(a) = entered.and_then(|arm| branches.iter().position(|b| b.source == Some(arm))) {
         site.path.push((*id, a));
         // An edge into an empty arm has no instruction to draw. Its
         // boundary is the arm's entry on the drawn fork.
@@ -1220,15 +1042,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         site.row = if lo <= next && next <= hi { next } else { lo.max(*split_point).min(*merge_point) };
         return true;
       }
-      if !sw.is_empty() && sw.iter().all(|&s| end.end_successor.is_some_and(|to| dominates(body, to, s))) {
+      if !sw.is_empty() && sw.iter().all(|&s| end.occurrence.successor.is_some_and(|to| dominates(body, to, s))) {
         if site.row <= *split_point {
           site.before = Some(*id);
           return false;
         }
       }
-      if let Some((i, arm)) = branches.iter().enumerate().find(|(_, arm)| arm.source_span.is_some_and(|s| contains(s, src))) {
+      // A match's pattern comparison executes before either successor.
+      // Its label can be drawn below the fork. Keep the effect at that
+      // label so the legacy arm replay does not copy it into each body.
+      if let Some(label) = facts.compared_pattern(body, at, end.occurrence.successor) {
+        if let Some(i) = branches.iter().position(|arm| arm.source == Some(label)) {
+          site.path.push((*id, i));
+          return false;
+        }
+      }
+      if let Some((i, arm)) = branches.iter().enumerate().find(|(_, arm)| arm.source.is_some_and(|s| path.contains(&s))) {
         site.path.push((*id, i));
-        return self.locate(&arm.e_data, switches, src, end, next, site);
+        return self.locate(&arm.e_data, switches, at, end, next, site);
       }
     }
     false
@@ -1290,10 +1121,6 @@ fn endpoints(e: &ExternalEvent) -> (&ResourceTy, &ResourceTy) {
     | ExternalEvent::StaticDie { from, to, .. } => (from, to),
     _ => unreachable!("only loan end templates are placed"),
   }
-}
-
-fn contains(arm: ArmSpan, span: ArmSpan) -> bool {
-  arm.start <= span.start && span.end <= arm.end
 }
 
 fn dominates(body: &Body<'_>, at: Location, other: Location) -> bool {
@@ -1434,21 +1261,17 @@ fn insert(
 fn declared_at(
   events: &Events,
   r: &crate::svg_generator::data::ResourceAccessPoint,
-  site: ArmSpan,
+  arms: &[crate::facts::SourceArm],
   path: &mut Path,
-  conditions: &BTreeMap<usize, ArmSpan>,
 ) -> bool {
   for (_, e) in events {
     let ExternalEvent::Branch { id, branches, .. } = e else { continue };
     for (a, branch) in branches.iter().enumerate() {
-      let pattern = branch.decl_vars.contains(r)
-        && conditions.get(id).is_some_and(|s| contains(*s, site))
-        && branches.iter().filter(|b| b.decl_vars.contains(r)).count() == 1;
-      if !pattern && !branch.source_span.is_some_and(|s| contains(s, site)) {
+      if !branch.source.is_some_and(|s| arms.contains(&s)) {
         continue;
       }
       path.push((*id, a));
-      if declared_at(&branch.e_data, r, site, path, conditions) || branch.decl_vars.contains(r) {
+      if declared_at(&branch.e_data, r, arms, path) || branch.decl_vars.contains(r) {
         return true;
       }
       path.pop();

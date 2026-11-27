@@ -11,6 +11,7 @@ use rustc_hir::intravisit::{self, Visitor};
 use crate::expr_visitor::*;
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
+use rustc_middle::mir::Local;
 use rustc_middle::ty::adjustment::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -8872,7 +8873,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let else_map = create_line_map(&else_ev);
     let b_branches = vec![
       ExtBranchData {
-        source_span: self.arm_span(if_expr.span),
+        source: Some(crate::facts::SourceArm { branch: expr.hir_id, index: 0 }), source_span: self.arm_span(if_expr.span),
         imaginary: None,
         e_data: if_ev,
         line_map: if_map,
@@ -8882,7 +8883,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         break_carries: if_carries,
       },
       ExtBranchData {
-        source_span: else_expr.and_then(|e| self.arm_span(e.span)),
+        source: Some(crate::facts::SourceArm { branch: expr.hir_id, index: 1 }), source_span: else_expr.and_then(|e| self.arm_span(e.span)),
         imaginary: imaginary_else,
         e_data: else_ev,
         line_map: else_map,
@@ -8906,20 +8907,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &self.deferred_cols(&maybe_init_before), |name| self.rap_ownership_now(name));
     self.event_spans.insert(*self.unique_id, guard_expr.span);
-    fn patterns(cond:&Expr<'_>, out: &mut Vec<(usize,rustc_span::Span)>) {
+    fn bindings(cond: &Expr<'_>, ids: &crate::facts::BodyBindings, out: &mut Vec<(usize, Local)>) {
       match cond.kind {
-        ExprKind::Let(binding) => out.push((0,binding.pat.span)),
-        ExprKind::DropTemps(inner) => patterns(inner,out),
-        ExprKind::Binary(op,left,right) if op.node==rustc_hir::BinOpKind::And => {
-          patterns(left,out); patterns(right,out);
+        ExprKind::Let(binding) => binding.pat.each_binding_or_first(&mut |_, id, _, _| {
+          if let Some(&local) = ids.declarations.get(&id) { out.push((0, local)); }
+        }),
+        ExprKind::DropTemps(inner) => bindings(inner, ids, out),
+        ExprKind::Binary(op,left,right) if op.node == rustc_hir::BinOpKind::And => {
+          bindings(left, ids, out);
+          bindings(right, ids, out);
         }
-        _=>{}
+        _ => {}
       }
     }
-    let mut arms=Vec::new();
-    patterns(guard_expr,&mut arms);
-    if !arms.is_empty(){self.arm_patterns.insert(*self.unique_id,arms);}
-    self.branch_conditions.insert(*self.unique_id, guard_expr.span);
+    let mut locals = Vec::new();
+    bindings(guard_expr, &self.raps.bindings, &mut locals);
+    if !locals.is_empty() { self.arm_bindings.insert(*self.unique_id, locals); }
     self.add_external_event(line_num,
       ExternalEvent::Branch {
         body: self.mir_body.source.def_id(),
@@ -8927,7 +8930,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         live_vars: liveness,
         branches: b_branches,
         on_exhaustion: Default::default(),
-        skipped_holds: if else_expr.is_none() { self.skipped_holds(guard_expr, if_expr) } else { Default::default() },
+        skipped_holds: if else_expr.is_none() { self.skipped_holds(expr.hir_id) } else { Default::default() },
         branch_type: b_ty,
         split_point: split,
         merge_point: merge,
@@ -9340,7 +9343,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // An arm of type `!` (`_ => unreachable!()`) never
         // reaches the merge (#296).
         let (diverges, exits, break_carries) = self.branch_divergence(BranchBody::Expr(arm.body), &branch_e_data, &arm_decls);
-        branch_data.push(ExtBranchData { source_span: self.arm_span(arm.span), imaginary: None, e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
+        branch_data.push(ExtBranchData { source: Some(crate::facts::SourceArm { branch: expr.hir_id, index: arm_idx }), source_span: self.arm_span(arm.span), imaginary: None, e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
       }
     }
     self.arm_borrows_end(arm_borrows);
@@ -9817,12 +9820,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let reaching: Vec<&[(usize, ExternalEvent)]> = branch_data.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &held_before, |name| self.rap_ownership_now(name));
-    if let ExprKind::Match(scrutinee, ..) = expr.kind {
-      self.event_spans.insert(*self.unique_id, scrutinee.span);
-    }
     if let ExprKind::Match(scrutinee, arms, _) = expr.kind {
-      self.arm_patterns.insert(*self.unique_id, arms.iter().enumerate().map(|(i,arm)|(i,arm.pat.span)).collect());
-      self.branch_conditions.insert(*self.unique_id, scrutinee.span);
+      self.event_spans.insert(*self.unique_id, scrutinee.span);
+      let mut locals = Vec::new();
+      for (i, arm) in arms.iter().enumerate() {
+        arm.pat.each_binding_or_first(&mut |_, id, _, _| {
+          if let Some(&local) = self.raps.bindings.declarations.get(&id) { locals.push((i, local)); }
+        });
+      }
+      if !locals.is_empty() { self.arm_bindings.insert(*self.unique_id, locals); }
     }
     self.add_external_event(split, ExternalEvent::Branch {
       body: self.mir_body.source.def_id(),
@@ -13056,13 +13062,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let match_slice = if collapsed { (merge, merge) } else { (merge, merge.saturating_sub(1)) };
     let else_map = create_line_map(&else_ev);
     let matched = ExtBranchData {
-      source_span: self.arm_span(pat.span),
+      source: Some(crate::facts::SourceArm { branch: self.tcx.parent_hir_id(pat.hir_id), index: 1 }), source_span: self.arm_span(pat.span),
       imaginary: None,
       e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new(),
       diverges: false, exits: Vec::new(), break_carries: Vec::new(),
     };
     let branches = vec![
-      ExtBranchData { source_span: self.arm_span(els.span), imaginary: None, e_data: else_ev, line_map: else_map, decl_vars, diverges, exits, break_carries },
+      ExtBranchData { source: Some(crate::facts::SourceArm { branch: self.tcx.parent_hir_id(els.hir_id), index: 0 }), source_span: self.arm_span(els.span), imaginary: None, e_data: else_ev, line_map: else_map, decl_vars, diverges, exits, break_carries },
       matched,
     ];
     // The matched path is named by the pattern as written.
@@ -13073,7 +13079,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.note_exit_scope();
     let loop_assigned = self.loop_assigned_now(&liveness);
     self.let_else_branches.insert(*self.unique_id);
-    self.branch_conditions.insert(*self.unique_id, pat.span);
+    let mut locals = Vec::new();
+    pat.each_binding_or_first(&mut |_, id, _, _| {
+      if let Some(&local) = self.raps.bindings.declarations.get(&id) { locals.push((1, local)); }
+    });
+    if !locals.is_empty() { self.arm_bindings.insert(*self.unique_id, locals); }
     self.add_external_event(split, ExternalEvent::Branch {
       body: self.mir_body.source.def_id(),
       join_span: None,

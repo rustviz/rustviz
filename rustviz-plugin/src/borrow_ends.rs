@@ -93,7 +93,7 @@ impl<'a> BodyEnds<'a> {
     for row in &self.facts.rows {
       for ev in &row.facts {
         let Fact::BorrowEnd { loan, holder, .. } = &ev.fact else { continue };
-        let Some(dest) = ev.end_successor else { continue };
+        let Some(dest) = ev.occurrence.successor else { continue };
         let rustc_hir::Node::Expr(e) = tcx.hir_node(body.location_to_hir_id(dest)) else { continue };
         if e.span.desugaring_kind() != Some(rustc_span::DesugaringKind::ForLoop) { continue }
         let rustc_hir::ExprKind::Break(d, None) = e.kind else { continue };

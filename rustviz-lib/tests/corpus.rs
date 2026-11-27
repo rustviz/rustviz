@@ -43500,3 +43500,260 @@ fn p4_deferred_rhs_uses_its_own_sibling_declaration() {
         assert!(!tips.iter().any(|t| t.starts_with(&format!("Return immutably borrowed resource from r to {lender}"))));
     }
 }
+
+/// Switch and effect coordinates here are from rustc's NLL MIR on the
+/// pinned toolchain. Source-order arm numbers are a property of the
+/// drawing. MIR target order differs even between two adjacent ifs.
+#[test]
+fn p4_arm_identity_switches_and_states() {
+    let rv = run_with_local_backend("p4_arm_identity");
+    let dump = rv.facts().unwrap();
+    let decisions = |name: &str, expected: &[(u64, u64, u64, Option<u64>)]| {
+        let body = fact_body(dump, name);
+        let actual: Vec<_> = body["switches"].as_array().expect("missing MIR switch edges").iter().map(|e|
+            (e["switch"][0].as_u64().unwrap(), e["switch"][1].as_u64().unwrap(),
+             e["successor"].as_u64().unwrap(), e["arm"].as_u64())).collect();
+        assert_eq!(actual, expected, "{name}");
+        body
+    };
+    let cell = |body: &serde_json::Value, block, successor, place: &str| {
+        body["rows"].as_array().unwrap().iter().flat_map(|r| r["arms"].as_array().into_iter().flatten())
+            .find(|a| a["edge"]["switch"][0].as_u64() == Some(block) && a["edge"]["successor"].as_u64() == Some(successor))
+            .unwrap()["state"][place].as_str().map(str::to_owned)
+    };
+    let nested = decisions("nested", &[(0,2,1,Some(0)), (0,2,7,Some(1)), (1,2,2,Some(0)), (1,2,4,Some(1))]);
+    // On the outer empty arm rustc accepts reading both values. Inside,
+    // the value passed to drop is E0382 and the other remains readable.
+    for (block, target, x, y) in [(0,7,"own","own"), (1,2,"moved","own"), (1,4,"own","moved")] {
+        assert_eq!(cell(nested, block, target, "x").as_deref(), Some(x));
+        assert_eq!(cell(nested, block, target, "y").as_deref(), Some(y));
+    }
+    let implicit = decisions("implicit", &[(0,2,1,Some(0)), (0,2,3,Some(1))]);
+    assert_eq!(cell(implicit, 0, 3, "x").as_deref(), Some("own"));
+    assert_eq!(cell(implicit, 0, 1, "x").as_deref(), Some("moved"));
+    let guard = decisions("guarded", &[(0,2,1,Some(1)), (0,2,2,None), (3,5,4,Some(0)), (3,5,5,Some(1))]);
+    // Testing Some has not moved its payload. Only the successful guard
+    // permits the move into s. Either path to the wildcard can still use v.
+    assert_eq!(cell(guard, 3, 4, "v").as_deref(), Some("partly"));
+    for (block, target) in [(0,1), (3,5)] {
+        assert_eq!(cell(guard, block, target, "v").as_deref(), Some("own"));
+    }
+    let le = decisions("let_else", &[(0,2,1,Some(0)), (0,2,2,Some(1))]);
+    assert_eq!(cell(le, 0, 2, "s").as_deref(), Some("own"));
+    assert_eq!(cell(le, 0, 1, "s"), None);
+    decisions("let_else_empty", &[(0,2,1,Some(0)), (0,2,2,Some(1))]);
+}
+
+#[test]
+fn p4_arm_identity_shared_drop_occurrences() {
+    let rv = run_with_local_backend("p4_arm_identity");
+    let body = fact_body(rv.facts().unwrap(), "same_exit");
+    let drops: Vec<_> = row_facts(body, 15).into_iter().filter(|f| f["ev"] == "Drop" && f["path"] == "s")
+        .map(|f| f["occurrence"].clone()).collect();
+    assert_eq!(drops, serde_json::json!([
+        {"at":[8,0], "exit":[1,0]}, {"at":[8,0], "exit":[3,0]}
+    ]).as_array().unwrap().as_slice());
+}
+
+#[test]
+fn p4_arm_identity_closure_call_places() {
+    let rv = run_with_local_backend("p4_arm_identity");
+    let body = fact_body(rv.facts().unwrap(), "closure_slots");
+    // The two scopes intentionally share presentation columns. Each keep
+    // returns into its own MIR local and borrows the x from that scope.
+    let svg = rv.timeline_panel_string();
+    for row in [20, 21] {
+        check_review_tip(&svg, &format!("x>held@L{row}:arrow:mutable_borrow"),
+            &["After keep returns", "mutable borrow of x"], &["shared borrow of x"]);
+    }
+    let calls = body["closure_result_loans"].as_array().expect("missing MIR call results");
+    assert_eq!(calls.len(), 2);
+    for (call, (block, holder, lender)) in calls.iter().zip([(0,3,2), (2,9,8)]) {
+        assert_eq!(call["call_location"][0], block);
+        assert_eq!(call["holder"], holder);
+        let ids = call["holders"]["held"]["loans"].as_array().unwrap();
+        assert_eq!(ids.len(), 1);
+        let loan = body["loans"].as_array().unwrap().iter().find(|l| l["loan"] == ids[0]).unwrap();
+        assert_eq!(loan["lender_local"], lender);
+    }
+}
+
+#[test]
+fn p4_arm_identity_capture_ends_on_the_pattern_edge() {
+    let svg = run_with_local_backend("closure_in_arm_nested_if_1528").timeline_panel_string();
+    // MIR takes the Some edge before overwriting s. The other path still calls c2.
+    assert!(tooltip_of_id(&svg, "c2>s@L22:arrow:static_die").is_some());
+    assert!(tooltip_of_id(&svg, "c2>s@L25:arrow:static_die").is_some());
+    // Both ends are below the fork, on opposite legs. A dot on the
+    // common trunk would release the capture before Some was selected.
+    let xy = |id| { let e = &rv_elements(&svg, id)[0]; (e.2.0, e.3.0) };
+    let fork = xy("c2@L22:dot:branch");
+    let taken = xy("c2@L22:dot:static_die");
+    let other = xy("c2@L25:dot:");
+    assert!(taken.0 < fork.0 && fork.0 < other.0 && fork.1 < taken.1 && fork.1 < other.1);
+}
+
+#[test]
+fn p4_arm_identity_continue_ends_the_iterator_item() {
+    let svg = run_with_local_backend("let_temp_dropped_at_break").timeline_panel_string();
+    // Continue ends this iteration's binding. The iterator can supply the next one.
+    check_review_tip(&svg, "xs@L12:dot:", &["The borrow of this slice element through x ends here"], &["x no longer borrows the value xs points to"]);
+    assert!(tooltip_of_id(&svg, "xs@L12:stop_bar").is_some());
+}
+
+fn p4_decision(body: &serde_json::Value, block: u64, to: u64) -> &serde_json::Value {
+    body["switches"].as_array().unwrap().iter().find(|e| e["switch"][0] == block && e["successor"] == to)
+        .expect("missing MIR successor")
+}
+
+fn p4_exit_state(body: &serde_json::Value, block: u64, to: u64) -> &serde_json::Value {
+    &body["rows"].as_array().unwrap().iter().flat_map(|r| r["arms"].as_array().unwrap())
+        .find(|a| a["edge"]["switch"][0] == block && a["edge"]["successor"] == to)
+        .expect("missing snapshot for MIR edge")["state"]
+}
+
+#[test]
+fn p4_review_repeated_macro_pattern_still_needs_its_guard() {
+    let rv = run_with_local_backend("p4_arm_macro");
+    let body = fact_body(rv.facts().unwrap(), "macro_guard");
+    // bb3 is the first candidate. Its real path calls black_box and
+    // switches on the guard in bb7. Both FalseEdges have the $p span.
+    assert!(p4_decision(body, 1, 3)["arm"].is_null());
+    assert_eq!(p4_decision(body, 7, 8)["arm"], 0);
+    assert_eq!(p4_decision(body, 7, 9)["arm"], 1);
+}
+
+#[test]
+fn p4_review_nested_condition_result_controls_the_outer_if() {
+    let rv = run_with_local_backend("p4_arm_review");
+    for (name, block, taken, skipped) in [("match_condition", 4, 5, 7), ("if_condition", 3, 4, 6)] {
+        let body = fact_body(rv.facts().unwrap(), name);
+        // The second switch reads the temporary that both inner arms wrote.
+        assert_eq!(p4_decision(body, block, taken)["arm"], 0, "{name}");
+        assert_eq!(p4_decision(body, block, skipped)["arm"], 1, "{name}");
+        assert_eq!(p4_exit_state(body, block, taken)["x"], "moved");
+        assert_eq!(p4_exit_state(body, block, skipped)["x"], "own");
+    }
+}
+
+#[test]
+fn p4_review_short_circuit_arms() {
+    let rv = run_with_local_backend("p4_arm_review");
+    let body = fact_body(rv.facts().unwrap(), "and_condition");
+    // Both false edges reach the same drop(y). Only the true edge of
+    // the second test reaches drop(x).
+    let svg = rv.timeline_panel_string();
+    let taken = rv_elements(&svg, "x@L8:dot:move");
+    let skipped = rv_elements(&svg, "y@L8:dot:move");
+    assert_eq!((taken.len(), skipped.len()), (1, 1));
+    assert!(taken[0].3.1 < skipped[0].3.0);
+    for (bb, to, x, y) in [(0, 4, "own", "moved"), (1, 4, "own", "moved"), (1, 2, "moved", "own")] {
+        let state = p4_exit_state(body, bb, to);
+        assert_eq!(state["x"], x);
+        assert_eq!(state["y"], y);
+    }
+}
+
+#[test]
+fn p4_review_or_pattern_has_one_predecessor() {
+    let rv = run_with_local_backend("p4_arm_review");
+    let body = fact_body(rv.facts().unwrap(), "alternatives");
+    // Both discriminant values 1 and 3 jump from bb0 to bb2.
+    assert_eq!(p4_exit_state(body, 0, 2)["x"], "moved");
+    assert_eq!(p4_exit_state(body, 0, 1)["x"], "own");
+}
+
+#[test]
+fn p4_review_comparison_label_precedes_guard_commitment() {
+    let rv = run_with_local_backend("p4_arm_review");
+    let body = fact_body(rv.facts().unwrap(), "compared");
+    // The PartialEq::eq call for "a" returns into the bool read at bb4.
+    // bb3 still has to test c before the first arm can run.
+    assert!(row_facts(body, 16).iter().any(|f| f["ev"] == "BorrowEnd"
+        && f["occurrence"] == serde_json::json!({"at": [1, 4], "successor": [4, 0]})));
+    for next in [2, 3] { assert_eq!(p4_decision(body, 4, next)["tested_pattern"], 0); }
+    assert!(p4_decision(body, 4, 3)["arm"].is_null());
+    assert_eq!(p4_decision(body, 5, 6)["arm"], 0);
+}
+
+#[test]
+fn p4_review_closure_destination_before_drop_and_holder_after_drop() {
+    let rv = run_with_local_backend("p4_arm_review");
+    let body = fact_body(rv.facts().unwrap(), "reassigned");
+    let calls = body["closure_result_loans"].as_array().unwrap();
+    assert_eq!(calls.len(), 2);
+    let svg = rv.timeline_panel_string();
+    // keep initializes _3 directly, then returns the second result into
+    // _6. bb2 drops _3 and bb3 moves _6 into _3.
+    for (c, (bb, destination, arrival, lender, row)) in calls.iter().zip([(0, 3, 0, "x", 33), (1, 6, 3, "y", 34)]) {
+        assert_eq!(c["call_location"][0], bb);
+        assert_eq!(c["destination"], destination);
+        assert_eq!(c["holder"], 3);
+        assert_eq!(c["arrival"][0], arrival);
+        check_review_tip(&svg, &format!("{lender}>held.0@L{row}:arrow:static_borrow"),
+            &["After keep returns", &format!("shared borrow of {lender}")], &[]);
+    }
+}
+
+#[test]
+fn p4_review_repeated_guard_has_no_unique_closure_call() {
+    let rv = run_with_local_backend("p4_arm_review");
+    let body = fact_body(rv.facts().unwrap(), "repeated");
+    let calls = body["closure_result_loans"].as_array().unwrap();
+    assert_eq!(calls.len(), 2);
+    // Two alternatives lower one HIR initializer into bb4 and bb5.
+    // Each has its own loan, local, and arrival. A single arrow anchored
+    // to either MIR occurrence would assert a path the HIR did not select.
+    assert!(tooltip_of_id(&rv.timeline_panel_string(), "x>held@L40:arrow:static_borrow").is_none());
+    for (c, (block, dest)) in calls.iter().zip([(4, 5), (5, 10)]) {
+        assert_eq!(c["call_location"][0], block);
+        assert_eq!(c["destination"], dest);
+    }
+}
+
+#[test]
+fn p4_review_guarded_arms_leave_different_values() {
+    let svg = run_with_local_backend("p4_arm_review").timeline_panel_string();
+    // Either failed test reaches the wildcard and drops other. Success
+    // moves the Some payload into s. Draw the differing exits on their own rows.
+    let taken = rv_elements(&svg, "s@L45:dot:acquire+move");
+    let wildcard = rv_elements(&svg, "other@L45:dot:move");
+    assert_eq!((taken.len(), wildcard.len()), (1, 1));
+    assert!(taken[0].3.1 < wildcard[0].3.0);
+}
+
+#[test]
+fn p4_review_sibling_pattern_bindings_end_their_own_loans() {
+    let svg = run_with_local_backend("p4_arm_review").timeline_panel_string();
+    // Each lender gets a return on all three paths. Only the r actually
+    // initialized from that lender can return it by a named arrow.
+    for (lender, own, sibling) in [("a", 22, 23), ("b", 23, 22)] {
+        assert!(tooltip_of_id(&svg, &format!("r>{lender}@L{own}:arrow:mutable_die")).is_some());
+        assert!(tooltip_of_id(&svg, &format!("r>{lender}@L{sibling}:arrow:mutable_die")).is_none());
+        let mut xs = Vec::new();
+        for row in [22, 23, 24] {
+            let dots = rv_elements(&svg, &format!("{lender}@L{row}:dot:"));
+            let ends: Vec<_> = dots.iter().filter(|(id, _, ..)| id.contains("mutable_reacquire")).collect();
+            assert_eq!(ends.len(), 1, "{lender} on line {row}");
+            xs.push(ends[0].2.0);
+        }
+        assert!(xs[0] < xs[1] && xs[1] < xs[2], "{lender} must end on each leg: {xs:?}");
+    }
+}
+
+#[test]
+fn p4_review_guard_alternatives_finish_their_common_binding_code() {
+    let rv = run_with_local_backend("or_pattern_if_let_guard_ref_different_places");
+    let body = fact_body(rv.facts().unwrap(), "main");
+    // The guard borrows the Some payload of o while testing t. bb13 and
+    // bb14 join at bb15, which finishes the guard and copies the integer
+    // into n. On either success rustc accepts o = None before using n.
+    let row = &body["rows"].as_array().unwrap().iter().find(|r| r["line"] == 5).unwrap();
+    for (block, to) in [(9, 11), (10, 12)] {
+        let arm = row["arms"].as_array().unwrap().iter().find(|a|
+            a["edge"]["switch"][0] == block && a["edge"]["successor"] == to).unwrap();
+        assert_eq!(arm["state"]["o"], "own");
+        assert!(arm["lent"].get("o").is_none());
+    }
+    assert!(rv_elements(&rv.timeline_panel_string(), "o@L5-6:branch_line:partial_privilege").is_empty());
+}
