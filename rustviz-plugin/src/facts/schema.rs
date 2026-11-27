@@ -212,6 +212,10 @@ pub struct BodyFacts {
     #[serde(skip)]
     pub binding_loans: BTreeMap<rustc_middle::mir::Local, BTreeMap<rustc_middle::mir::Location, Vec<usize>>>,
     pub rows: Vec<Row>,
+    /// Drop elaboration at individual residual edges, including named
+    /// fields covered by a whole-place drop and unnamed temporaries.
+    #[serde(skip)]
+    pub residual_drops: Vec<ResidualDrop>,
     /// Temporaries that hold a value needing drop.
     pub temps: Vec<TempInfo>,
     pub notes: Vec<String>,
@@ -510,6 +514,38 @@ pub struct Parts {
     pub maybe: Vec<String>,
 }
 
+pub struct ResidualDrop {
+    pub local: rustc_middle::mir::Local,
+    pub site: rustc_span::Span,
+    pub path: Option<String>,
+    pub how: &'static str,
+    /// The initialized paths come from assignments and no move can
+    /// explain why the drop is conditional.
+    pub only_assigned: bool,
+    pub staged: bool,
+}
+
+/// What happens to the named fields of a partially moved aggregate at a
+/// drop site. These lists come from the executable CFG at that site.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PartialDrop {
+    pub moved: Vec<String>,
+    pub conditional: Vec<String>,
+    /// Only a replacement can reach the drop of these fields.
+    pub refilled: Vec<String>,
+    /// The two conditional fields have complementary initialized paths.
+    pub one_of_two: bool,
+    pub dropped: Vec<String>,
+    /// A value was taken from inside this field, which still has a column.
+    pub payloads_moved: Vec<String>,
+    pub payloads_conditional: Vec<String>,
+    /// No value inside this enum field reaches its destructor.
+    pub payloads_empty: Vec<String>,
+    pub drops_resource: bool,
+    /// Part of the drop has no named field.
+    pub incomplete: bool,
+}
+
 /// The borrow checker considers both a skipped assignment and a move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MixedInit {
@@ -575,6 +611,9 @@ pub struct State {
     /// every (true) or only some (false) continuing runtime paths.
     #[serde(skip)]
     pub reassigned: BTreeMap<String, bool>,
+    /// A cleanup edge before the next write can drop the previous value.
+    #[serde(skip)]
+    pub unwind_before_write: BTreeSet<String>,
     /// Only at an expression join: a move inside an arm reaches one
     /// executable incoming edge and another still owns the value.
     #[serde(skip)]
@@ -617,6 +656,8 @@ pub struct Row {
     pub jumps: bool,
     /// Events on the row, in MIR evaluation order.
     pub facts: Vec<Ev>,
+    #[serde(skip)]
+    pub partial_drops: Vec<(Option<rustc_span::Span>, rustc_middle::mir::Local, String, PartialDrop)>,
     /// Several arms of one branch on this row (`if c { a } else { b }`
     /// on one line): each arm's own state at its exit. Recorded for the
     /// presentation layer; how to draw them is a design decision.

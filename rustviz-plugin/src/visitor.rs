@@ -2446,7 +2446,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `if let` (#327). It has no column, and its drop doesn't end one,
   /// so it is stated even where the locals' drops aren't drawn (the
   /// exit is in an `if` without `else`).
-  fn drop_locals_on_exit(&mut self, line: usize, value: Option<&'tcx Expr<'tcx>>, loop_id: Option<HirId>, labeled: bool, how: &str) {
+  fn drop_locals_on_exit(&mut self, line: usize, site: rustc_span::Span, value: Option<&'tcx Expr<'tcx>>, loop_id: Option<HirId>, labeled: bool, how: &str) {
     let no_drop_exit = self.no_drop_exit.take();
     let Some(branch_at) = self.exit_frames.iter()
       .rposition(|f| matches!(f, ExitFrame::Branch { .. })) else { return };
@@ -2568,7 +2568,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         *self.unique_id += 1;
         self.exit_drops.insert(id);
         let early = Some(EarlyReturns { process_exit: process_exit.clone(), ..EarlyReturns::default() });
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, early });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, exit_site: Some(site.source_callsite()), early });
       }
       for rap in scoped {
         let id = *self.unique_id;
@@ -2576,7 +2576,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.exit_drops.insert(id);
         self.exit_scope_ended.insert(rap.name().to_string());
         let early = Some(EarlyReturns { process_exit: process_exit.clone(), ..EarlyReturns::default() });
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, early });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, exit_site: Some(site.source_callsite()), early });
       }
       return;
     }
@@ -2614,7 +2614,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: Some(ty), when, literal, early, part, id })
         }
         None if extended_temp => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: None, when, literal: false, early: false, part: None, id }),
-        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, early: None }),
+        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, exit_site: Some(site.source_callsite()), early: None }),
       }
     }
     while let Some(t) = tuples.pop() {
@@ -2625,7 +2625,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       *self.unique_id += 1;
       self.exit_drops.insert(id);
       self.exit_scope_ended.insert(rap.name().to_string());
-      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, early: None });
+      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, exit_site: Some(site.source_callsite()), early: None });
     }
     // Innermost first, like the drops above. Not `exit_drops`: the
     // column doesn't end in this dot, whose drop happens on some paths
@@ -2811,14 +2811,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rap.drops_nothing() {
         continue;
       }
-      let dup = self.preprocessed_events.iter().any(|(l, e)| *l == line
-        && matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, .. } if *ro == rap));
+      let span = try_expr.span.source_callsite();
+      let dup = self.preprocessed_events.iter().any(|(_, e)|
+        matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, span: site, .. } if *ro == rap && *site == span));
       if dup {
         continue;
       }
       let id = *self.unique_id;
       *self.unique_id += 1;
-      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, id });
+      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, span, id });
     }
     while let Some(t) = tuples.pop() {
       self.drop_tuple_if_try_returns(&t, line);
@@ -3676,7 +3677,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   fn drop_locals_at_fn_return(&mut self, ret: &'tcx Expr<'tcx>, value: Option<&'tcx Expr<'tcx>>) {
     let lo = *self.unique_id;
     self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: true });
-    self.drop_locals_on_exit(expr_to_line(ret, &self.tcx), value, None, false, "return");
+    self.drop_locals_on_exit(expr_to_line(ret, &self.tcx), ret.span, value, None, false, "return");
     self.exit_frames.pop();
     self.keep_inline_exit_drops(lo..*self.unique_id, ret);
   }
@@ -4055,12 +4056,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let lo = *self.unique_id;
         self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: true });
         self.no_drop_exit = Some(exit);
-        self.drop_locals_on_exit(line, None, None, false, &name);
+        self.drop_locals_on_exit(line, call.span, None, None, false, &name);
         self.exit_frames.pop();
         self.keep_inline_exit_drops(lo..*self.unique_id, call);
       } else {
         self.no_drop_exit = Some(exit);
-        self.drop_locals_on_exit(line, None, None, false, &name);
+        self.drop_locals_on_exit(line, call.span, None, None, false, &name);
       }
       return;
     }
@@ -4072,12 +4073,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if self.panic_leaves_every_path(call) {
         let lo = *self.unique_id;
         self.exit_frames.push(ExitFrame::Branch { len: 0, hide: Vec::new(), binds: Vec::new(), binds_at: 0, fn_level: true });
-        self.drop_locals_on_exit(line, None, None, false, "panic");
+        self.drop_locals_on_exit(line, call.span, None, None, false, "panic");
         self.exit_frames.pop();
         self.keep_inline_exit_drops(lo..*self.unique_id, call);
         return;
       }
-      self.drop_locals_on_exit(line, None, None, false, "panic");
+      self.drop_locals_on_exit(line, call.span, None, None, false, "panic");
       if !self.in_closure(call) && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Branch { .. })) {
         for (_, ro) in self.loop_iterators.clone() {
           let id = self.add_loop_iterator_drop(ro, line, LoopLeft::Panic);
@@ -5745,7 +5746,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if breakless || self.returns_before_body_end(expr) {
           self.drop_locals_at_fn_return(expr, ret);
         } else {
-          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), ret, None, false, "return");
+          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), expr.span, ret, None, false, "return");
         }
         if !self.in_closure(expr) {
           self.drop_loop_iterators_on_return(expr_to_line(expr, &self.tcx));
@@ -6163,13 +6164,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
         }
         if let Ok(target) = dest.target_id {
-          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), value, Some(target), true, "break");
+          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), expr.span, value, Some(target), true, "break");
           self.drop_inner_loop_iterators(expr_to_line(expr, &self.tcx), target, true, LoopLeft::Break);
         }
       }
       ExprKind::Continue(dest) => {
         if let Ok(target) = dest.target_id {
-          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), None, Some(target), false, "continue");
+          self.drop_locals_on_exit(expr_to_line(expr, &self.tcx), expr.span, None, Some(target), false, "continue");
           // `continue 'outer` leaves the inner `for` loops the same way,
           // then goes on to the next iteration of `'outer` (#600).
           self.drop_inner_loop_iterators(expr_to_line(expr, &self.tcx), target, false, LoopLeft::Continue);
@@ -8650,7 +8651,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
                 self.preprocessed_events.push((
                     if_end,
-                    ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id, early: None },
+                    ExternalEvent::GoOutOfScope { ro: var.clone(), exit_site: None, id: *self.unique_id, early: None },
                 ));
                 *self.unique_id += 1;
             }
@@ -8737,12 +8738,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let if_left = self.left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
     let else_left = self.left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
     for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
-      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id, early: None }));
+      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), exit_site: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
 
     for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v) && !else_left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id, early: None }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), exit_site: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
     if_decl.extend(if_inner);
@@ -9295,7 +9296,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id, early: None };
+        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), exit_site: None, id, early: None };
         if inline {
           self.add_external_event(end, gos);
         } else {
@@ -11658,6 +11659,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     });
     self.add_owner(tmp_name.clone(), ref_mut, false, false, InteriorMut::No, end_line, !self.inside_branch);
     if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
+      // A temporary column can use residual drop facts only when
+      // rustc identifies one local for its creation expression.
+      let mut locals = self.mir_body.local_decls.iter_enumerated().filter(|(local, decl)|
+        local.index() > self.mir_body.arg_count && !decl.is_user_variable()
+          && decl.source_info.span.source_callsite().with_parent(None) == expr.span.source_callsite().with_parent(None)
+          && decl.ty == self.tcx.typeck(expr.hir_id.owner).expr_ty(expr));
+      o.local = locals.next().map(|(local, _)| local).filter(|_| locals.next().is_none());
       o.unbound_temp = true;
       o.temp_part = part.clone();
       o.ctor_temp = (part.is_none() || ctor_literal) && !expr.span.from_expansion()
@@ -13052,7 +13060,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let left = self.left_at_exits(self.block_ends_at_exits(els, true), &decl);
     for var in in_decl_order(&decl).into_iter().filter(|v| needs_scope_end(v) && !scoped.contains(v) && !left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id, early: None }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), exit_site: None, id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
     decl_vars.extend(decl);

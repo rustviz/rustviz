@@ -1144,27 +1144,18 @@ pub fn try_drop_with_other_events(drop_text: &str) -> Option<String> {
 // The same for a variable that holds a value on some paths only (moved,
 // or given one, in some branches above, #1194): its drop flag decides
 // whether the early return drops it.
-pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str) -> String {
-    let my_name_fmt = styled_name_html(my_name);
+pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str, only_assigned: Option<bool>) -> String {
+    let name = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
+    let condition = if only_assigned == Some(true) {
+        "the branch that ran assigned it".to_owned()
+    } else {
+        format!("{name} still holds it")
+    };
+    let flag = if only_assigned.is_some() { " (Rust tracks this with a runtime drop flag)" } else { "" };
     format!(
-        "If the `?` here returns early, {0}'s \
-         resource{1} is dropped{2} if {0} still holds it (Rust tracks this with a runtime drop flag). \
-         If the `?` succeeds, nothing happens to {0} here.",
-        my_name_fmt, holds, rest
-    )
-}
-
-// The same for a `let s;` local that only some branches above assigned
-// (#244, #1436).
-pub fn event_dot_owner_drop_if_try_returns_maybe_init(my_name: &String, note: &str, moved: bool) -> String {
-    let my_name_fmt = styled_name_html(my_name);
-    let (holds, rest) = split_drop_note(note);
-    format!(
-        "If the `?` here returns early, {0}'s \
-         resource{1} is dropped{2} if the branch that ran {3} (Rust tracks this with a runtime drop \
-         flag). If the `?` succeeds, nothing happens to {0} here.",
-        my_name_fmt, holds, rest, assigned_in_branch_that_ran(moved)
+        "If the `?` here returns early, {name}'s resource{holds} is dropped{rest} if {condition}{flag}. \
+         If the `?` succeeds, nothing happens to {name} here.",
     )
 }
 
@@ -3470,7 +3461,6 @@ pub fn event_dot_assignment_join(name: &str, drops: bool) -> String {
 
 pub fn state_maybe_init(name: &str, cell: &crate::facts::table::Cell) -> String {
     let Some(mixed) = cell.mixed_init else { return state_maybe(name, cell.cause) };
-    let has_value = if mixed.may_hold_value { "may have no value here" } else { "has no value here" };
     let moved = match (mixed.imaginary_move, mixed.whole_move) {
         (true, true) => "also considers a move on an unreachable path",
         (true, false) => "also considers a move of part of it on an unreachable path",
@@ -3478,12 +3468,87 @@ pub fn state_maybe_init(name: &str, cell: &crate::facts::table::Cell) -> String 
         (_, false) => "also considers paths on which part of it may have been moved out",
     };
     let me = styled_name_html(name);
+    if !mixed.may_hold_value {
+        let movement = match (mixed.imaginary_move, mixed.whole_move) {
+            (true, true) => "a move on an unreachable path",
+            (true, false) => "a partial move on an unreachable path",
+            (_, true) => "moves",
+            (_, false) => "partial moves",
+        };
+        return format!("{me} has no value here. The borrow checker considers both skipped assignments and {movement}, so {me} can't be used here");
+    }
     let runtime = if mixed.imaginary_move && mixed.may_hold_value_at_runtime {
         " It can still hold a value at runtime."
     } else {
         ""
     };
-    format!("{me} {has_value}. Some paths the borrow checker considers never assigned it.{runtime} The borrow checker {moved}, so {me} can't be used here")
+    format!("{me} may have no value here. Some paths the borrow checker considers never assigned it.{runtime} The borrow checker {moved}, so {me} can't be used here")
+}
+
+pub fn event_dot_partial_scope_drop(
+    name: &String, split: &crate::facts::schema::PartialDrop, plain: bool, boxed: bool,
+) -> String {
+    if split.refilled.is_empty() && !split.one_of_two
+        && split.payloads_moved.is_empty() && split.payloads_conditional.is_empty()
+        && split.payloads_empty.is_empty() && !split.incomplete
+    {
+        return event_dot_struct_partial_go_out_of_scope(
+            name, &split.moved, &split.conditional, &split.dropped, plain, true, true, boxed,
+        );
+    }
+    let listed = |names: &[String]| join_and(&names.iter().map(|n| styled_name_html(n)).collect::<Vec<_>>());
+    let conditional: Vec<_> = split.conditional.iter().filter(|n| !split.refilled.contains(n)).cloned().collect();
+    let mut out = event_dot_struct_partial_go_out_of_scope(
+        name, &split.moved, &conditional, &[], true, true, false, false,
+    );
+    for field in &split.refilled {
+        let field = styled_name_html(field);
+        out.push_str(&format!(" The original value of {field} is gone. A replacement is dropped here only on paths that assigned one."));
+    }
+    if split.one_of_two {
+        out.push_str(&format!(" Exactly one of {} still has a value, so only that field is dropped here.", listed(&split.conditional)));
+    }
+    if !split.payloads_moved.is_empty() {
+        let (values, verb) = if split.payloads_moved.len() == 1 { ("A value", "was") } else { ("Values", "were") };
+        out.push_str(&format!(" {values} inside {} {verb} moved out earlier.", listed(&split.payloads_moved)));
+    }
+    if !split.payloads_conditional.is_empty() {
+        let values = if split.payloads_conditional.len() == 1 { "A value" } else { "Values" };
+        out.push_str(&format!(" {values} inside {} may have been moved out above.", listed(&split.payloads_conditional)));
+    }
+    if !split.payloads_empty.is_empty() {
+        out.push_str(&format!(" No value inside {} remains to drop here.", listed(&split.payloads_empty)));
+    }
+    if !plain {
+        if !split.dropped.is_empty() {
+            let verb = if split.dropped.len() == 1 { "is" } else { "are" };
+            out.push_str(&format!(" {} {verb} dropped.", listed(&split.dropped)));
+        }
+        if !split.one_of_two && !conditional.is_empty() {
+            let fields = listed(&conditional);
+            if conditional.len() == 1 {
+                out.push_str(&format!(" {fields} is dropped here only on paths where it still holds a value."));
+            } else {
+                out.push_str(&format!(" Of {fields}, only the fields that still hold a value are dropped here."));
+            }
+        }
+        if !split.conditional.is_empty() || !split.payloads_conditional.is_empty() {
+            out.push_str(" Rust uses drop flags to drop the values that are still there.");
+        } else if split.incomplete && split.drops_resource {
+            out.push_str(" Any remaining initialized fields that need dropping are dropped.");
+        }
+        if boxed {
+            if !split.drops_resource || split.dropped.is_empty() && !split.incomplete
+                && split.payloads_conditional.is_empty() && split.conditional.is_empty()
+                && split.payloads_moved.iter().all(|name| split.payloads_empty.contains(name)) {
+                out.push_str(" No field is dropped.");
+            }
+            out.push_str(" The Box's heap allocation, if it has one, is freed.");
+        } else if !split.drops_resource {
+            out.push_str(" No resource is dropped.");
+        }
+    }
+    out
 }
 
 pub fn state_maybe(name: &str, cause: Option<&str>) -> String {
@@ -4704,21 +4769,46 @@ fn exits_verb(exits: &[BranchExit], plural: bool) -> String {
 // assignment to an immutable one is E0384). `by_cond`: a let-chain's
 // condition, not only a branch, may have moved it (`if let … && { let
 // w = s; … }`, #953); see `branch_merge_moved`.
-pub fn event_dot_branch_merge_moved_with_drop(my_name: &String, value: bool, mutable: bool, note: &str, by_cond: Option<&str>) -> String {
+pub fn event_dot_branch_merge_move(
+    my_name: &String, value: bool, mutable: bool, note: &str, by_cond: Option<&str>,
+    cell: Option<&crate::facts::table::Cell>,
+) -> String {
     let my_name_fmt = styled_name_html(my_name);
-    let again = if mutable { " (until it's assigned again)" } else { "" };
-    let moved = branch_merge_moved(&my_name_fmt, by_cond);
-    if value {
-        return format!("{}{}.", moved, again);
+    let reassigned = cell.and_then(|c| c.reassigned);
+    let again = if reassigned.is_some() { " until it's assigned again" }
+        else if mutable { " (until it's assigned again)" } else { "" };
+    if cell.is_some_and(|c| c.cause == Some("imaginary")) {
+        return format!("{my_name_fmt} keeps its value at runtime. The borrow checker considers a move on an unreachable path, so {my_name_fmt} can't be used here{again}.");
     }
+    let partial = cell.is_some_and(|c| c.init == crate::facts::table::Init::Partly || c.unnamed_maybe);
+    let moved = if partial {
+        let place = by_cond.unwrap_or("branches");
+        format!("{my_name_fmt} may be partially moved above, so it can't be used as a whole after the {place}")
+    } else {
+        branch_merge_moved(&my_name_fmt, by_cond)
+    };
+    let mut out = format!("{moved}{again}.");
+    if value { return out; }
+
     let (holds, rest) = split_drop_note(note);
-    format!(
-        "{0}{3}. {4}, its resource{1} is dropped{2} when {5} goes out of scope.",
-        moved, holds, rest, again, branch_merge_unless(by_cond.is_some()), my_name_fmt
-    )
+    if reassigned.is_some() {
+        out.push_str(&format!(" If the assignment runs and {my_name_fmt} still holds its old resource{holds}, that resource is dropped{rest} when {my_name_fmt} is assigned again."));
+    }
+    if cell.is_some_and(|c| c.unwind_before_write) {
+        out.push_str(&format!(" If a panic unwinds before the assignment, cleanup can drop the resource {my_name_fmt} still holds."));
+    }
+    if reassigned != Some(true) {
+        let condition = if partial || by_cond.is_some() {
+            format!("If execution reaches the end of {my_name_fmt}'s scope while it still holds its resource{holds}")
+        } else {
+            format!("If the branch that ran didn't move it, and execution reaches the end of {my_name_fmt}'s scope with the resource{holds} still held")
+        };
+        out.push_str(&format!(" {condition}, it is dropped{rest} there."));
+    }
+    out
 }
 
-// `event_dot_branch_merge_moved_with_drop` for a Box whose contents were
+// `event_dot_branch_merge_move` for a Box whose contents were
 // moved out before the branches, some of which gave it a new Box or moved
 // it away (#1220): on the paths that didn't move it, it may hold only the
 // emptied Box, so what its scope end drops depends on the path.
@@ -4752,12 +4842,6 @@ fn branch_merge_moved(name: &str, by_cond: Option<&str>) -> String {
     }
 }
 
-// The condition under which a maybe-moved variable's resource is still
-// there to drop (see `branch_merge_moved`).
-fn branch_merge_unless(by_cond: bool) -> &'static str {
-    if by_cond { "If nothing above moved it" } else { "If the branch that ran didn't move it" }
-}
-
 // Only a Box's contents (`let w = *e;`), not the Box, were moved out on
 // some paths (#921): rustc rejects any use of e after the join (E0382)
 // except a new value for `*e` or for e (both need `let mut e`). The join
@@ -4780,18 +4864,6 @@ fn drop_time(name: &str, reassigned: Option<bool>) -> String {
         Some(false) => format!("when {name} is assigned again (or, if {name} is never assigned again, when {name} goes out of scope)"),
         None => format!("when {name} goes out of scope"),
     }
-}
-
-// `event_dot_branch_merge_moved_with_drop` when the variable is assigned
-// again before it goes out of scope: the old value, if it's still there,
-// is dropped at that assignment instead (#335). `in_loop`: that
-// assignment is in a loop's body, which may end before it runs (#1012).
-pub fn event_dot_branch_merge_moved_then_reassigned(my_name: &String, by_cond: Option<&str>, may_skip_assignment: bool) -> String {
-    let name = styled_name_html(my_name);
-    format!(
-        "{} until it's assigned again. {}, its resource is dropped {}.",
-        branch_merge_moved(&name, by_cond), branch_merge_unless(by_cond.is_some()), drop_time(&name, Some(!may_skip_assignment))
-    )
 }
 
 // The join of a conditional that gives a new value, in only some of its
