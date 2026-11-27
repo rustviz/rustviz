@@ -165,6 +165,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let mut approx_notes: Vec<ApproxNote> = Vec::new();
   let mut a_line_map: BTreeMap<usize, Vec<String>> = BTreeMap::new();
   let mut owner_to_hash: HashMap<String, usize> = HashMap::new();
+  let mut row_layout = crate::event_order::RowLayout::default();
   let mut pre_events: Vec<(usize, ExternalEvent)> = Vec::new();
   let mut rap_map: HashMap<String, RapData> = HashMap::new();
   for k in a_map.keys() {
@@ -293,6 +294,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             );
             visitor.visit_body(hir_body);
             visitor.emit_borrow_ends(body_facts(local_def_id));
+            row_layout.append(&mut visitor.row_layout);
             visitor.print_out_of_scope();
             visitor.fill_scope_end_holds(0);
             visitor.mark_temp_emptying_moves(0);
@@ -364,6 +366,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         );
         visitor.visit_body(hir_body);
         visitor.emit_borrow_ends(body_facts(def_id));
+        row_layout.append(&mut visitor.row_layout);
         visitor.print_out_of_scope();
         visitor.fill_scope_end_holds(0);
         visitor.mark_temp_emptying_moves(0);
@@ -455,7 +458,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let facts = crate::facts::dump(&crate_facts);
 
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd, facts, state_table) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd, facts, state_table, row_layout) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

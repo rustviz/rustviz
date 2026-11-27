@@ -1,0 +1,1368 @@
+//! Associate the visitor's drawing events with the effects in the borrowck
+//! body. Compare events on one row and on compatible execution paths.
+//! A source span identifies the emitting expression; its byte position is
+//! never an evaluation order.
+use crate::expr_visitor::ExprVisitor;
+use crate::facts::schema::{BodyFacts, Ev, Fact, LoanInfo, Row};
+use crate::svg_generator::data::{ExternalEvent as E, ResourceTy};
+use rustc_middle::mir::{Body, Location, TerminatorKind};
+use rustc_span::Span;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+// (basic-block RPO index, statement index, effect phase), as in Ev::order.
+// Releasing the value in a slot precedes the write at the same location.
+type Point = (usize, usize, i8);
+const BEFORE_STORE: i8 = -1;
+
+fn fact_point(f: &Ev) -> Point {
+    (f.order.0, f.order.1, f.order.2 as i8)
+}
+
+fn end(e: &E) -> bool {
+    matches!(e, E::StaticDie { .. } | E::MutableDie { .. } | E::RefDie { .. })
+}
+
+struct Order<'a, 'tcx> {
+    body: &'a Body<'tcx>,
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    facts: &'a BodyFacts,
+    activations: BTreeMap<usize, Point>,
+    spans: &'a HashMap<usize, Span>,
+    field_overwrite_ends: &'a BTreeSet<usize>,
+    ends: &'a BTreeMap<usize, Vec<usize>>,
+}
+
+fn place(r: &ResourceTy) -> Option<String> {
+    match r {
+        ResourceTy::Value(v) if v.is_fn() => Some(format!("{}()", v.name())),
+        ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..) | ResourceTy::Index(..) => {
+            Some(r.name())
+        }
+        _ => None,
+    }
+}
+
+fn names_lender(r: &ResourceTy, l: &LoanInfo) -> bool {
+    let place = place(r);
+    place.as_deref() == Some(&l.lender)
+        || l.through.as_deref().is_some_and(|t| place.as_deref() == Some(t))
+        || matches!(r, ResourceTy::Caller) && l.source == "caller"
+}
+
+impl Order<'_, '_> {
+    fn loan(&self, id: usize) -> Option<&LoanInfo> {
+        self.facts.loans.iter().find(|l| l.loan == id)
+    }
+
+    fn location(&self, fact: &Ev) -> Location {
+        Location { block: self.body.basic_blocks.reverse_postorder()[fact.order.0], statement_index: fact.order.1 }
+    }
+
+    fn matches(&self, ev: &E, f: &Ev) -> bool {
+        match (ev, &f.fact) {
+            (
+                E::StaticDie { from, to, .. } | E::MutableDie { from, to, .. } | E::RefDie { from, to, .. },
+                Fact::BorrowEnd { loan, holder, .. } | Fact::HoldEnd { loan, holder, .. },
+            ) => {
+                if let Some(ids) = self.ends.get(&ev.get_id()) {
+                    ids.contains(loan) && (place(from).as_deref() == Some(holder) || ids.len() == 1)
+                } else {
+                    self.loan(*loan).is_some_and(|l| {
+                        names_lender(to, l)
+                            && place(from).is_some_and(|p| {
+                                p == *holder || l.direct_holders.contains(&p) || l.via_call.contains(&p)
+                            })
+                    })
+                }
+            }
+            (
+                E::PassByStaticReference { from, to, .. } | E::PassByMutableReference { from, to, .. },
+                Fact::Borrow { loan, holder, .. },
+            ) => place(to).as_deref() == Some(holder) && self.loan(*loan).is_some_and(|l| names_lender(from, l)),
+            (
+                E::StaticBorrow { from, to, .. } | E::MutableBorrow { from, to, .. },
+                Fact::Borrow { loan, holder, .. },
+            ) => self.loan(*loan).is_some_and(|l| {
+                names_lender(from, l) && place(to).is_some_and(|p| p == *holder || l.via_call.contains(&p))
+            }),
+            (E::Move { from, to, .. }, Fact::Move { path, to: dest, .. })
+            | (E::Copy { from, to, .. }, Fact::Copy { path, to: dest, .. }) => {
+                place(from).as_deref() == Some(path)
+                    && (place(to).as_deref() == Some(dest)
+                        || matches!(to, ResourceTy::Anonymous) && matches!(dest.as_str(), "<operand>" | "<temp>"))
+            }
+            (E::Bind { to, .. }, Fact::Init { path, .. }) => place(to).as_deref() == Some(path),
+            (E::Move { from, to, .. } | E::Copy { from, to, .. }, Fact::Init { path, .. }) => {
+                from.extract_rap().is_none_or(|r| r.is_fn()) && place(to).as_deref() == Some(path)
+            }
+            (E::GoOutOfScope { ro, .. }, Fact::ScopeEnd { path, .. } | Fact::Drop { path, at_reassign: false, .. })
+            | (E::OwnerDropAtReassign { ro, .. }, Fact::Drop { path, at_reassign: true, .. }) => {
+                self.storage_of(ro.name()) == path
+            }
+            _ => false,
+        }
+    }
+
+    fn point(&self, ev: &E, row: &Row, straight_line: bool) -> Option<Point> {
+        let source = self.spans.get(&ev.get_id());
+        let blocks = self.body.basic_blocks.reverse_postorder();
+        if matches!(ev, E::Branch { .. }) {
+            let span = source?;
+            let mut switches = blocks.iter().enumerate().filter_map(|(rank, &bb)| {
+                let data = &self.body.basic_blocks[bb];
+                let term = data.terminator();
+                (matches!(term.kind, TerminatorKind::SwitchInt { .. })
+                    && (span.contains(term.source_info.span) || term.source_info.span.contains(*span)))
+                .then_some((rank, data.statements.len(), 0))
+            });
+            let at = switches.next()?;
+            return switches.next().is_none().then_some(at);
+        }
+        let is_end = end(ev);
+        // A whole-value store also replaces each field. The displayed
+        // borrow/copy into a field takes effect at the destination, after
+        // its RHS has run. The old field stops holding its previous value
+        // at that store, even if another copy keeps the loan alive.
+        let replacing = self.field_overwrite_ends.contains(&ev.get_id());
+        let field = match ev {
+            E::StaticBorrow { to, .. } | E::MutableBorrow { to, .. } | E::Move { to, .. } | E::Copy { to, .. } => {
+                to.extract_rap()
+            }
+            _ if replacing => endpoints(ev).0.extract_rap(),
+            _ => None,
+        };
+        if let Some(field) = field.filter(|r| r.is_member() && (r.is_ref() || r.holds_borrow())) {
+            let root = self.storage_of(field.name());
+            let search_across_rows = row.facts.is_empty() && straight_line;
+            let mut stores = self
+                .facts
+                .rows
+                .iter()
+                .filter(|r| r.line == row.line || search_across_rows)
+                .flat_map(|r| &r.facts)
+                .filter(|e| {
+                    let Fact::Init { path, reassign: true, .. } = &e.fact else {
+                        return false;
+                    };
+                    if path != root {
+                        return false;
+                    }
+                    let loc = self.location(e);
+                    let hir = rustc_utils::BodyExt::location_to_hir_id(self.body, loc);
+                    let rustc_hir::Node::Expr(expr) = self.tcx.hir_node(hir) else {
+                        return false;
+                    };
+                    source.is_some_and(|s| expr.span.contains(*s) || s.contains(expr.span))
+                });
+            if let Some(store) = stores.next().filter(|_| stores.next().is_none()) {
+                if !replacing {
+                    return Some(fact_point(store));
+                }
+                // A user destructor may still read this field. The normal
+                // successor installs the new value only after it returns.
+                let drops = row.facts.iter().filter(|e| {
+                    matches!(&e.fact,
+                    Fact::Drop {path,at_reassign:true,..} if path==root)
+                        && self.earlier(fact_point(e), fact_point(store))
+                });
+                if let Some(drop) = drops.clone().next().filter(|_| drops.count() == 1) {
+                    let mut ends = self
+                        .facts
+                        .rows
+                        .iter()
+                        .flat_map(|r| &r.facts)
+                        .filter(|f| self.matches(ev, f) && matches!(f.fact, Fact::BorrowEnd { .. }));
+                    if let Some(first) = ends
+                        .next()
+                        .filter(|f| self.earlier(fact_point(f), fact_point(drop)) && ends.all(|g| g.order == f.order))
+                    {
+                        return Some(fact_point(first));
+                    }
+                }
+                return Some((store.order.0, store.order.1, BEFORE_STORE));
+            }
+        }
+        let mut candidates: Vec<_> = row.facts.iter().filter(|e| self.matches(ev, e)).collect();
+        // Closure captures passed to calls have a presentation-only
+        // function column. Resolve the actual MIR capture by its expression
+        // and its place when that identifies a single borrow.
+        if candidates.is_empty() {
+            if let E::PassByStaticReference { from, to, .. } | E::PassByMutableReference { from, to, .. } = ev {
+                candidates.extend(row.facts.iter().filter(|f| {
+                    let Fact::Borrow { loan, .. } = &f.fact else {
+                        return false;
+                    };
+                    let Some(info) = self.loan(*loan) else { return false };
+                    let loc = self.location(f);
+                    let site = self.body.source_info(loc).span;
+                    if source.is_some_and(|span| span.contains(site)) && names_lender(from, info) {
+                        return true;
+                    }
+                    // A macro can borrow through several dereferences of a
+                    // named receiver. Look up its operand local in MIR.
+                    if info.in_macro.as_ref() != to.extract_rap().map(|r| r.name()) || info.in_macro.is_none() {
+                        return false;
+                    }
+                    let Some(statement) = self.body.basic_blocks[loc.block].statements.get(loc.statement_index) else {
+                        return false;
+                    };
+                    let rustc_middle::mir::StatementKind::Assign(assign) = &statement.kind else {
+                        return false;
+                    };
+                    let rustc_middle::mir::Rvalue::Ref(_, _, borrowed) = assign.1 else {
+                        return false;
+                    };
+                    self.facts.vars.iter().any(|v| {
+                        v.local == borrowed.local.as_usize() && Some(v.name.as_str()) == place(from).as_deref()
+                    })
+                }));
+            }
+        }
+        if is_end {
+            if let Some((_, ids)) = self.field_generation(ev, row) {
+                // Replacing a slot and releasing its lender need not
+                // coincide. This arrow gives the resource back.
+                let mut releases = row.facts.iter().filter_map(|f| match &f.fact {
+                    Fact::BorrowEnd { loan, .. }
+                        if ids.contains(loan) && self.loan(*loan).is_some_and(|l| names_lender(endpoints(ev).1, l)) =>
+                    {
+                        Some(fact_point(f))
+                    }
+                    _ => None,
+                });
+                let first = releases.next()?;
+                return releases.all(|p| p == first).then_some(first);
+            }
+            let (holder, lender) = endpoints(ev);
+            // A write through a reference can leave the presentation
+            // holder inside the place that the MIR end names. The same
+            // MIR edge must also return the reference to that place.
+            if let Some(holder) = place(holder) {
+                // A slot can stop holding its old value at a store while
+                // a copy keeps the old loan live. Repoint identifies both
+                // generations even when there is no BorrowEnd here.
+                let mut stores = row.facts.iter().filter(|f| {
+                    matches!(&f.fact, Fact::Repoint {
+                    holder: path, old, new } if *path == holder && old.iter().any(|id|
+                        !new.contains(id) && self.ends.get(&ev.get_id()).is_none_or(|ids| ids.contains(id)) && self.loan(*id).is_some_and(|l| names_lender(lender,l))))
+                });
+                if let Some(store) = stores.next().filter(|_| stores.next().is_none()) {
+                    return Some((store.order.0, store.order.1, BEFORE_STORE));
+                }
+                let via_holder = |f: &Ev| {
+                    let Fact::BorrowEnd { loan, holder: via, .. } = &f.fact else {
+                        return false;
+                    };
+                    self.loan(*loan).is_some_and(|l| names_lender(lender, l))
+                        && row.facts.iter().any(|other| {
+                            other.order == f.order
+                                && matches!(&other.fact, Fact::BorrowEnd {
+                            lender: root, holder: returned, .. } if root == &holder && returned == via)
+                        })
+                };
+                if candidates.is_empty() {
+                    candidates.extend(row.facts.iter().filter(|f| via_holder(f)));
+                }
+            }
+            let gives_back = matches!(ev, E::StaticDie { still_borrowed_by, .. } | E::MutableDie { still_borrowed_by, .. }
+                if still_borrowed_by.is_empty());
+            let preferred: Vec<_> =
+                candidates.iter().copied().filter(|e| matches!(e.fact, Fact::BorrowEnd { .. }) == gives_back).collect();
+            if !preferred.is_empty() {
+                candidates = preferred;
+            }
+        }
+        if let E::StaticBorrow { to, .. } | E::MutableBorrow { to, .. } = ev {
+            // A borrow carried back through a call reaches its destination
+            // on return. Borrowing the argument precedes the call.
+            if let Some(p) = place(to) {
+                let returned: Vec<_> = candidates
+                    .iter()
+                    .filter_map(|e| match &e.fact {
+                        Fact::Borrow { loan, holder, .. }
+                            if holder == &p || self.loan(*loan)?.via_call.contains(&p) =>
+                        {
+                            Some(*loan)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !returned.is_empty() {
+                    let repoints: Vec<_> = row
+                        .facts
+                        .iter()
+                        .filter(|e| {
+                            matches!(&e.fact,
+                        Fact::Repoint { holder, new, .. } if holder == &p && returned.iter().any(|l| new.contains(l)))
+                        })
+                        .collect();
+                    if !repoints.is_empty() {
+                        candidates = repoints;
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() && is_end {
+            // Some earlier ends are drawn at a later overwrite. Use the
+            // original edge only if it is unambiguous and precedes a
+            // store to the same slot along this path.
+            if let Some(holder) = place(endpoints(ev).0) {
+                let stores: Vec<_> = row
+                    .facts
+                    .iter()
+                    .filter(|e| match &e.fact {
+                        Fact::Init { path, reassign: true, .. } | Fact::Repoint { holder: path, .. } => {
+                            *path == holder || path == self.storage_of(&holder)
+                        }
+                        _ => false,
+                    })
+                    .collect();
+                if !stores.is_empty() {
+                    let mut ends = self.facts.rows.iter().flat_map(|r| &r.facts).filter(|f| self.matches(ev, f));
+                    if let Some(first) = ends.next().filter(|e| ends.all(|f| f.order == e.order)) {
+                        if stores.iter().any(|store| self.earlier(fact_point(first), fact_point(store))) {
+                            candidates.push(first);
+                        }
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() {
+            if let E::GoOutOfScope { ro, .. } = ev {
+                let mut deaths = self.facts.rows.iter().flat_map(|r| &r.facts).filter(|f| matches!(&f.fact,
+                    Fact::ScopeEnd { path, .. } | Fact::Drop { path, at_reassign: false, .. } if path == self.storage_of(ro.name())));
+                if let Some(death) = deaths.next().map(|f| f.order).filter(|d| deaths.all(|f| f.order == *d)) {
+                    return Some((death.0, death.1, death.2 as i8));
+                }
+                // At a diverging call the walk draws unwind scope exits.
+                // MIR has no StorageDead on a normal return path there.
+                let mut exits = row.facts.iter().filter_map(|e| {
+                    let b = e.order.0;
+                    let data = &self.body.basic_blocks[*blocks.get(b)?];
+                    matches!(data.terminator().kind, TerminatorKind::Call { target: None, .. }).then_some((
+                        b,
+                        data.statements.len(),
+                        3,
+                    ))
+                });
+                let at = exits.next()?;
+                return exits.all(|e| e == at).then_some(at);
+            }
+            return None;
+        }
+        let at_site: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|e| {
+                source.is_some_and(|s| {
+                    let mir = self.body.source_info(self.location(e)).span;
+                    s.contains(mir) || s.source_callsite().contains(mir.source_callsite())
+                })
+            })
+            .collect();
+        let sites = if at_site.is_empty() { &candidates } else { &at_site };
+        // The single displayed method event includes what the callee does and
+        // its return. A two-phase receiver's reservation can precede argument
+        // evaluation. Its activation is the call itself.
+        if matches!(ev, E::PassByMutableReference { .. }) {
+            if let [site] = sites.as_slice() {
+                if let Fact::Borrow { loan, .. } = site.fact {
+                    if let Some(&call) = self.activations.get(&loan) {
+                        let receiver = place(endpoints(ev).0);
+                        if row.facts.iter().any(|f| {
+                            self.earlier(fact_point(site), fact_point(f))
+                                && self.earlier(fact_point(f), call)
+                                && match &f.fact {
+                                    Fact::Repoint { holder, .. } => Some(holder) == receiver.as_ref(),
+                                    Fact::Borrow { loan, .. } => {
+                                        self.loan(*loan).is_some_and(|l| names_lender(endpoints(ev).0, l))
+                                    }
+                                    _ => false,
+                                }
+                        }) {
+                            return Some(call);
+                        }
+                    }
+                }
+            }
+        }
+        let after_binding;
+        let sites = if is_end && sites.iter().any(|e| e.order != sites[0].order) {
+            // A pattern can fail before its binding ever acquires the loan.
+            // The end on that edge is not an end on the binding's column.
+            let holder = place(endpoints(ev).0)?;
+            let mut starts = row.facts.iter().filter(|e| {
+                matches!(&e.fact,
+                Fact::Init { path, reassign: false, .. } if *path == holder)
+            });
+            let init = starts.next()?.order;
+            if starts.next().is_some() {
+                return None;
+            }
+            let dominates = |e: &&&Ev| {
+                let at = e.order;
+                if init.0 == at.0 {
+                    return init.1 <= at.1;
+                }
+                self.body.basic_blocks.dominators().dominates(blocks[init.0], blocks[at.0])
+            };
+            after_binding = sites.iter().filter(dominates).copied().collect::<Vec<_>>();
+            if after_binding.is_empty() {
+                return None;
+            }
+            &after_binding
+        } else {
+            sites
+        };
+        let at = sites[0].order;
+        sites.iter().all(|e| e.order == at).then_some((at.0, at.1, at.2 as i8))
+    }
+
+    /// The fact source of a reborrow can differ from the displayed
+    /// receiver (e.g. an iterator hands an element to a reference).
+    /// A parent loan given back on this path must outlast its reborrows.
+    fn returned_child(&self, a: &E, b: &E) -> bool {
+        if !gives_back_to(a, b)
+            || !matches!(b, E::StaticDie { still_borrowed_by, .. } | E::MutableDie { still_borrowed_by, .. }
+            if still_borrowed_by.is_empty())
+        {
+            return false;
+        }
+        let (from, _) = endpoints(a);
+        let (parent, owner) = endpoints(b);
+        let (Some(child), Some(parent)) = (place(from), place(parent)) else {
+            return false;
+        };
+        let parent_ids = self.ends.get(&b.get_id()).filter(|ids| !ids.is_empty());
+        let child_ids = self.ends.get(&a.get_id()).filter(|ids| !ids.is_empty());
+        let matches_parent = |l: &LoanInfo| {
+            parent_ids.map_or_else(
+                || {
+                    l.direct_holders.contains(&parent)
+                        && (place(owner).as_deref() == Some(&l.lender)
+                            || matches!(owner, ResourceTy::Caller) && l.source == "caller")
+                },
+                |ids| ids.contains(&l.loan),
+            )
+        };
+        let depends = |l: &LoanInfo| {
+            (matches_parent(l) && l.holders.contains(&child))
+                || l.made_through.iter().any(|id| self.loan(*id).is_some_and(&matches_parent))
+        };
+        let mut children = self.facts.loans.iter().filter(|l| {
+            child_ids.map_or_else(
+                || {
+                    (l.direct_holders.contains(&child) || l.via_call.contains(&child))
+                        && (names_lender(endpoints(a).1, l) || depends(l))
+                },
+                |ids| ids.contains(&l.loan),
+            )
+        });
+        children.next().is_some_and(depends) && children.all(depends)
+    }
+
+    fn writes_reference(&self, e: &Ev) -> bool {
+        let (rank, i, _) = e.order;
+        let bb = self.body.basic_blocks.reverse_postorder()[rank];
+        self.body.basic_blocks[bb].statements.get(i).is_some_and(|stmt| {
+            matches!(&stmt.kind,rustc_middle::mir::StatementKind::Assign(assign)
+                if assign.0.ty(&self.body.local_decls,self.tcx).ty.is_ref())
+        })
+    }
+
+    fn storage_of<'a>(&'a self, place: &'a str) -> &'a str {
+        self.facts.columns.iter().find(|c| c.name == place).map_or(place, |c| c.root.as_str())
+    }
+
+    fn earlier(&self, x: Point, y: Point) -> bool {
+        x < y
+            && (x.0 == y.0 || {
+                let blocks = self.body.basic_blocks.reverse_postorder();
+                self.body.basic_blocks.dominators().dominates(blocks[x.0], blocks[y.0])
+            })
+    }
+
+    /// A field assignment can have two sites on one drawable arrow. The
+    /// source is read when building the RHS, the destination changes at
+    /// the store. Use the read site against an end on the source column.
+    fn on_column(&self, ev: &E, boundary: &E, point: Option<Point>, row: &Row) -> Option<Point> {
+        if !end(boundary) {
+            return point;
+        }
+        let (from, to) = match ev {
+            E::Copy { from, to, .. }
+            | E::Move { from, to, .. }
+            | E::StaticBorrow { from, to, .. }
+            | E::MutableBorrow { from, to, .. } => (from, to),
+            _ => return point,
+        };
+        let Some(src) = place(from) else { return point };
+        if place(endpoints(boundary).0) != Some(src.clone()) || !to.extract_rap().is_some_and(|r| r.is_member()) {
+            return point;
+        }
+        let dst = place(to)?;
+        let source = self.spans.get(&ev.get_id())?;
+        let mut reads = row.facts.iter().filter(|e| {
+            let loc = self.location(e);
+            if !source.contains(self.body.source_info(loc).span) {
+                return false;
+            }
+            match &e.fact {
+                Fact::Borrow { loan, holder, .. } => {
+                    holder == &dst
+                        && self
+                            .facts
+                            .loans
+                            .iter()
+                            .any(|l| l.loan == *loan && (l.through.as_ref() == Some(&src) || l.lender == src))
+                }
+                Fact::Copy { path, .. } | Fact::Move { path, .. } => path == &src,
+                _ => false,
+            }
+        });
+        let first = reads.next()?;
+        reads.all(|f| f.order == first.order).then_some((first.order.0, first.order.1, first.order.2 as i8))
+    }
+
+    fn before(&self, a: &E, b: &E, x: Option<Point>, y: Option<Point>, row: &Row) -> bool {
+        // Each value and each field must stop holding its loan by
+        // its own storage exit, including when a loop closing row
+        // summarizes multiple per-iteration MIR exits.
+        if let E::GoOutOfScope { ro, .. } = b {
+            if end(a)
+                && endpoints(a).0.extract_rap() == Some(ro)
+                && self.facts.vars.iter().any(|v| v.name == self.storage_of(ro.name()))
+            {
+                return true;
+            }
+        }
+        if matches!(a,E::GoOutOfScope{ro,..} if end(b) && endpoints(b).0.extract_rap()==Some(ro)) {
+            return false;
+        }
+        let x = self.on_column(a, b, x, row);
+        let y = self.on_column(b, a, y, row);
+        let (Some(x), Some(y)) = (x, y) else {
+            return self.returned_child(a, b) && !self.returned_child(b, a);
+        };
+        if !end(a) && !end(b) {
+            // A presentation-only bind or copy can have both a source
+            // and destination effect. Only order ordinary events here
+            // when they represent the call activation or a destructor.
+            let activation = |e: &E, p| {
+                matches!(e, E::PassByMutableReference { .. }) && self.activations.values().any(|&at| at == p)
+            };
+            let drop = |e: &E| matches!(e, E::OwnerDropAtReassign { .. });
+            let install = |e: &E| matches!(e, E::Bind { .. } | E::Copy { .. } | E::Move { .. });
+            if !(activation(a, x) || activation(b, y) || (drop(a) && install(b)) || (drop(b) && install(a))) {
+                return false;
+            }
+        }
+        if !related(a, b) {
+            return false;
+        }
+        if x != y {
+            return self.earlier(x, y);
+        }
+        // At a common end, give a child back to its parent first. A
+        // write through that parent instead replaces one of the values
+        // reaching the point; it doesn't end the containing reference.
+        if !gives_back_to(a, b) || gives_back_to(b, a) {
+            return false;
+        }
+        let parent = place(endpoints(b).0);
+        let indirect = endpoints(a).0.extract_rap().map(|r| ResourceTy::Deref(r.clone()).name());
+        !row.facts.iter().any(|f| {
+            let Fact::Init { path, reassign: true, .. } = &f.fact else {
+                return false;
+            };
+            (f.order.0, f.order.1) == (x.0, x.1)
+                && self.writes_reference(f)
+                && (parent.as_ref() == Some(path) || indirect.as_ref() == Some(path))
+        })
+    }
+
+    // A variable declared in an arm has a single column. The renderer
+    // projects its arm history and enclosing history onto that column.
+    // Preserve proven dependencies across those lists if the two effects
+    // actually land on the same dot. Sibling arms never order each other.
+    fn across_arms<'e>(&self, events: &'e [(usize, E)], parents: &mut Vec<&'e [(usize, E)]>, layout: &mut RowLayout) {
+        for (line, ev) in events {
+            let E::Branch { branches, .. } = ev else {
+                for parent in parents.iter().flat_map(|p| p.iter()).filter(|(l, e)| {
+                    l == line && (end(ev) || end(e)) && related(ev, e) && !matches!(e, E::Branch { .. })
+                }) {
+                    let Some(row) = self.facts.rows.iter().find(|r| r.line == *line) else {
+                        continue;
+                    };
+                    let other = &parent.1;
+                    let (x, y) = (self.point(ev, row, false), self.point(other, row, false));
+                    for (a, b, first, second) in [(ev, other, x, y), (other, ev, y, x)] {
+                        if self.before(a, b, first, second, row) {
+                            layout.projected.insert((a.get_id(), b.get_id()));
+                        }
+                    }
+                }
+                continue;
+            };
+            parents.push(events);
+            for arm in branches {
+                self.across_arms(&arm.e_data, parents, layout);
+            }
+            parents.pop();
+        }
+    }
+
+    // The exit walk can duplicate an enclosing end inside a return arm.
+    // Once its unique loan edge is proven to precede the test, keep the
+    // enclosing end and let both legs start with an expired reference.
+    fn remove_ends_before_fork(&self, events: &mut [(usize, E)], layout: &mut RowLayout) {
+        for i in 0..events.len() {
+            let (line, branch) = &events[i];
+            let E::Branch { branches, .. } = branch else { continue };
+            let Some(row) = self.facts.rows.iter().find(|r| r.line == *line) else {
+                continue;
+            };
+            let Some(fork) = self.point(branch, row, false) else {
+                continue;
+            };
+            let mut duplicates = BTreeSet::new();
+            for (_, e) in events.iter().filter(|(l, e)| l == line && end(e)) {
+                let Some(ids) = self.ends.get(&e.get_id()) else {
+                    continue;
+                };
+                let Some(at) = self.point(e, row, false).filter(|p| self.earlier(*p, fork)) else {
+                    continue;
+                };
+                if ids.is_empty()
+                    || !ids.iter().all(|id| {
+                        let mut ends =
+                            row.facts.iter().filter(|f| matches!(f.fact,Fact::BorrowEnd{loan,..} if loan==*id));
+                        ends.next().is_some_and(|f| fact_point(f) == at) && ends.all(|f| fact_point(f) == at)
+                    })
+                {
+                    continue;
+                }
+                if row.facts.iter().any(|f| {
+                    matches!(&f.fact,Fact::Repoint{holder,..} if place(endpoints(e).0).as_ref()==Some(holder))
+                        && self.earlier(at, fact_point(f))
+                        && self.earlier(fact_point(f), fork)
+                }) {
+                    continue;
+                }
+                for (_, other) in branches.iter().flat_map(|arm| &arm.e_data) {
+                    if end(other) && endpoints(e) == endpoints(other) && self.point(other, row, false) == Some(at) {
+                        duplicates.insert(other.get_id());
+                        if let Some(holder) = endpoints(e).0.extract_rap() {
+                            layout.ended_at_fork.insert((branch.get_id(), *holder.hash()));
+                        }
+                    }
+                }
+            }
+            if let E::Branch { branches, .. } = &mut events[i].1 {
+                for arm in branches {
+                    arm.e_data.retain(|(_, e)| !duplicates.contains(&e.get_id()));
+                    for arrows in arm.line_map.values_mut() {
+                        arrows.retain(|e| !duplicates.contains(&e.get_id()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Assign a join's displayed end only when every end edge of this loan
+    /// on the row belongs to a specific drawn arm. An end at the switch
+    /// belongs to its successor, even though its source precedes both arms.
+    fn place_arm_ends(
+        &self,
+        events: &mut Vec<(usize, E)>,
+        map: &mut BTreeMap<usize, Vec<E>>,
+        next: &mut usize,
+        layout: &mut RowLayout,
+    ) {
+        self.remove_ends_before_fork(events, layout);
+        let mut removed = BTreeSet::new();
+        for i in 0..events.len() {
+            let (line, branch) = &events[i];
+            let E::Branch {
+                split_point,
+                merge_point,
+                branches,
+                branch_type: crate::svg_generator::data::BranchType::If(..),
+                ..
+            } = branch
+            else {
+                continue;
+            };
+            if split_point != merge_point || branches.len() != 2 {
+                continue;
+            }
+            let Some(row) = self.facts.rows.iter().find(|r| r.line == *line) else {
+                continue;
+            };
+            let Some((rank, at, _)) = self.point(branch, row, false) else {
+                continue;
+            };
+            let blocks = self.body.basic_blocks.reverse_postorder();
+            let data = &self.body.basic_blocks[blocks[rank]];
+            let TerminatorKind::SwitchInt { targets, .. } = &data.terminator().kind else {
+                continue;
+            };
+            let successors = targets.all_targets();
+            if successors.len() != 2 {
+                continue;
+            }
+            let dominates = self.body.basic_blocks.dominators();
+            let leg = |block: usize| successors.iter().position(|bb| dominates.dominates(*bb, blocks[block]));
+            // Relate each HIR arm to a switch successor using its located
+            // MIR effects. Empty or ambiguous arms supply no evidence.
+            let witness: Vec<_> = branches
+                .iter()
+                .map(|arm| {
+                    arm.e_data
+                        .iter()
+                        .filter_map(|(_, e)| self.point(e, row, false).and_then(|p| leg(p.0)))
+                        .collect::<BTreeSet<_>>()
+                })
+                .collect();
+            if witness.iter().any(|arms| arms.len() > 1) {
+                continue;
+            }
+            let mut edits = Vec::new();
+            for (_, e) in events.iter().filter(|(l, e)| l == line && end(e)) {
+                let Some(&[id]) = self.ends.get(&e.get_id()).map(Vec::as_slice) else {
+                    continue;
+                };
+                let Some(info) = self.loan(id) else { continue };
+                if info.end_lines != [*line]
+                    || info.holders.len() != 1
+                    || Some(&info.holders[0]) != place(endpoints(e).0).as_ref()
+                {
+                    continue;
+                }
+                if branches
+                    .iter()
+                    .any(|a| a.e_data.iter().any(|(_, other)| end(other) && endpoints(other) == endpoints(e)))
+                {
+                    continue;
+                }
+                let holder = place(endpoints(e).0);
+                let lender = place(endpoints(e).1);
+                let edges: Vec<_> = row
+                    .facts
+                    .iter()
+                    .filter(|f| match &f.fact {
+                        Fact::BorrowEnd { loan, holder: from, lender: to, .. } => {
+                            *loan == id && holder.as_ref() == Some(from) && lender.as_ref() == Some(to)
+                        }
+                        _ => false,
+                    })
+                    .collect();
+                let mut dests = BTreeMap::new();
+                for edge in &edges {
+                    let entry = (edge.order.0, edge.order.1) == (rank, at);
+                    let Some(which) = (if entry { edge.successor.and_then(|p| leg(p.0)) } else { leg(edge.order.0) })
+                    else {
+                        break;
+                    };
+                    let mut arms = witness.iter().enumerate().filter(|(_, w)| w.len() == 1 && w.contains(&which));
+                    let Some((arm, _)) = arms.next() else { break };
+                    if arms.next().is_some() || dests.insert(arm, (entry, fact_point(edge))).is_some() {
+                        break;
+                    }
+                }
+                if !edges.is_empty()
+                    && dests.len() == edges.len()
+                    && edges.len()
+                        == row.facts.iter().filter(|f| matches!(f.fact, Fact::BorrowEnd{loan,..} if loan==id)).count()
+                {
+                    edits.push((e.clone(), dests));
+                }
+            }
+            let line = *line;
+            let E::Branch { branches, .. } = &mut events[i].1 else { unreachable!() };
+            for (event, dests) in edits {
+                removed.insert(event.get_id());
+                let listed = map.get(&line).is_some_and(|es| es.iter().any(|e| e.get_id() == event.get_id()));
+                for (arm, (entry, point)) in dests {
+                    let mut ev = event.clone();
+                    let (E::MutableDie { id, .. } | E::StaticDie { id, .. } | E::RefDie { id, .. }) = &mut ev else {
+                        unreachable!()
+                    };
+                    *id = *next;
+                    *next += 1;
+                    layout.arm_points.insert(*id, point);
+                    let arm = &mut branches[arm];
+                    if listed {
+                        let arrows = arm.line_map.entry(line).or_default();
+                        if entry {
+                            arrows.insert(0, ev.clone())
+                        } else {
+                            arrows.push(ev.clone())
+                        }
+                    }
+                    if entry {
+                        arm.e_data.insert(0, (line, ev));
+                    } else {
+                        arm.e_data.push((line, ev));
+                    }
+                }
+            }
+        }
+        events.retain(|(_, e)| !removed.contains(&e.get_id()));
+        for arrows in map.values_mut() {
+            arrows.retain(|e| !removed.contains(&e.get_id()));
+        }
+        for (_, e) in events {
+            if let E::Branch { branches, .. } = e {
+                for arm in branches {
+                    self.place_arm_ends(&mut arm.e_data, &mut arm.line_map, next, layout);
+                }
+            }
+        }
+    }
+
+    /// The loan set written by this store (or replaced, for an old end).
+    /// Only distinguish successive stores. Several incoming arrows for
+    /// the same call result describe one reference with possible lenders.
+    fn field_generation<'a>(&'a self, ev: &E, row: &'a Row) -> Option<(&'a Ev, &'a [usize])> {
+        let (from, to) = endpoints(ev);
+        let field = (if end(ev) { from } else { to }).extract_rap().filter(|r| r.is_member() && r.is_ref())?;
+        let mut stores = row
+            .facts
+            .iter()
+            .filter_map(|f| match &f.fact {
+                Fact::Repoint { holder, old, new } if holder == field.name() => Some((f, old, new)),
+                _ => None,
+            })
+            .filter(|(f, _, _)| {
+                row.facts.iter().any(|g| {
+                    matches!(&g.fact, Fact::Repoint{holder,..} if holder==field.name())
+                        && f.arm == g.arm
+                        && (self.earlier(fact_point(f), fact_point(g)) || self.earlier(fact_point(g), fact_point(f)))
+                })
+            })
+            .filter_map(|(f, old, new)| {
+                if let Some(ids) = self.ends.get(&ev.get_id()).filter(|_| end(ev)) {
+                    return ids.iter().all(|id| new.contains(id)).then_some((f, new.as_slice()));
+                }
+                let hir = rustc_utils::BodyExt::location_to_hir_id(self.body, self.location(f));
+                let rustc_hir::Node::Expr(expr) = self.tcx.hir_node(hir) else {
+                    return None;
+                };
+                if !self.spans.get(&ev.get_id()).is_some_and(|s| expr.span.contains(*s) || s.contains(expr.span)) {
+                    return None;
+                }
+                let ids = if end(ev) { old } else { new };
+                let lender = if end(ev) { to } else { from };
+                ids.iter()
+                    .any(|id| self.loan(*id).is_some_and(|l| names_lender(lender, l)))
+                    .then_some((f, ids.as_slice()))
+            });
+        let generation = stores.next()?;
+        stores.next().is_none().then_some(generation)
+    }
+
+    fn distinguish_field_writes(&self, ev: &E, row: &Row, layout: &mut RowLayout) {
+        if let Some((store, ids)) = self.field_generation(ev, row) {
+            let Fact::Repoint { holder, old, .. } = &store.fact else { unreachable!() };
+            let slot = FieldGeneration { block: store.order.0, statement: store.order.1, replaced: old == ids };
+            layout.field_generations.insert(ev.get_id(), slot);
+            let effect = if end(ev) { self.point(ev, row, false) } else { Some(fact_point(store)) };
+            // Release arrows go below the first store only when the loan
+            // actually lasts beyond it. Merely overwriting a slot cannot
+            // tell us that its lender is available again.
+            if effect.is_some_and(|at| {
+                row.facts.iter().any(|f| {
+                    matches!(&f.fact, Fact::Repoint{holder: other,..} if other == holder)
+                        && f.arm == store.arm
+                        && self.earlier(fact_point(f), at)
+                })
+            }) {
+                layout.later_field_effects.insert(ev.get_id());
+            }
+            return;
+        }
+        let Some(field) = endpoints(ev).0.extract_rap().filter(|r| end(ev) && r.is_member() && r.is_ref()) else {
+            return;
+        };
+        // Both generations can remain live for borrowck and end at the
+        // same later read. Preserve their individual lender names there.
+        let ended: BTreeSet<_> = row
+            .facts
+            .iter()
+            .filter_map(|f| match &f.fact {
+                Fact::BorrowEnd { loan, .. }
+                    if self.loan(*loan).is_some_and(|l| l.direct_holders.contains(field.name())) =>
+                {
+                    Some(*loan)
+                }
+                _ => None,
+            })
+            .collect();
+        if ended.len() > 1
+            && self.facts.rows.iter().flat_map(|r| &r.facts).any(|e| {
+                matches!(&e.fact,Fact::Repoint {holder,old,new} if holder == field.name()
+                && old.iter().any(|id| ended.contains(id) && !new.contains(id))
+                && new.iter().any(|id| ended.contains(id) && !old.contains(id)))
+            })
+        {
+            layout.name_field_ends.insert(ev.get_id());
+        }
+    }
+
+    fn annotate(&self, ev: &mut E, row: &Row, layout: &mut RowLayout) {
+        if let E::MutableBorrow { from, to, is_partial, is_reborrow, break_alt, via, id, .. } = ev {
+            if from.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref()) {
+                let candidates: Vec<_> = row
+                    .facts
+                    .iter()
+                    .filter_map(|f| match &f.fact {
+                        Fact::Borrow { lender, loan, .. } if Some(lender) == place(from).as_ref() => {
+                            self.loan(*loan).filter(|l| place(to).is_some_and(|p| l.via_call.contains(&p)))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !candidates.is_empty() && candidates.iter().all(|l| l.kind == "shared") {
+                    *ev = E::StaticBorrow {
+                        from: from.clone(),
+                        to: to.clone(),
+                        is_partial: *is_partial,
+                        is_reborrow: *is_reborrow,
+                        break_alt: break_alt.clone(),
+                        via: via.clone(),
+                        id: *id,
+                        of_ref_var: true,
+                    };
+                }
+            }
+        }
+        if let E::MutableDie { id, from, to, static_lender, still_borrowed_by, of_ref_var } = ev {
+            // A call may keep a shared input beside a mutable input. Use
+            // the returned loan's kind for the particular input slot.
+            if (*of_ref_var || to.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref()))
+                && self.ends.get(id).is_some_and(|ids| {
+                    !ids.is_empty()
+                        && ids
+                            .iter()
+                            .all(|&id| self.loan(id).is_some_and(|l| l.kind == "shared" && names_lender(to, l)))
+                })
+            {
+                *ev = E::StaticDie {
+                    id: *id,
+                    from: from.clone(),
+                    to: to.clone(),
+                    static_lender: static_lender.clone(),
+                    still_borrowed_by: still_borrowed_by.clone(),
+                    of_ref_var: true,
+                };
+            }
+        }
+        if let E::RefDie { from, to, id, .. } = ev {
+            let holds: Vec<_> = row
+                .facts
+                .iter()
+                .filter_map(|f| match &f.fact {
+                    Fact::HoldEnd { loan, holder, .. } if Some(holder) == place(from).as_ref() => {
+                        self.loan(*loan).filter(|l| names_lender(to, l)).map(|l| (f, l))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let copied = holds.iter().any(|(hold, _)| {
+                row.facts.iter().any(|f| {
+                    hold.order.0 == f.order.0
+                        && hold.order.1 == f.order.1
+                        && matches!(&f.fact, Fact::Copy { path, .. } if Some(path) == place(from).as_ref())
+                })
+            });
+            let repointed = row
+                .facts
+                .iter()
+                .any(|f| matches!(&f.fact, Fact::Repoint { holder, .. } if Some(holder) == place(from).as_ref()));
+            if copied
+                && repointed
+                && holds.iter().all(|(_, loan)| loan.kind == "mut")
+                && from.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref())
+            {
+                layout.copied_ends.insert(*id);
+            }
+        }
+        let call = self.point(ev, row, false);
+        if let (Some(at), E::PassByStaticReference { from, id, .. }) = (call, &*ev) {
+            let mut candidates: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+            for loan in &self.facts.loans {
+                if names_lender(from, loan) {
+                    for holder in &loan.direct_holders {
+                        candidates.entry(holder).or_default().push(loan.loan);
+                    }
+                }
+            }
+            for (holder, ids) in candidates {
+                if ids.iter().all(|id| {
+                    let mut ends = self
+                        .facts
+                        .rows
+                        .iter()
+                        .flat_map(|r| &r.facts)
+                        .filter(|f| matches!(f.fact,Fact::BorrowEnd{loan,..} if loan==*id));
+                    ends.next().is_some_and(|f| {
+                        row.facts.contains(f) && self.earlier(fact_point(f), at) && ends.next().is_none()
+                    })
+                }) {
+                    layout.ended_before_call.entry(*id).or_default().insert(holder.to_owned());
+                }
+            }
+        }
+        if let (Some(call_at), E::PassByMutableReference { id, from, .. }) = (call, ev) {
+            if let Some((loan, at)) = row.facts.iter().find_map(|f| match f.fact {
+                Fact::Borrow { loan, .. } if self.activations.get(&loan).copied().is_some_and(|p| Some(p) == call) => {
+                    Some((loan, fact_point(f)))
+                }
+                _ => None,
+            }) {
+                if self.loan(loan).is_some_and(|l| l.through == place(from))
+                    && row.facts.iter().any(|f| {
+                        matches!(&f.fact,Fact::Repoint{holder,..} if Some(holder)==place(from).as_ref())
+                            && self.earlier(at, fact_point(f))
+                            && self.earlier(fact_point(f), call_at)
+                    })
+                {
+                    layout.reassigned_receivers.insert(*id);
+                }
+            }
+        }
+    }
+
+    fn destructor_before_release(
+        &self,
+        drop: &E,
+        end: &E,
+        drop_at: Option<Point>,
+        end_at: Option<Point>,
+    ) -> Option<String> {
+        let E::OwnerDropAtReassign { ro, .. } = drop else { return None };
+        let field = endpoints(end).0.extract_rap()?;
+        let (drop_at, end_at) = (drop_at?, end_at?);
+        if !self.field_overwrite_ends.contains(&end.get_id())
+            || self.storage_of(field.name()) != ro.name()
+            || end_at.2 != BEFORE_STORE
+            || !self.earlier(drop_at, end_at)
+        {
+            return None;
+        }
+        let block = self.body.basic_blocks.reverse_postorder()[drop_at.0];
+        let TerminatorKind::Drop { place, .. } = &self.body.basic_blocks[block].terminator().kind else {
+            return None;
+        };
+        let adt = place.ty(&self.body.local_decls, self.tcx).ty.ty_adt_def()?;
+        adt.has_dtor(self.tcx).then(|| ro.name().clone())
+    }
+
+    fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout) {
+        let mut lines: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (i, (line, ev)) in events.iter_mut().enumerate() {
+            if let E::Branch { branches, .. } = ev {
+                for arm in branches {
+                    self.order_list(&mut arm.e_data, &mut arm.line_map, layout);
+                }
+            }
+            lines.entry(*line).or_default().push(i);
+        }
+        for (line, indices) in lines {
+            if indices.len() < 2 {
+                continue;
+            }
+            let Some(row) = self.facts.rows.iter().find(|r| r.line == line) else {
+                continue;
+            };
+            let has_boundary =
+                indices.iter().any(|&i| end(&events[i].1) || matches!(events[i].1, E::OwnerDropAtReassign { .. }));
+            if !has_boundary
+                && !row.facts.iter().any(|f| matches!(f.fact, Fact::Repoint { .. }))
+                && !row
+                    .facts
+                    .iter()
+                    .any(|f| matches!(f.fact,Fact::Borrow{loan,..} if self.activations.contains_key(&loan)))
+            {
+                continue;
+            }
+            for &i in &indices {
+                self.annotate(&mut events[i].1, row, layout);
+                if let Some(arrow) =
+                    map.get_mut(&line).and_then(|m| m.iter_mut().find(|e| e.get_id() == events[i].1.get_id()))
+                {
+                    if std::mem::discriminant(arrow) != std::mem::discriminant(&events[i].1) {
+                        *arrow = events[i].1.clone();
+                    }
+                }
+            }
+            // The walk's ordinary events already have evaluation order.
+            // Insert each borrow boundary relative to the MIR effects on
+            // its columns. An unrelated column or an unlocated event keeps
+            // its position unless a proven dependency requires moving it.
+            let straight_line = !indices.iter().any(|&i| matches!(events[i].1, E::Branch { .. }));
+            let points: Vec<_> = indices
+                .iter()
+                .map(|&i| {
+                    layout
+                        .arm_points
+                        .get(&events[i].1.get_id())
+                        .copied()
+                        .or_else(|| self.point(&events[i].1, row, straight_line))
+                })
+                .collect();
+            let mut dependencies = BTreeSet::new();
+            for (i, &idx) in indices.iter().enumerate() {
+                let a = &events[idx].1;
+                self.distinguish_field_writes(a, row, layout);
+                for (j, &other) in indices.iter().enumerate().filter(|(j, _)| *j != i) {
+                    let b = &events[other].1;
+                    let ids = (a.get_id(), b.get_id());
+                    if let Some(owner) = self.destructor_before_release(a, b, points[i], points[j]) {
+                        layout.after_destructor.insert(ids.1, owner);
+                    }
+                    if points[i].zip(points[j]).is_some_and(|(x, y)| x.2 >= 0 && y.2 >= 0 && self.earlier(x, y)) {
+                        layout.before.insert(ids);
+                    }
+                    if end(a) && end(b) && points[i].is_some() && points[i] == points[j] && gives_back_to(a, b) {
+                        layout.same_dot.entry(ids.1).or_default().push(ids.0);
+                    }
+                    if self.before(a, b, points[i], points[j], row) {
+                        dependencies.insert(ids);
+                        layout.dependencies.insert(ids);
+                        if end(a) && end(b) {
+                            layout.end_order.insert(ids);
+                        }
+                    }
+                }
+            }
+            let ordered = dependency_order(indices.len(), |i, j| {
+                dependencies.contains(&(events[indices[i]].1.get_id(), events[indices[j]].1.get_id()))
+            });
+            if let Some(arrows) = map.get_mut(&line) {
+                let order = dependency_order(arrows.len(), |i, j| {
+                    !(end(&arrows[i]) && end(&arrows[j]))
+                        && dependencies.contains(&(arrows[i].get_id(), arrows[j].get_id()))
+                });
+                if order.iter().copied().ne(0..order.len()) {
+                    *arrows = order.iter().map(|&i| arrows[i].clone()).collect();
+                }
+            }
+            if ordered.iter().copied().eq(0..ordered.len()) {
+                continue;
+            }
+            let values: Vec<_> = ordered.iter().map(|&k| events[indices[k]].1.clone()).collect();
+            for (&i, ev) in indices.iter().zip(values) {
+                events[i].1 = ev;
+            }
+        }
+    }
+}
+
+pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
+    let order = Order {
+        activations: visitor
+            .bwf
+            .borrow_set
+            .location_map()
+            .values()
+            .enumerate()
+            .filter_map(|(index, data)| {
+                let rustc_borrowck::consumers::TwoPhaseActivation::ActivatedAt(at) = data.activation_location() else {
+                    return None;
+                };
+                let rank = visitor.mir_body.basic_blocks.reverse_postorder().iter().position(|b| *b == at.block)?;
+                Some((index, (rank, at.statement_index, 0)))
+            })
+            .collect(),
+        tcx: visitor.tcx,
+        body: visitor.mir_body,
+        facts,
+        spans: &visitor.event_spans,
+        field_overwrite_ends: &visitor.field_overwrite_ends,
+        ends: &visitor.end_loans,
+    };
+    order.place_arm_ends(
+        visitor.preprocessed_events,
+        visitor.event_line_map,
+        visitor.unique_id,
+        &mut visitor.row_layout,
+    );
+    order.across_arms(visitor.preprocessed_events, &mut Vec::new(), &mut visitor.row_layout);
+    order.order_list(visitor.preprocessed_events, visitor.event_line_map, &mut visitor.row_layout);
+}
+
+/// Read the independent columns in their existing order, emitting any
+/// predecessor before its dependent. All dependencies are strict MIR (or
+/// replay) order, so this graph is acyclic.
+fn dependency_order(n: usize, before: impl Fn(usize, usize) -> bool) -> Vec<usize> {
+    fn visit(i: usize, seen: &mut [bool], out: &mut Vec<usize>, before: &impl Fn(usize, usize) -> bool) {
+        if seen[i] {
+            return;
+        }
+        seen[i] = true;
+        for j in 0..seen.len() {
+            if !seen[j] && before(j, i) {
+                visit(j, seen, out, before);
+            }
+        }
+        out.push(i);
+    }
+    let mut seen = vec![false; n];
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        visit(i, &mut seen, &mut out, &before);
+    }
+    out
+}
+
+fn endpoints(e: &E) -> (&ResourceTy, &ResourceTy) {
+    match e {
+        E::RefDie { from, to, .. } => (from, to),
+        _ => crate::svg_generator::data::ResourceAccessPoint_extract(e),
+    }
+}
+
+fn gives_back_to(a: &E, b: &E) -> bool {
+    matches!(a, E::StaticDie { .. } | E::MutableDie { .. })
+        && end(b)
+        && endpoints(a).1.extract_rap().is_some_and(|r| Some(r) == endpoints(b).0.extract_rap())
+}
+
+fn columns(e: &E) -> [Option<&crate::svg_generator::data::ResourceAccessPoint>; 2] {
+    match e {
+        E::GoOutOfScope { ro, .. } | E::OwnerDropAtReassign { ro, .. } => [Some(ro), None],
+        _ => {
+            let (from, to) = endpoints(e);
+            [from.extract_rap(), to.extract_rap()]
+        }
+    }
+}
+
+fn related(a: &E, b: &E) -> bool {
+    if matches!(a, E::Branch { .. }) || matches!(b, E::Branch { .. }) {
+        return true;
+    }
+    let other = columns(b);
+    columns(a).into_iter().flatten().any(|p| other.contains(&Some(p)))
+}
+
+/// One side of a field store in its borrowck body. Several call-input
+/// loans can describe the same reference reaching this store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FieldGeneration {
+    block: usize,
+    statement: usize,
+    replaced: bool,
+}
+
+/// Coincident effects on one column can include a dot without an arrow.
+#[derive(Default, Debug)]
+pub struct RowLayout {
+    pub(crate) ended_before_call: BTreeMap<usize, BTreeSet<String>>,
+    pub(crate) ended_at_fork: BTreeSet<(usize, u64)>,
+    pub(crate) after_destructor: BTreeMap<usize, String>,
+    pub(crate) copied_ends: BTreeSet<usize>,
+    pub(crate) reassigned_receivers: BTreeSet<usize>,
+    arm_points: BTreeMap<usize, Point>,
+    pub(crate) closure_captures: BTreeMap<usize, Vec<usize>>,
+    pub(crate) field_generations: BTreeMap<usize, FieldGeneration>,
+    pub(crate) later_field_effects: BTreeSet<usize>,
+    name_field_ends: BTreeSet<usize>,
+    projected: BTreeSet<(usize, usize)>,
+    dependencies: BTreeSet<(usize, usize)>,
+    end_order: BTreeSet<(usize, usize)>,
+    before: BTreeSet<(usize, usize)>,
+    same_dot: BTreeMap<usize, Vec<usize>>,
+}
+
+impl RowLayout {
+    pub fn append(&mut self, other: &mut Self) {
+        self.ended_at_fork.append(&mut other.ended_at_fork);
+        self.after_destructor.append(&mut other.after_destructor);
+        self.copied_ends.append(&mut other.copied_ends);
+        self.reassigned_receivers.append(&mut other.reassigned_receivers);
+        self.closure_captures.append(&mut other.closure_captures);
+        self.field_generations.append(&mut other.field_generations);
+        self.later_field_effects.append(&mut other.later_field_effects);
+        self.name_field_ends.append(&mut other.name_field_ends);
+        self.same_dot.append(&mut other.same_dot);
+        self.before.append(&mut other.before);
+        self.dependencies.append(&mut other.dependencies);
+        self.end_order.append(&mut other.end_order);
+        self.projected.append(&mut other.projected);
+    }
+
+    pub(crate) fn name_lender(&self, id: usize) -> bool {
+        self.field_generations.contains_key(&id) || self.name_field_ends.contains(&id)
+    }
+
+    pub(crate) fn project(&self, history: &mut [(usize, crate::svg_generator::data::Event)]) {
+        if self.projected.is_empty() {
+            return;
+        }
+        let mut by_row: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (i, (row, _)) in history.iter().enumerate() {
+            by_row.entry(*row).or_default().push(i);
+        }
+        for indices in by_row.values().filter(|indices| indices.len() > 1) {
+            let ids: Vec<_> = indices.iter().map(|&i| history[i].1.get_id()).collect();
+            let order = dependency_order(indices.len(), |i, j| self.projected.contains(&(ids[i], ids[j])));
+            if order.iter().copied().ne(0..order.len()) {
+                let values: Vec<_> = order.iter().map(|&i| history[indices[i]].1.clone()).collect();
+                for (&i, event) in indices.iter().zip(values) {
+                    history[i].1 = event;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn precedes(&self, first: usize, second: usize) -> bool {
+        self.before.contains(&(first, second))
+    }
+
+    pub(crate) fn between(&self, first: usize, middle: usize, last: usize) -> bool {
+        self.before.contains(&(first, middle)) && self.before.contains(&(middle, last))
+    }
+
+    pub(crate) fn align(&self, placed: &mut [(usize, E)], map: &BTreeMap<usize, Vec<E>>) {
+        let anchors: HashMap<_, _> =
+            map.iter().flat_map(|(&row, es)| es.iter().map(move |e| (e.get_id(), row))).collect();
+        for (row, e) in placed {
+            if anchors.contains_key(&e.get_id()) {
+                continue;
+            }
+            if let Some(other) = self.same_dot.get(&e.get_id()) {
+                let mut rows = other.iter().filter_map(|id| anchors.get(id));
+                if let Some(anchor) = rows.next().filter(|a| rows.all(|r| r == *a)) {
+                    *row = *anchor;
+                }
+            }
+        }
+    }
+}
+
+/// Stacking decides geometry before the renderer expands an event into
+/// column histories. Preserve the layout of unrelated arrows and use the
+/// semantic sequence for a borrow and its uses on the same dot.
+pub(crate) fn replay(placed: &mut [(usize, E)], sequence: &HashMap<usize, usize>, layout: &RowLayout) {
+    let mut rows: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (i, (row, _)) in placed.iter().enumerate() {
+        rows.entry(*row).or_default().push(i);
+    }
+    for indices in rows.values() {
+        let ordinary = |e: &E| !end(e) && !matches!(e, E::StaticBorrow { .. } | E::MutableBorrow { .. });
+        let order = dependency_order(indices.len(), |i, j| {
+            let (a, b) = (&placed[indices[i]].1, &placed[indices[j]].1);
+            (layout.dependencies.contains(&(a.get_id(), b.get_id())) || !(ordinary(a) && ordinary(b)))
+                && related(a, b)
+                && (!(end(a) && end(b)) || layout.end_order.contains(&(a.get_id(), b.get_id())))
+                && sequence.get(&a.get_id()).zip(sequence.get(&b.get_id())).is_some_and(|(i, j)| i < j)
+        });
+        let vals: Vec<_> = order.iter().map(|&j| placed[indices[j]].1.clone()).collect();
+        for (&i, ev) in indices.iter().zip(vals) {
+            placed[i].1 = ev;
+        }
+    }
+}

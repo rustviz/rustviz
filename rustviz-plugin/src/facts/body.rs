@@ -425,7 +425,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         if matches!(fact, Fact::BorrowEnd { .. }) {
             order.2 = 1;
         }
-        let ev = Ev { location: l, col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None };
+        let ev = Ev { location: l, col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None, successor: None };
         (row, ev)
     }
 }
@@ -1634,7 +1634,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
                 ended_edges.insert((loc, *s, b.index()));
                 let f = Fact::BorrowEnd { loan: b.index(), lender: li.lender.clone(), holder, why, to_line, to_col };
-                push(&mut evs, cx.ev(loc, f));
+                let mut ev = cx.ev(loc, f);
+                ev.1.successor = Some(cx.rows.order(*s));
+                push(&mut evs, ev);
             }
         }
     }
@@ -3220,7 +3222,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         // Only the same fact from the same MIR location is a duplicate (two
         // evaluations of one argument are two events), on the same exit site
         // (a drop two early exits share is one event per exit).
-        fs.dedup_by(|a, b| a.fact == b.fact && a.order == b.order && a.site == b.site);
+        fs.dedup_by(|a, b| a.fact == b.fact && a.order == b.order && a.site == b.site && a.successor == b.successor);
         row.facts = fs;
         out_rows.push(row);
     }

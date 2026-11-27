@@ -2881,10 +2881,10 @@ pub enum Event {
     // this happens when a owner is returned this line,
     // or if this owner's scope ends at this line. The data must be dropped.
     // `holds`, `early`: the ExternalEvent's.
-    OwnerGoOutOfScope { holds: Option<ScopeEndHolds>, early: Option<EarlyReturns> },
+    OwnerGoOutOfScope { holds: Option<ScopeEndHolds>, early: Option<EarlyReturns>, id: usize },
     // this happens when a vairable that is not an owner goes out of scope.
     // The data is not dropped in this case
-    RefGoOutOfScope { early: Option<EarlyReturns> },
+    RefGoOutOfScope { early: Option<EarlyReturns>, id: usize },
     // The previously-held resource is dropped at a reassignment
     // (`y = x` or `*p = x`). The owner stays alive — its state is
     // unchanged across this event because the matching Acquire from
@@ -3397,20 +3397,6 @@ fn ends_reference(e: &Event) -> bool {
         | Event::Duplicate { to: ResourceTy::Caller, .. })
 }
 
-/// An event that gives a reference column a (new) reference. Not a
-/// write through the column into what it points to (`*r = &t`, `is`
-/// is `*r`, #904): r keeps the reference it has, so its own end on
-/// that row isn't the end of an old one, and its line ends there.
-fn starts_reference(e: &Event) -> bool {
-    match e {
-        Event::StaticBorrow { is, .. } | Event::MutableBorrow { is, .. }
-        | Event::Acquire { is, .. } | Event::Copy { is, .. } =>
-            !matches!(is, ResourceTy::Deref(_) | ResourceTy::DerefField(..)),
-        Event::InitRefParam { .. } => true,
-        _ => false,
-    }
-}
-
 /// Whether a reference column still holds a reference after the events
 /// before `rest`: its next event uses the reference it has, rather than
 /// giving it a new one or ending its scope. A borrow made through it
@@ -3571,74 +3557,6 @@ fn note_call_borrows_on_members(timelines: &mut BTreeMap<u64, Timeline>) {
             let at = t.history.iter().position(|(l, _)| *l > *line).unwrap_or(t.history.len());
             t.history.insert(at, (*line, Event::LentWithParent { parent: pname.clone(), to: to.clone(), mutable: *mutable }));
         }
-    }
-}
-
-/// #700, #722: a reference column's borrow end recorded on the row
-/// where it gets a new reference, after that new reference (`y = &x;`
-/// ends y's old borrow and starts a new one), is the old value's end
-/// when it gives back a lender none of the row's new borrows borrow
-/// from, or when the column goes on using a reference afterwards (so
-/// the new one doesn't end here). Put such ends before the new
-/// reference, so the row's dot reads "y's immutable borrow ends • y
-/// immutably borrows …" and the column goes on from it holding the new
-/// one. An end of the new reference (`r = &b;` with r unused after)
-/// stays after it. The rows and arrows don't change: only the order of
-/// the column's own events on that row.
-fn old_borrow_ends_first(history: &mut [(usize, Event)]) {
-    // A named lender's column (not `Deref(r)`, the stand-in for a
-    // temporary or a value the plugin doesn't show).
-    let lender = |r: &ResourceTy| match r {
-        ResourceTy::Value(r) => Some(*r.hash()),
-        _ => None,
-    };
-    let mut i = 0;
-    while i < history.len() {
-        let row = history[i].0;
-        let mut j = i;
-        while j < history.len() && history[j].0 == row {
-            j += 1;
-        }
-        if let Some(first_start) = (i..j).find(|&k| starts_reference(&history[k].1)) {
-            let used_later = reference_used_later(&history[j..]);
-            // The named lenders of the row's new borrows, or None if the
-            // new reference is a copy or move of another one (whose
-            // lender isn't recorded here) or borrows something unnamed.
-            let new_lenders: Option<Vec<u64>> = history[first_start..j].iter()
-                .filter(|(_, e)| starts_reference(e))
-                .map(|(_, e)| match e {
-                    Event::StaticBorrow { from, .. } | Event::MutableBorrow { from, .. } => lender(from),
-                    _ => None,
-                })
-                .collect();
-            let old_end = |e: &Event| match e {
-                Event::StaticDie { to, .. } | Event::MutableDie { to, .. } => used_later
-                    || new_lenders.as_ref().zip(lender(to)).is_some_and(|(ls, l)| !ls.contains(&l)),
-                _ => false,
-            };
-            // A read of the old value that the new one's right-hand
-            // side makes (`r = if *r > 0 { &b } else { &c };` copies
-            // `*r`), recorded after the new borrows because the row's
-            // arrows were appended first (#771): evaluated first, so it
-            // goes before the end too. Its id is older than the new
-            // reference's.
-            let first_id = history[first_start..j].iter()
-                .filter(|(_, e)| starts_reference(e))
-                .map(|(_, e)| e.get_id())
-                .min()
-                .unwrap_or(0);
-            let is_read = |e: &Event| matches!(e,
-                Event::Duplicate { .. } | Event::StaticLend { .. } | Event::MutableLend { .. } | Event::Move { .. })
-                && e.get_id() < first_id;
-            let (reads, others): (Vec<_>, Vec<_>) = history[first_start..j].iter().cloned()
-                .partition(|(_, e)| is_read(e));
-            let (ends, rest): (Vec<_>, Vec<_>) = others.into_iter()
-                .partition(|(_, e)| old_end(e));
-            for (slot, ev) in history[first_start..j].iter_mut().zip(reads.into_iter().chain(ends).chain(rest)) {
-                *slot = ev;
-            }
-        }
-        i = j;
     }
 }
 
@@ -3823,6 +3741,7 @@ impl Event {
             Event::MutableLend {id: x, ..} | Event::MutableDie {id: x, ..} | Event::StaticDie {id: x, ..} |
             Event::Acquire { id: x, .. } | Event::Copy { id: x, .. } | Event::MutableBorrow { id: x, .. } |
             Event::StaticBorrow { id: x, .. } | Event::StaticReacquire { id: x, .. } | Event::MutableReacquire {id: x, ..}
+            | Event::OwnerGoOutOfScope { id: x, .. } | Event::RefGoOutOfScope { id: x, .. }
             | Event::Branch { id: x, .. } | Event::InitRefParam { id: x, .. } | Event::ClosureCall { id: x, .. } => {
                 *x
             }
@@ -4690,6 +4609,7 @@ pub struct VisualizationData {
 
     pub external_events: Vec<(usize, ExternalEvent)>,
     //temp container for external_events
+    pub row_layout: crate::event_order::RowLayout,
     pub preprocess_external_events: Vec<(usize, ExternalEvent)>,
     //line_info
     pub event_line_map: BTreeMap<usize, Vec<ExternalEvent>>,
@@ -4994,6 +4914,12 @@ impl Visualizable for VisualizationData {
                 Event::MutableDie{ to: ResourceTy::Value(ResourceAccessPoint::Function(_)) ,..} => true,
                 _ => false,
             }
+        }
+        // The closure owns its value even when that value contains a
+        // reference to a captured upvar. Its bind establishes ownership.
+        if matches!(event, Event::StaticBorrow{is,..} | Event::MutableBorrow{is,..} if is.is_closure())
+            && self.row_layout.closure_captures.values().any(|ids|ids.contains(&event.get_id())) {
+            return previous_state.clone();
         }
         if event_invalid(event) { return State::Invalid; }
         // An or-pattern's possible borrow (#565) changes the state the
@@ -5589,9 +5515,6 @@ impl Visualizable for VisualizationData {
         }
 
         let is_ref = self.is_ref(hash);
-        if is_ref {
-            old_borrow_ends_first(history);
-        }
         let kept = ends_kept_alive(is_ref, history);
         let mut previous_line = lead_end;
         let mut line_start: (usize, State) = (0, State::OutOfScope);
@@ -5787,9 +5710,6 @@ impl Visualizable for VisualizationData {
 
     fn compute_timeline_states(&self, history: & mut Vec<(usize, Event)>, states: & mut Vec<(usize, usize, State)>, hash: &u64) {
         let is_ref = self.is_ref(hash);
-        if is_ref {
-            old_borrow_ends_first(history);
-        }
         let kept = ends_kept_alive(is_ref, history);
         let mut previous_line = 1;
         let mut previous_state = State::OutOfScope;
@@ -6034,13 +5954,13 @@ impl Visualizable for VisualizationData {
         ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
           vec![(line_num, Event::InitRefParam{param : ro.to_owned(), id: *id, own_param: own_param.clone(), in_pattern: in_pattern.clone(), rest: rest.clone()})]
         },
-        ExternalEvent::GoOutOfScope{ro, holds, early, ..} => {
+        ExternalEvent::GoOutOfScope{ro, holds, early, id} => {
           match ro {
             ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-              vec![(line_num, Event::OwnerGoOutOfScope { holds: *holds, early: early.clone() })]
+              vec![(line_num, Event::OwnerGoOutOfScope { holds: *holds, early: early.clone(), id: *id })]
             },
             ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
-              vec![(line_num, Event::RefGoOutOfScope { early: early.clone() })]
+              vec![(line_num, Event::RefGoOutOfScope { early: early.clone(), id: *id })]
             },
             ResourceAccessPoint::Function(func) => {
               panic!(
@@ -6551,13 +6471,13 @@ impl Visualizable for VisualizationData {
             ExternalEvent::InitRefParam{param: ro, id, own_param, in_pattern, rest} => {
                 maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::InitRefParam{param : ro.to_owned(), id: id, own_param, in_pattern, rest}, line_number);
             },
-            ExternalEvent::GoOutOfScope{ro, holds, early, ..} => {
+            ExternalEvent::GoOutOfScope{ro, holds, early, id} => {
                 match ro {
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-                        maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerGoOutOfScope { holds, early }, line_number);
+                        maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerGoOutOfScope { holds, early, id }, line_number);
                     },
                     ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
-                        maybe_append_event(self, &ResourceTy::Value(ro), Event::RefGoOutOfScope { early }, line_number);
+                        maybe_append_event(self, &ResourceTy::Value(ro), Event::RefGoOutOfScope { early, id }, line_number);
                     },
                     ResourceAccessPoint::Function(func) => {
                         panic!(

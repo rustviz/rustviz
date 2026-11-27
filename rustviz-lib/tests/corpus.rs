@@ -40737,3 +40737,262 @@ fn review_vec_staging_and_reachability() {
     assert!(tooltip_of_id(&svg, "head@L30:dot:move").unwrap().contains("iterator yields its elements by value"));
     assert!(tooltip_of_id(&svg, "s2@L6:dot:move").unwrap().contains("can't be used until"));
 }
+
+/// Compare the vertical positions of the dots, then the clauses on a shared
+/// dot. The facts harness already checks the underlying MIR events. These
+/// assertions also exercise arrow stacking and the replay of column events.
+fn drawn_clauses(timeline: &str, variable: &str, line: &str) -> Vec<(i32, i32, String)> {
+    let doc = roxmltree::Document::parse(timeline).unwrap();
+    let mut dots = Vec::new();
+    for dot in doc.descendants().filter(|e| e.attribute("data-rv-kind") == Some("dot")
+        && e.attribute("data-rv-var") == Some(variable) && e.attribute("data-rv-line") == Some(line)) {
+        let circle = dot.descendants().find(|n| n.has_tag_name("circle")).unwrap();
+        let x = circle.attribute("cx").unwrap().parse().unwrap();
+        let y = circle.attribute("cy").unwrap().parse().unwrap();
+        for clause in tooltip_lines(&timeline[dot.range()]).into_iter().flatten() {
+            dots.push((x, y, clause));
+        }
+    }
+    dots.sort_by_key(|&(_, y, _)| y);
+    dots
+}
+
+fn assert_drawn_sequence(fixture: &str, variable: &str, line: &str, clauses: &[&str]) {
+    let timeline = run_with_local_backend(fixture).timeline_panel_string();
+    let dots = drawn_clauses(&timeline, variable, line);
+    let mut iter = dots.iter();
+    for clause in clauses {
+        assert!(iter.any(|(_, _, tip)| tip.contains(clause)), "{fixture} {variable} line {line} needs {clauses:?} in order, got {dots:?}");
+    }
+}
+
+#[test]
+fn chain_call_reads_an_existing_borrow_1597() {
+    let fixture = "rv3_issues/1597_letchain_call_read_order";
+    assert_drawn_sequence(fixture, "x", "3", &["x immutably borrows a resource", "len reads from x", "x's immutable borrow ends"]);
+    assert_drawn_sequence(fixture, "o", "3", &["immutably borrowed by x", "no longer immutably borrowed", "mutably borrowed by as_mut"]);
+}
+
+#[test]
+fn one_line_else_finishes_the_loan_after_it_begins_1572() {
+    let svg = run_with_local_backend("rv3_issues/1572_oneline_else_end_order").timeline_panel_string();
+    let dots = drawn_clauses(&svg, "s", "4");
+    let (fork_x, fork_y, _) = dots.iter().find(|(_, _, tip)| tip.contains("len reads from s")).unwrap();
+    let mut borrow = dots.iter().filter(|(_, _, tip)| tip.contains("resource is mutably borrowed by r2"));
+    let mut end = dots.iter().filter(|(_, _, tip)| tip.contains("no longer mutably borrowed"));
+    let (start_x, start_y, _) = borrow.next().unwrap();
+    let (end_x, end_y, _) = end.next().unwrap();
+    assert!(borrow.next().is_none() && end.next().is_none());
+    assert!(start_x > fork_x && end_x == start_x && fork_y < start_y && start_y < end_y, "{dots:?}");
+    assert!(drawn_clauses(&svg, "r2", "3").iter().all(|(_, _, tip)| !tip.contains("r2's mutable borrow ends")));
+}
+
+#[test]
+fn same_line_repoint_reads_each_loan_in_turn_1668() {
+    assert_drawn_sequence("rv3_issues/1668_repoint_read_oneline", "r", "6",
+        &["len reads from r", "r's immutable borrow ends", "r immutably borrows a resource", "is_empty reads from r", "r's immutable borrow ends"]);
+    // Both calls have the same receiver and callee. rustc emits a different
+    // receiver reborrow for each side of the assignment.
+    assert_drawn_sequence("repoint_between_identical_calls_1668", "r", "5",
+        &["len reads from r", "r's immutable borrow ends", "r immutably borrows a resource", "len reads from r", "r's immutable borrow ends"]);
+}
+
+#[test]
+fn arm_reads_then_returns_its_borrow_1669() {
+    let fixture = "rv3_issues/1669_oneline_in_arm_end_order";
+    assert_drawn_sequence(fixture, "r", "4",
+        &["r immutably borrows a resource", "len reads from r", "r's immutable borrow ends"]);
+    assert_drawn_sequence(fixture, "s", "4",
+        &["immutably borrowed by r", "no longer immutably borrowed", "mutably borrowed by m"]);
+}
+
+#[test]
+fn while_chain_ends_the_test_borrow_before_the_overwrite_1714() {
+    assert_drawn_sequence("rv3_issues/1714_while_chain_overwrite_order", "o", "3",
+        &["immutably borrowed by x", "no longer immutably borrowed", "acquires ownership of a new resource"]);
+}
+
+#[test]
+fn ordered_rows_keep_the_source_read_and_the_previous_field_value() {
+    // The whole-struct store replaces the old field with a new one. In
+    // the second fixture building its RHS first reads the other reference.
+    assert_drawn_sequence("rv3_issues/1747_holder_overwritten_if", "hold.r", "7",
+        &["hold.r's immutable borrow ends", "hold.r immutably borrows a resource"]);
+    assert_drawn_sequence("rv3_issues/1766_overwrite_sibling_field_same_row", "other", "6",
+        &["other's reference is copied", "other's immutable borrow ends"]);
+    // The macro reads **b through the holder; return paths read x and
+    // release its loan before its StorageDead, even across drawing lists.
+    assert_drawn_sequence("advanced_deref3", "b", "12", &["println! reads from b", "b's mutable borrow ends"]);
+    assert_drawn_sequence("rv3_facts_review_1854", "x", "183",
+        &["len reads from x", "x's immutable borrow ends", "x goes out of scope"]);
+    // Two stores on one row form two successive references. Grouping
+    // their arrowheads must not turn them into one conditional value.
+    let rv = run_with_local_backend("rv3_issues/1718_field_two_writes_one_line");
+    let svg = rv.timeline_panel_string();
+    for id in ["t>h.r@L6:arrow:static_borrow", "u>h.r@L6:arrow:static_borrow"] {
+        assert!(roxmltree::Document::parse(&svg).unwrap().descendants()
+            .any(|node| node.attribute("data-rv-id") == Some(id)), "missing separate write {id}");
+    }
+    assert_drawn_sequence("closure_in_one_line_arm_1420", "_c", "25",
+        &["v (immutably borrowed), s (immutably borrowed)"]);
+}
+
+/// Use the fork on each column as its own x origin. A join dot cannot
+/// satisfy either arm assertion, even when both arms share a source row.
+#[test]
+fn mir_review_ends_on_each_taken_arm() {
+    for (fixture, holder, owner, action) in [
+        ("rv3_issues/1572_oneline_if_end_order_b", "m2", "s2", "len reads from s2"),
+        ("rv3_issues/1695_mut_read_then_oneline_if", "r", "s", "push reads from/writes to s"),
+    ] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let h = drawn_clauses(&svg, holder, "4");
+        let o = drawn_clauses(&svg, owner, "4");
+        let fork = |dots: &[(i32, i32, String)]| dots.iter()
+            .find(|(_, _, t)| t.contains("is live in a conditional")).unwrap().0;
+        let ends = h.iter().filter(|(_, _, t)| t == &format!("{holder}'s mutable borrow ends")).collect::<Vec<_>>();
+        assert_eq!(ends.len(), 2, "{fixture}: {h:?}");
+        assert!(ends.iter().any(|e| e.0 < fork(&h)));
+        let read = h.iter().position(|(x, _, t)| *x > fork(&h) && t.contains(&format!("len reads from {holder}"))).unwrap();
+        assert!(h[read + 1..].iter().any(|(x, _, t)| *x > fork(&h) && t.contains("mutable borrow ends")));
+        let left: Vec<_> = o.iter().filter(|(x, _, _)| *x < fork(&o)).map(|(_, _, t)| t).collect();
+        let release = left.iter().position(|t| t.contains("no longer mutably borrowed")).unwrap();
+        let access = left.iter().position(|t| t.contains(action)).unwrap();
+        assert!(release < access, "{fixture}: {left:?}");
+    }
+}
+
+#[test]
+fn mir_review_copy_keeps_original_mutable_loan() {
+    let case = "rv3_issues/1742_copy_chain_over_four_c";
+    assert_drawn_sequence(case, "x", "5", &["x's reference is copied", "shared reference made from a mutable borrow",
+        "x immutably borrows a resource"]);
+    let svg = run_with_local_backend(case).timeline_panel_string();
+    assert!(drawn_clauses(&svg, "x", "5").iter().all(|(_, _, t)| !t.contains("x's mutable borrow ends")));
+}
+
+#[test]
+fn mir_review_evaluates_arguments_before_receiver_activation() {
+    let case = "known_bugs/1621_two_phase_reborrow";
+    assert_drawn_sequence(case, "q", "22", &["q mutably borrows a resource", "len reads from q",
+        "push activates the mutable borrow", "receiver reserved before q was reassigned", "releases its borrow"]);
+}
+
+#[test]
+fn mir_review_straight_line_repoint() {
+    let case = "rv3_issues/1752_several_writes_one_line";
+    assert_drawn_sequence(case, "s", "3", &["no longer immutably borrowed", "push reads from/writes to s", "immutably borrowed by r"]);
+    let svg = run_with_local_backend(case).timeline_panel_string();
+    assert!(!timeline_tooltips(&svg).iter().any(|t| t.contains("paths that skip line 3")));
+}
+
+#[test]
+fn mir_review_slice_bindings_end_once_before_return() {
+    let svg = run_with_local_backend("rv3_issues/1606_two_bindings_one_arm_dot").timeline_panel_string();
+    for name in ["x", "rest"] {
+        let tips = drawn_clauses(&svg, name, "5");
+        assert_eq!(tips.iter().filter(|(_, _, t)| t == &format!("{name}'s immutable borrow ends")).count(), 1);
+        assert!(!tips.iter().any(|(_, _, t)| t.contains("still has no value")));
+        assert!(timeline_tooltips(&svg).iter().any(|t| t == &format!("{name}'s borrow has ended on this path")));
+    }
+}
+
+#[test]
+fn mir_review_last_closure_call_releases_capture() {
+    let svg = run_with_local_backend("move_closure_copy_capture").timeline_panel_string();
+    let tips = drawn_clauses(&svg, "t", "20");
+    assert!(tips.iter().any(|(_, _, t)| t.contains("println! reads from t through an implicit reference")));
+    assert!(!tips.iter().any(|(_, _, t)| t.contains("still immutably borrowed by r")));
+}
+
+#[test]
+fn mir_review_call_keeps_its_shared_input_shared() {
+    for (case, name, line, start) in [("known_bugs/1732_stored_loan_kinds", "q", "71", "68"),
+        ("known_bugs/1823_shared_ref_of_mut_hedge", "q24", "69", "66")] {
+        let svg = run_with_local_backend(case).timeline_panel_string();
+        assert!(drawn_clauses(&svg, name, line).iter().all(|(_, _, t)| !t.contains("no longer mutably borrowed")));
+        assert!(tooltip_of_id(&svg, &format!("{name}@L{start}-{line}:line:partial_privilege"))
+            .is_some_and(|t| t.contains("holds an immutable reference")));
+    }
+}
+
+#[test]
+fn mir_review_distinct_field_stores_preserve_old_loan() {
+    let svg = run_with_local_backend("rv3_issues/1718_field_two_writes_one_line").timeline_panel_string();
+    let writes: Vec<_> = drawn_clauses(&svg, "h.r", "6").into_iter()
+        .filter(|(_, _, t)| t.contains("h.r immutably borrows a resource")).collect();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert!(writes[0].1 < writes[1].1);
+    let ends = drawn_clauses(&svg, "s", "6");
+    let releases: Vec<_> = ends.iter().filter(|(_, _, t)| t.contains("no longer immutably borrowed")).collect();
+    assert_eq!(releases.len(), 1);
+    assert!(releases[0].1 >= writes[1].1);
+    // The after-row state is already free. Between the two drawn stores
+    // borrowck still rejects a write to s, including on the line's hover.
+    let middle = (writes[0].1 + writes[1].1) as f64 / 2.0;
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let shared = doc.descendants().filter(|n| n.attribute("data-rv-var") == Some("s")
+        && n.attribute("data-rv-kind") == Some("line")).any(|n| {
+        n.attribute("data-tooltip-text").is_some_and(|tip| tip.contains("being shared")) &&
+            n.descendants().any(|stroke| {
+                let y = |attr| stroke.attribute(attr).and_then(|s| s.parse::<f64>().ok());
+                y("y1").zip(y("y2")).is_some_and(|(lo, hi)| lo < middle && middle < hi)
+            })
+    });
+    assert!(shared, "s must remain shared between the two stores");
+    assert!(drawn_clauses(&svg, "h.r", "6").iter().any(|(_, _, t)|t.contains("borrow of s or t ends")));
+}
+
+#[test]
+fn mir_review_capture_and_handoff_keep_owned_intervals() {
+    let svg = run_with_local_backend("closure_in_one_line_arm_1420").timeline_panel_string();
+    for line in ["8", "13"] {
+        let dots = drawn_clauses(&svg, "_c", line);
+        let start = dots.iter().find(|(_, _, t)| t.contains("Closure _c captures")).unwrap();
+        let end = dots.iter().find(|(_, _, t)| t.contains("_c's immutable borrow ends")).unwrap();
+        assert!(start.1 < end.1);
+        assert!(tooltip_of_id(&svg, &format!("_c@L{line}:line:full_privilege")).is_some_and(|t| t.contains("_c owns a closure")));
+    }
+    let svg = run_with_local_backend("arm_ref_handoff_1333").timeline_panel_string();
+    assert!(tooltip_of_id(&svg,"r@L8:line:full_privilege").is_some_and(|t|
+        t.contains("r holds a mutable reference; it can read and write the borrowed resource")));
+}
+
+#[test]
+fn mir_review_copy_into_field_keeps_lender_shared() {
+    let svg = run_with_local_backend("rv3_issues/1766_overwrite_sibling_field_same_row").timeline_panel_string();
+    assert!(tooltip_of_id(&svg,"p.1@L6-7:line:partial_privilege").is_some_and(|t| t.contains("being shared")));
+    assert!(tooltip_of_id(&svg,"h.a@L6-7:line:partial_privilege").is_some_and(|t| t.contains("holds an immutable reference")));
+}
+
+#[test]
+fn mir_review_destructor_precedes_field_release() {
+    assert_drawn_sequence("drop_reads_replaced_reference", "h.value", "15",
+        &["can use this reference in its destructor before the replacement", "h.value immutably borrows a resource"]);
+}
+
+#[test]
+fn mir_review_one_store_can_have_two_lenders() {
+    let case = "field_repoint_call_alternatives";
+    assert_drawn_sequence(case, "h.r", "9", &["h.r immutably borrows a resource", "h.r immutably borrows a or b"]);
+    let svg = run_with_local_backend(case).timeline_panel_string();
+    assert!(drawn_clauses(&svg, "h.r", "11").iter().any(|(_,_,s)|s.contains("h.r immutably borrows b or c")));
+}
+
+
+#[test]
+fn mir_review_reassignment_drops_then_installs_without_a_borrow_end() {
+    let svg = run_with_local_backend("array_of_strings_drop").timeline_panel_string();
+    let title = tooltip_of_id(&svg, "again@L16:dot:owner_drop_at_reassign+acquire").unwrap();
+    assert!(title.contains("including every String it holds"));
+}
+
+
+#[test]
+fn mir_review_handoff_scope_follows_the_call_in_a_chain() {
+    for (case, row) in [("edition2024/chain_block_moves_ref_1262", "12"),
+        ("edition2024/whole_value_moved_by_chain_953", "40")] {
+        assert_drawn_sequence(case, "wr", row, &["wr is bound to a mutable reference",
+            "take reads and writes through wr", "wr's mutable borrow ends", "wr goes out of scope"]);
+    }
+}

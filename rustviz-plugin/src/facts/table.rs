@@ -767,7 +767,7 @@ mod tests {
     }
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
-        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, col: 1, arm, fact, order: (0, 0, 0), site: None }).collect();
+        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, col: 1, arm, fact, order: (0, 0, 0), site: None, successor: None }).collect();
         Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new() }
     }
 

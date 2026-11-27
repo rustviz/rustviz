@@ -1,6 +1,6 @@
 extern crate handlebars;
 
-use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, Event, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};
+use crate::svg_generator::data::{branch_is_collapsed, is_param_value_line, returned_closure, ExtBranchData, ExternalEvent, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, StaticLender, Visualizable, VisualizationData, FIRST_ROW_Y, OLD_FIRST_ROW_Y, LINE_SPACE};
 use crate::svg_generator::svg_frontend::{code_panel, rv_attrs, timeline_panel};
 use handlebars::Handlebars;
 use serde::Serialize;
@@ -128,7 +128,12 @@ fn stacked_arrow_rows(evs: &[ExternalEvent], top_level: bool) -> usize {
 /// println!("{}", s),` on `&opt` drew `s`'s borrow ending on the
 /// first row, above the row where `println!` reads through `s`.
 /// `in_arm`: the group is an arm's line map.
-fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<ExternalEvent>, Vec<ExternalEvent>) {
+fn split_same_line_borrow_ends(
+    group: &[ExternalEvent],
+    arm: Option<&ExtBranchData>,
+    layout: &crate::event_order::RowLayout,
+) -> (Vec<ExternalEvent>, Vec<ExternalEvent>) {
+    let in_arm = arm.is_some();
     let rap_hash = |r: &ResourceTy| r.extract_rap().map(|r| *r.hash());
     let ends = |e: &ExternalEvent| -> Option<(u64, u64)> {
         let (from, to) = ResourceAccessPoint_extract(e);
@@ -141,15 +146,14 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
     let is_end = |e: &ExternalEvent| matches!(e, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. });
     // An end that comes before a later borrow of the same lender on the
     // line that its loan can't overlap (`let a = &mut s; let b = &mut s;`,
-    // `let r = &s; let m = &mut s;`: `ends_before_lender_use` ordered it
-    // so) stays between the two, in the first rows. Moved below the
+    // `let r = &s; let m = &mut s;`) stays between the two, in the first rows. Moved below the
     // stack, s was borrowed by both at once (#1529).
     let before_conflicting_borrow = |k: usize| {
         let e = &group[k];
         let Some((h, l)) = ends(e).filter(|_| is_end(e)) else { return false };
         let mutable = matches!(e, ExternalEvent::MutableDie { .. });
         group[k + 1..].iter().any(|b| matches!(b, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
-            && (mutable || matches!(b, ExternalEvent::MutableBorrow { .. }))
+            && (mutable || matches!(b, ExternalEvent::MutableBorrow { .. }) || layout.precedes(e.get_id(), b.get_id()))
             && ends(b).is_some_and(|(bf, bt)| bf == l && bt != h))
     };
     let ends_a_borrow_here = |e: &ExternalEvent| is_end(e) && ends(e).map_or(false, |(f, t)| {
@@ -164,10 +168,20 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
         .filter(|e| matches!(e, ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }))
         .filter_map(|e| ResourceAccessPoint_extract(e).1.extract_rap().filter(|r| r.is_ref()).map(|r| *r.hash()))
         .collect();
-    let ends_a_received_borrow = |e: &ExternalEvent| split && is_end(e)
-        && ends(e).is_some_and(|(f, t)| f != t && received.contains(&f));
+    let ends_a_received_borrow = |e: &ExternalEvent| {
+        // Splitting an arm-local handoff makes the new reference’s live
+        // interval visible. A move across the arm boundary can have its
+        // scope exit in another drawing list. Keep that handoff together.
+        let moved_in = || arm.is_some_and(|arm| group.iter().any(|g| {
+            let ExternalEvent::Move { from, to, .. } = g else { return false };
+            to == ResourceAccessPoint_extract(e).0 && layout.precedes(g.get_id(), e.get_id())
+                && [from, to].iter().all(|p| p.extract_rap().is_some_and(|r| arm.decl_vars.contains(r)))
+        }));
+        is_end(e) && ends(e).is_some_and(|(f, t)| f != t && received.contains(&f)) && (split || moved_in())
+    };
     let mut moved: Vec<bool> = group.iter().enumerate()
-        .map(|(k, e)| (ends_a_borrow_here(e) || ends_a_received_borrow(e)) && !before_conflicting_borrow(k))
+        .map(|(k, e)| layout.later_field_effects.contains(&e.get_id())
+            || (ends_a_borrow_here(e) || ends_a_received_borrow(e)) && !before_conflicting_borrow(k))
         .collect();
     // The end of a reference that one of those ends gives its loan back
     // to (`let m2 = &mut *m; let r2 = &*m2;`, both ending on that line):
@@ -180,7 +194,7 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
         for (e, m) in group.iter().zip(moved.iter_mut()) {
             // (In an arm, also a reference parameter's end, its loan the
             // caller's, `vr.push(r)` with vr holding a loan of s too,
-            // #1512; the top level holds it back, `deferred_ends`.)
+            // #1512.)
             let (from, to) = ResourceAccessPoint_extract(e);
             let caller_end = in_arm && rap_hash(to).is_none();
             if !*m && is_end(e) && rap_hash(from).is_some_and(|f| (caller_end || rap_hash(to).is_some_and(|t| t != f)) && lenders.contains(&f)) {
@@ -200,7 +214,7 @@ fn split_same_line_borrow_ends(group: &[ExternalEvent], in_arm: bool) -> (Vec<Ex
     // borrow came back to it after the move.
     if split {
         for j in 0..group.len() {
-            if moved[j] || is_end(&group[j]) {
+            if moved[j] || is_end(&group[j]) || layout.field_generations.contains_key(&group[j].get_id()) {
                 continue;
             }
             let Some(src) = rap_hash(ResourceAccessPoint_extract(&group[j]).0) else { continue };
@@ -373,34 +387,6 @@ fn uses_ref_ended_in_front(o: &ExternalEvent, front: &[ExternalEvent], back: &[E
     front.iter().any(|e| ended_ref(e).is_some_and(|r| uses_rap(o, r) && other_is_fn(r) && !new_borrow_into(o, r, e.get_id())))
 }
 
-/// Whether `e`, one of a line's stacked arrows (`group`), ends the
-/// borrow of a reference that the line also uses otherwise: in
-/// another of its arrows, or in an event of the line not yet appended
-/// (`rest`). `*x += 1;` as x's last use copies out of `*x`, writes
-/// through it, and returns x's borrow, in that order. Appended first,
-/// the end came before the write in x's history, and the write then
-/// showed x holding a live `&mut` again down to its scope end (#587).
-///
-/// A borrow into the same holder recorded after the end (`s2 = Shelf {
-/// items: vec![w.as_str()] };` ends s2.items's borrow of v, then gives
-/// it w's) is its new borrow, not a use of the one that ends: the end
-/// stays first (#1097).
-///
-/// Nor is the borrow that gave the reference this loan, ahead of the end
-/// among the line's arrows (`let r = &s; let m = &mut s;` on one line):
-/// it is appended before the end anyway, and deferred, the end came
-/// after m's borrow of s, which it must precede (#1529).
-fn ends_after_line_uses(e: &ExternalEvent, group: &[ExternalEvent], rest: &[ExternalEvent]) -> bool {
-    let Some(r) = ended_ref(e) else { return false };
-    let at = group.iter().position(|o| o.get_id() == e.get_id());
-    let own_borrow = |k: usize, o: &ExternalEvent| at.is_some_and(|at| k < at)
-        && matches!(o, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
-        && ResourceAccessPoint_extract(o).1.extract_rap().is_some_and(|t| *t.hash() == r);
-    group.iter().enumerate().filter(|(k, o)| !own_borrow(*k, o)).map(|(_, o)| o).chain(rest)
-        .filter(|o| o.get_id() != e.get_id() && !new_borrow_into(o, r, e.get_id()))
-        .any(|o| uses_rap(o, r))
-}
-
 /// Whether `p` is a call lending (`PassByStaticReference` /
 /// `PassByMutableReference`) the variable that the borrow `b` borrows
 /// from, recorded before it: the call whose result b's reference gets.
@@ -497,12 +483,6 @@ fn ended_ref(e: &ExternalEvent) -> Option<u64> {
         return None;
     }
     ResourceAccessPoint_extract(e).0.extract_rap().map(|r| *r.hash())
-}
-
-/// Whether `e` ends a borrow of the reference `r` (its hash): a
-/// reborrow through r giving its borrow back.
-fn returns_to(e: &ExternalEvent, r: u64) -> bool {
-    ended_ref(e).is_some() && ResourceAccessPoint_extract(e).1.extract_rap().is_some_and(|t| *t.hash() == r)
 }
 
 fn uses_rap(e: &ExternalEvent, r: u64) -> bool {
@@ -1043,32 +1023,6 @@ fn nest_arm_ref_ends(events: &mut Vec<(usize, ExternalEvent)>, i: usize, skip: &
     moved.len()
 }
 
-/// A reference's own borrow end listed after its scope end on one row
-/// (`x goes out of scope / x's immutable borrow ends`) reads as the
-/// borrow ending once x is gone (#1277): it goes first.
-fn ends_before_scope_ends(history: &mut Vec<(usize, Event)>) {
-    for (_, e) in history.iter_mut() {
-        if let Event::Branch { branch_history, .. } = e {
-            for b in branch_history.iter_mut() {
-                ends_before_scope_ends(&mut b.e_data);
-            }
-        }
-    }
-    let mut i = 0;
-    while i < history.len() {
-        if matches!(history[i].1, Event::RefGoOutOfScope { .. } | Event::OwnerGoOutOfScope { .. }) {
-            let row = history[i].0;
-            let end = history[i + 1..].iter().position(|(l, e)| *l == row
-                && matches!(e, Event::StaticDie { .. } | Event::MutableDie { .. } | Event::RefDie { .. }));
-            if let Some(k) = end {
-                let ev = history.remove(i + 1 + k);
-                history.insert(i, ev);
-            }
-        }
-        i += 1;
-    }
-}
-
 /// Whether `e`, an event of an arm, is drawn on a column that joins
 /// after the conditional (`live_vars`). Not a scope end of a variable
 /// the arm declares, or the arm's value copied out to the caller, on a
@@ -1202,6 +1156,7 @@ impl OneLineArmGaps {
         forced: bool,
         disagree: bool,
         one_row_per_arm: &BTreeSet<usize>,
+        row_layout: &crate::event_order::RowLayout,
     ) -> Self {
         let spans: Vec<(usize, usize)> = (0..branches.len()).map(|j| branch_type.get_start_end(j)).collect();
         // Arm j and an earlier arm both have events on the line arm j
@@ -1221,7 +1176,7 @@ impl OneLineArmGaps {
         // copies of everything `mutate_branch_lines` changes.
         let stacks = || branches.iter().zip(&spans).any(|(b, &(start, _))| {
             mutate_branch_lines(&mut b.clone(), &mut l_map.clone(), 0, (line_num, start),
-                &mut binding_columns.to_vec(), &mut arrow_tracks.clone(), false, one_row_per_arm, &mut HashSet::new()) > 0
+                &mut binding_columns.to_vec(), &mut arrow_tracks.clone(), false, one_row_per_arm, &mut HashSet::new(), row_layout) > 0
         });
         let stacked: Vec<bool> = (0..spans.len())
             .map(|j| shares_row(j) && branches[..=j].iter().any(|b| stacks_on(b, spans[j].0)))
@@ -1423,6 +1378,7 @@ pub fn mutate_branch_lines(
     in_spread_arm: bool,
     one_row_per_arm: &BTreeSet<usize>,
     fork_above: &mut HashSet<usize>,
+    row_layout: &crate::event_order::RowLayout,
 ) -> usize {
     let old_extra_lines = extra_lines;
     let src_line: HashMap<usize, usize> = b_data.e_data.iter().map(|(l, e)| (e.get_id(), *l)).collect();
@@ -1466,7 +1422,7 @@ pub fn mutate_branch_lines(
             ExternalEvent::Branch {branches, split_point, merge_point, branch_type, live_vars, id, .. } => {
                 split_rows = (*merge_point > line_num).then_some((line_num, extra_lines));
                 *split_point = *l; // update split point
-                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, in_spread_arm, one_row_per_arm.contains(id), one_row_per_arm);
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, in_spread_arm, one_row_per_arm.contains(id), one_row_per_arm, row_layout);
                 for (j, branch) in branches.iter_mut().enumerate(){ // mutate branches
                     let (start, end) = branch_type.get_mut_start_end(j);
                     let before_gap = extra_lines;
@@ -1476,7 +1432,7 @@ pub fn mutate_branch_lines(
                     }
                     let pattern_lines = (line_num, *start);
                     *start += arm_start_shift(*start, line_num, before_gap, extra_lines);
-                    let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns, arrow_tracks, gaps.spread(), one_row_per_arm, fork_above);
+                    let b = mutate_branch_lines(branch, l_map, extra_lines, pattern_lines, binding_columns, arrow_tracks, gaps.spread(), one_row_per_arm, fork_above, row_layout);
                     extra_lines += b;
                     *end += extra_lines;
                 }
@@ -1529,7 +1485,7 @@ pub fn mutate_branch_lines(
                         0
                     }
                     Some(ev) => { // if there are multiple arrow events on this line
-                        let (front, back) = split_same_line_borrow_ends(&ev, true);
+                        let (front, back) = split_same_line_borrow_ends(&ev, Some(b_data), row_layout);
                         let back_line = new_line_num + front.len();
                         // As in `place_external_events`: the end of a
                         // reference a conditional nested later on this line
@@ -1545,7 +1501,7 @@ pub fn mutate_branch_lines(
                             if nested_later.contains(&e.get_id()) {
                                 continue;
                             }
-                            skippable_ev.insert(e.get_id()); // they all become skippable
+                            skippable_ev.insert(e.get_id());
                             let mut j = i;
                             while j < size { // need to mutate all their line numbers
                                 let (l, p_e) = b_data.e_data.get_mut(j).unwrap();
@@ -1662,6 +1618,36 @@ pub fn mutate_branch_lines(
         i += 1;
     }
 
+    // Events between two arrows on the same dot share that dot. The
+    // renderer also keeps off-map arrows here (an end in the parent
+    // line map, for instance), so they need the same coordinate.
+    let anchors: HashMap<_, _> = new_line_map.iter().flat_map(|(&row, group)|
+        group.iter().map(move |e| (e.get_id(), row))).collect();
+    let mut between = Vec::new();
+    let mut bounds = BTreeMap::new();
+    for (i, (_, ev)) in b_data.e_data.iter().enumerate() {
+        if let Some(&row) = anchors.get(&ev.get_id()) {
+            let src = src_line[&ev.get_id()];
+            if let Some((j, prev)) = bounds.insert(src, (i, row)) {
+                let next_lender = matches!(ev, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. })
+                    .then(|| ResourceAccessPoint_extract(ev).0.extract_rap()).flatten();
+                let between_anchors = |e: &ExternalEvent| row_layout.between(b_data.e_data[j].1.get_id(), e.get_id(), ev.get_id());
+                if prev == row && next_lender.is_some() && b_data.e_data[j+1..i].iter().any(|(_, e)|
+                    ended_ref(e).is_some() && between_anchors(e) && ResourceAccessPoint_extract(e).1.extract_rap() == next_lender
+                        && src_line.get(&e.get_id()) == Some(&src)) {
+                    // Only events on this source row lie between these
+                    // anchors; other branch rows have their own geometry.
+                    for k in j+1..i {
+                        let e = &b_data.e_data[k].1;
+                        if between_anchors(e) && !matches!(e, ExternalEvent::Branch { .. }) {
+                            between.push((k, row));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (k, row) in between { b_data.e_data[k].0 = row; }
     // replace line_map
     b_data.line_map = new_line_map;
     // A line's borrow ends laid out over several rows keep their order in
@@ -1957,6 +1943,11 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     // mutated while the global events are just re-added. Honestly there's probably a better way to do this
     // but it turned out this way because it's built on RV1 code.
     // It's disgusting because it needs to be a single pass.
+    // Layout chooses display rows and arrow tracks. Replay the events on
+    // each dot in the body's semantic order, including off-map call uses.
+    let sequence: HashMap<_, _> = visualization_data.preprocess_external_events.iter()
+        .enumerate().map(|(i, (_, e))| (e.get_id(), i)).collect();
+    let mut placed = Vec::new();
     let mut i: usize = 0;
     let mut size: usize = visualization_data.preprocess_external_events.len();
     let mut event_line_map_replace: BTreeMap<usize, Vec<ExternalEvent>> = BTreeMap::new();
@@ -2016,9 +2007,6 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     // Same as in `mutate_branch_lines`: (source line, visual row) for
     // the rest of a line whose borrow ends were moved down a row.
     let mut same_line_row: Option<(usize, usize)> = None;
-    // Borrow ends held back until the rest of their source line has been
-    // appended (see `ends_after_line_uses`): (source line, event, row).
-    let mut deferred_ends: Vec<(usize, ExternalEvent, usize)> = Vec::new();
     let mut first_lines: HashMap<u64, usize> = HashMap::new();
     first_event_lines(&visualization_data.preprocess_external_events, &mut first_lines);
     // The source line a conditional over several lines splits on, and the
@@ -2028,25 +2016,6 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     // further down, inside an arm (#1417).
     let mut split_rows: Option<(usize, usize)> = None;
     while i < size {
-        // Append each held-back borrow end once its line has no event
-        // left that uses the reference (so before the reference's own
-        // scope end on that line, which doesn't use it).
-        if !deferred_ends.is_empty() {
-            let pending = &visualization_data.preprocess_external_events[i..];
-            // Nor while another held-back end on its row gives a borrow
-            // back to it (`y`'s end of its reborrow through the parameter
-            // `t`, before `t`'s own; #1047).
-            let held = std::mem::take(&mut deferred_ends);
-            let (still, ready): (Vec<_>, Vec<_>) = held.iter().cloned().partition(|(src, e, row)| {
-                ended_ref(e).is_some_and(|r| pending.iter().any(|(l, o)| {
-                    l == src && !skippable_ev.contains(&o.get_id()) && uses_rap(o, r)
-                }) || held.iter().any(|(l, o, w)| l == src && w == row && o.get_id() != e.get_id() && returns_to(o, r)))
-            });
-            deferred_ends = still;
-            for (_, e, row) in ready {
-                visualization_data.append_processed_external_event(e, row);
-            }
-        }
         if matches!(visualization_data.preprocess_external_events[i].1, ExternalEvent::Branch { .. })
             && !skippable_ev.contains(&visualization_data.preprocess_external_events[i].1.get_id())
         {
@@ -2066,7 +2035,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 split_rows = (*merge_point > *split_point).then_some((*split_point, extra_lines));
                 *split_point += extra_lines;
                 branch_line = *line_num + extra_lines;
-                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, live_vars, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks, false, one_row_per_arm.contains(id), one_row_per_arm);
+                let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, *line_num, live_vars, &line_insertion_map, &visualization_data.binding_columns, &visualization_data.arrow_tracks, false, one_row_per_arm.contains(id), one_row_per_arm, &visualization_data.row_layout);
                 let extra_before = extra_lines;
                 for (j, branch) in branches.iter_mut().enumerate() {
                     let (start, end) = branch_type.get_mut_start_end(j);
@@ -2078,7 +2047,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     let pattern_lines = (*line_num, *start);
                     *start += arm_start_shift(*start, *line_num, before_gap, extra_lines);
                     // recurse into the branch
-                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns, &mut visualization_data.arrow_tracks, gaps.spread(), one_row_per_arm, &mut visualization_data.fork_above);
+                    let b = mutate_branch_lines(branch, &mut line_insertion_map, extra_lines, pattern_lines, &mut visualization_data.binding_columns, &mut visualization_data.arrow_tracks, gaps.spread(), one_row_per_arm, &mut visualization_data.fork_above, &visualization_data.row_layout);
                     extra_lines += b;
                     *end += extra_lines;
                 }
@@ -2203,21 +2172,6 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 let loop_iterator_end = matches!(&event,
                     ExternalEvent::StaticDie { static_lender: Some(StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. }), .. }
                     | ExternalEvent::MutableDie { static_lender: Some(StaticLender::LoopIterator { .. } | StaticLender::LoopHeadBorrow { .. }), .. });
-                // A reference parameter's end on a line where a reborrow
-                // through it gives its borrow back (`*y = 7;` as the last
-                // use of `y = t.get_mut(0).unwrap()`) comes after that
-                // end, as for a local's (#1047): it is held back until
-                // the line's arrows are appended, on the row of the one
-                // that gives the borrow back.
-                if let (true, Some(line_ev)) = (ref_param_ends, line_ev) {
-                    if let Some(r) = ended_ref(&event).filter(|r| line_ev.iter().any(|o| !skippable_ev.contains(&o.get_id()) && returns_to(o, *r))) {
-                        let (front, back) = split_same_line_borrow_ends(line_ev, false);
-                        let row = if back.iter().any(|o| returns_to(o, r)) { final_line_num + front.len() } else { final_line_num };
-                        deferred_ends.push((line_num, event.clone(), row));
-                        i += 1;
-                        continue;
-                    }
-                }
                 if (is_transfer && (from_fn || into_fn || matches!(to, ResourceTy::Caller) || into_unmodelled_place))
                     || bound_from_literal
                     || borrow_of_temporary
@@ -2238,7 +2192,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                             final_line_num - extras_at_source_line.iter().filter(|(s, _)| *s == line_num).map(|(_, ex)| *ex).sum::<usize>(),
                         _ => final_line_num,
                     };
-                    visualization_data.append_processed_external_event(event.clone(), row);
+                    placed.push((row, event.clone()));
                 }
                 i += 1;
                 continue;
@@ -2259,13 +2213,13 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     // drawn as the first arrow on its line, straight
                     // along the row (see `mutate_branch_lines`).
                     for e in &ev {
-                        visualization_data.append_processed_external_event(e.clone(), final_line_num);
+                        placed.push((final_line_num, e.clone()));
                         skippable_ev.insert(e.get_id());
                     }
                     0
                 }
                 Some(ev) => { // if there are multiple arrow events on this line
-                    let (mut front, mut back) = split_same_line_borrow_ends(&ev, false);
+                    let (mut front, mut back) = split_same_line_borrow_ends(&ev, None, &visualization_data.row_layout);
                     // A field's part of a new value that arrives after the
                     // line moves its whole struct away (`x = Pair { a: s2, b:
                     // x.into_a() }`, #1546) goes below the move, with the
@@ -2292,7 +2246,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         .collect();
                     for e in rest_of_line.iter().filter(|e| binds_source_of_line(e, &ev) || binds_borrower_of_line(e, &front)
                         || use_first.iter().any(|u| u.get_id() == e.get_id())) {
-                        visualization_data.append_processed_external_event(e.clone(), final_line_num);
+                        placed.push((final_line_num, e.clone()));
                         skippable_ev.insert(e.get_id());
                     }
                     for (e, row) in front.iter().map(|e| (e, final_line_num))
@@ -2310,7 +2264,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                             let lends: Vec<&ExternalEvent> = rest_of_line.iter().filter(|p| lends_for_borrow(p, e) && pos(p.get_id()) < at).collect();
                             for p in lends {
                                 if skippable_ev.insert(p.get_id()) {
-                                    visualization_data.append_processed_external_event(p.clone(), row);
+                                    placed.push((row, p.clone()));
                                 }
                             }
                         }
@@ -2324,7 +2278,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                             if skippable_ev.contains(&d.get_id()) {
                                 continue;
                             }
-                            visualization_data.append_processed_external_event(d.clone(), row);
+                            placed.push((row, d.clone()));
                             skippable_ev.insert(d.get_id());
                         }
                         // An arrow of the line map that an arm holds (a
@@ -2338,28 +2292,17 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         if nested_later.contains(&e.get_id()) {
                             continue;
                         }
-                        // append all the events in the line map on the same line
-                        // (An arrow out of a lender that the split put below
-                        // an end giving it back, which is held back, follows
-                        // it: the borrow is over before it, #1503.)
-                        let after_held_end = row == back_row && ended_ref(e).is_none()
-                            && ResourceAccessPoint_extract(e).0.extract_rap().is_some_and(|src| deferred_ends.iter()
-                                .any(|(l, d, w)| *l == line_num && *w == row && ResourceAccessPoint_extract(d).1.extract_rap().is_some_and(|t| t.hash() == src.hash())));
-                        if after_held_end || ends_after_line_uses(e, &ev, &rest_of_line) {
-                            deferred_ends.push((line_num, e.clone(), row));
-                        } else {
-                            visualization_data.append_processed_external_event(e.clone(), row);
-                        }
-                        skippable_ev.insert(e.get_id()); // they all become skippable
+                        placed.push((row, e.clone()));
+                        skippable_ev.insert(e.get_id());
                         // The struct's fields move with it, on its row (#1283).
                         for d in rest_of_line.iter().filter(|d| part_moves_with_whole(d, e)) {
                             if skippable_ev.insert(d.get_id()) {
-                                visualization_data.append_processed_external_event(d.clone(), row);
+                                placed.push((row, d.clone()));
                             }
                         }
                         for d in rest_of_line.iter().filter(|d| drop_at_arrival(d, e)) {
                             if skippable_ev.insert(d.get_id()) {
-                                visualization_data.append_processed_external_event(d.clone(), row);
+                                placed.push((row, d.clone()));
                             }
                         }
                     }
@@ -2367,7 +2310,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     // into shares the arrival's dot (#1223).
                     for e in rest_of_line.iter().filter(|e| follows_arrival_on_line(e, &ev, &rest_of_line)) {
                         if skippable_ev.insert(e.get_id()) {
-                            visualization_data.append_processed_external_event(e.clone(), final_line_num);
+                            placed.push((final_line_num, e.clone()));
                         }
                     }
                     // Stacked arrows draw at consecutive vertical positions
@@ -2403,7 +2346,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     to_insert
                 },
                 None => {
-                    visualization_data.append_processed_external_event(event.clone(), final_line_num);
+                    placed.push((final_line_num, event.clone()));
                     0
                 }
             };
@@ -2421,7 +2364,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 .filter(|(s, _)| *s == line_num)
                 .map(|(_, ex)| *ex)
                 .sum();
-            visualization_data.append_processed_external_event(event.clone(), final_line_num - same_line);
+            placed.push((final_line_num - same_line, event.clone()));
         }
         else {
             // Like a closure call, an event that draws no arrow and uses
@@ -2439,16 +2382,19 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                     .map(|(_, ex)| *ex)
                     .sum(),
             };
-            visualization_data.append_processed_external_event(event.clone(), final_line_num - same_line);
+            placed.push((final_line_num - same_line, event.clone()));
         }
 
         i += 1;
     }
-    for (_, e, row) in deferred_ends {
-        visualization_data.append_processed_external_event(e, row);
+    visualization_data.row_layout.align(&mut placed, &event_line_map_replace);
+    crate::event_order::replay(&mut placed, &sequence, &visualization_data.row_layout);
+    for (row, event) in placed {
+        visualization_data.append_processed_external_event(event, row);
     }
+
     for timeline in visualization_data.timelines.values_mut() {
-        ends_before_scope_ends(&mut timeline.history);
+        visualization_data.row_layout.project(&mut timeline.history);
     }
 
     info!("insert line map {:#?}", line_insertion_map);
@@ -2497,6 +2443,17 @@ fn sort_line_map_events(visualization_data: &mut VisualizationData) {
     for (_, event_vec) in &mut visualization_data.event_line_map {
         event_vec.sort_by_key(|e| !moves_into_fn(e));
         ends_after_own_borrows(event_vec);
+        // When a previous loan ends before a capture on this dot, the
+        // capture and its closure binding still share an endpoint. Keep
+        // the incoming captures on the shallower tracks at that endpoint.
+        for captures in visualization_data.row_layout.closure_captures.values() {
+            if captures.len() > 1 && event_vec.iter().any(|e| ended_ref(e).is_some() &&
+                event_vec.iter().any(|b| captures.contains(&b.get_id()) &&
+                    visualization_data.row_layout.precedes(e.get_id(), b.get_id()) &&
+                    ResourceAccessPoint_extract(e).1 == ResourceAccessPoint_extract(b).0)) {
+                event_vec.sort_by_key(|e| !captures.contains(&e.get_id()));
+            }
+        }
     }
     // sort all the line maps in the branch events
     for (_, e) in visualization_data.preprocess_external_events.iter_mut() {

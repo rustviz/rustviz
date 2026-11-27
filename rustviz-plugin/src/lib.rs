@@ -35,6 +35,7 @@ pub mod visitor;
 pub mod plugin;
 pub mod facts;
 pub mod borrow_ends;
+mod event_order;
 pub mod utils;
 pub mod expr_visitor;
 pub mod expr_visitor_utils;

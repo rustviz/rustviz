@@ -64,7 +64,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // in at 70-85 degrees along the column under the dot.
     ("assign_branch_reborrow_holder_1482", "arrow-along-leg", 1542),
     ("branch_holder_lenders_1404", "arrow-along-leg", 1542),
-    ("closure_field_capture_through_ref_1093", "arrow-along-leg", 1542),
     ("cond_holder_local_ref_1475", "arrow-along-leg", 1542),
     ("cond_holder_moved_1464", "arrow-along-leg", 1542),
     ("ctor_cond_assign_holder_1470", "arrow-along-leg", 1542),
@@ -79,7 +78,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("pattern_ref_several_lenders", "arrow-along-leg", 1542),
     ("store_through_mut_ref_1124", "arrow-along-leg", 1542),
     ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
-    ("two_field_borrow_through_ref_1080", "arrow-along-leg", 1542),
     // Programs kept from the closed 2.x fix PRs (known_bugs/README.md); each is tracked by the issue named.
     ("known_bugs/1578_match_scrutinee_ref_repointed", "invalid-state", 1578),
     ("known_bugs/1580_repoint_later_use", "event-on-dead-column", 1580),
@@ -92,10 +90,8 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1584_maybe_held_second_returning_if", "line-starts-nowhere", 1584),
     ("known_bugs/1585_unused_ref_binding_nested_return", "invalid-state", 1585),
     ("known_bugs/1585_unused_ref_binding_nested_return", "line-through-fork", 1585),
-    ("known_bugs/1586_cond_last_use_repointed_after", "line-through-fork", 1586),
     ("known_bugs/1587_loop_two_conditionals", "owner-after-maybe-moved-join", 1587),
     ("known_bugs/1587_maybe_held_reassign_after_loop", "owner-after-maybe-moved-join", 1587),
-    ("known_bugs/1597_chain_call_use_before_end", "invalid-state", 1597),
     ("known_bugs/1598_else_if_let_implicit_else_join", "fork-without-dot", 1598),
     ("known_bugs/1625_repoint_live_reborrow", "event-on-dead-column", 1625),
     ("known_bugs/1625_repoint_live_reborrow", "invalid-state", 1625),

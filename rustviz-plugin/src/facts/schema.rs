@@ -333,6 +333,9 @@ pub struct Ev {
     /// location (its order), so copies on two exits stay two events.
     #[serde(skip)]
     pub site: Option<(usize, usize, u8)>,
+    /// The successor of a borrow-end edge, in the same MIR order as `order`.
+    #[serde(skip)]
+    pub successor: Option<(usize, usize, u8)>,
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq)]
