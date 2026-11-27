@@ -89,6 +89,18 @@ pub enum TerminalArgument {
     Formatted,
 }
 
+pub struct ClosureResultLoans {
+    pub arrival: rustc_middle::mir::Location,
+    pub row: usize,
+    pub holders: BTreeMap<String, ClosureResultHolder>,
+}
+
+pub struct ClosureResultHolder {
+    pub loans: BTreeSet<usize>,
+    /// Loans also carried by an ordinary argument into this place.
+    pub argument_loans: BTreeSet<usize>,
+}
+
 #[derive(Serialize)]
 pub struct BodyFacts {
     /// Places a callee can write through a mutable operand, paired with
@@ -101,6 +113,9 @@ pub struct BodyFacts {
     /// Loans carried by the operands of this MIR aggregate, in operand order.
     #[serde(skip)]
     pub aggregate_loans: std::collections::HashMap<rustc_span::Span, Vec<AggregateLoan>>,
+    /// Loans from a closure operand that reach the named call destination.
+    #[serde(skip)]
+    pub closure_result_loans: std::collections::HashMap<(rustc_span::Span, String), ClosureResultLoans>,
     /// Loans carried by a non-receiver MIR operand into the receiver, indexed
     /// by the call and the receiver place.
     #[serde(skip)]

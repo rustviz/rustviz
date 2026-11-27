@@ -2420,6 +2420,15 @@ pub fn aggregate_arm_borrow(lender: &str, holder: &String, mutable: bool, condit
         styled_name_html(holder), lender, styled_name_html(holder))
 }
 
+pub fn closure_result_borrow(lender: &str, holder: &str, call: Option<&str>, mutable: bool, of_ref_var: bool) -> String {
+    let lender = styled_name_html(lender);
+    let holder = styled_name_html(holder);
+    let call = call.map_or_else(|| "the call".to_owned(), styled_name_html);
+    let place = if of_ref_var { format!("the binding {lender}") } else { lender };
+    let kind = if mutable { "mutable" } else { "shared" };
+    format!("After {call} returns, {holder} may hold a reference from the closure argument. The borrow checker keeps the {kind} borrow of {place} live while {holder} is in use")
+}
+
 pub fn conditional_aggregate_end(holder: &String, lender: &str) -> String {
     format!("If {} holds the borrow of {}, that borrow ends here", styled_name_html(holder), lender)
 }
@@ -3594,8 +3603,8 @@ pub fn state_holder_borrows_from(name: &str, sources: &[Option<String>]) -> Stri
     format!("{me} holds a value that borrows from {} ({me} isn't a reference itself)", place_list(sources, "and"))
 }
 
-/// The borrow checker can count loans through an option even when it is None.
-pub fn state_option_holds_loans(name: &String, copy: bool, lenders: &[Option<String>], temporary: bool) -> String {
+/// The borrow checker can count loans through a value such as an empty Option.
+pub fn state_value_holds_loans(name: &String, copy: bool, lenders: &[Option<String>], temporary: bool) -> String {
     let mut title = state_holder_starts_empty(name);
     if copy {
         title.push_str(". ");

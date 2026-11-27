@@ -7842,7 +7842,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `it = b.iter();` where `it` holds a borrow (#336). (Done before
     // the branches were visited when they pair it themselves.)
     if let (ResourceTy::Value(rap), false) = (&lhs_rty, paired_in_branch) {
-      if rap.holds_borrow() && !lhs_is_union_field && matches!(expr.kind, ExprKind::Assign(..)) {
+      if !rap.is_ref() && !lhs_is_union_field && matches!(expr.kind, ExprKind::Assign(..))
+        && (rap.holds_borrow() || (!self.has_member_columns(lhs_ty) && self.has_closure_result(rap.name(), pair_rhs))) {
         let rap = rap.clone();
         self.reassign_holder(&rap, pair_rhs, lhs_ty, line_num);
       }

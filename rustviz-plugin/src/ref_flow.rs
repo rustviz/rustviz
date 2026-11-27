@@ -1198,6 +1198,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// entries for mixed kinds and for constructors that reborrow through
   /// a reference operand (whose own loan can have a different kind).
   pub fn holder_lender_muts(&self, init: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool)> {
+    if let Some(tail) = plain_block_tail(init) {
+      return self.holder_lender_muts(tail);
+    }
+    if matches!(init.kind, ExprKind::Path(QPath::Resolved(..))) {
+      return expr_to_rap_name(init, &self.tcx)
+        .filter(|n| self.raps.get(n).is_some_and(|rd| rd.rap.holds_borrow()))
+        .and_then(|n| self.borrow_map.get(&n))
+        .map_or_else(Vec::new, |rd| rd.lender_muts.clone());
+    }
     // A single arm may hold only shared or only mutable loans. Compare the
     // actual loans from all arms before choosing the holder's end kinds.
     let borrows = match holder_branch_bodies(init) {

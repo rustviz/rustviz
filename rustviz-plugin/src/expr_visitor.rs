@@ -17,6 +17,7 @@ use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
 use rustc_borrowck::consumers::BodyWithBorrowckFacts;
 use crate::facts::schema::{BodyFacts, LoanInfo};
+use crate::ref_flow::holder_branch_bodies;
 
 
 pub(crate) struct Transfer<'a> {
@@ -345,6 +346,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub end_loans: BTreeMap<usize, Vec<usize>>,
   /// Renderer event to the precise loan issued while evaluating an aggregate.
   pub aggregate_issues: BTreeMap<usize, usize>,
+  /// Renderer event to the MIR write that delivered the result.
+  pub closure_result_arrivals: BTreeMap<usize, rustc_middle::mir::Location>,
   /// Operand arrows whose loan need not have been taken on the path to its end.
   conditional_aggregate_ends: Vec<(ResourceTy, ResourceTy, usize)>,
   pub mir_body: &'a Body<'tcx>, 
@@ -1174,6 +1177,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       emitting_span: None,
       end_loans: BTreeMap::new(),
       aggregate_issues: BTreeMap::new(),
+      closure_result_arrivals: BTreeMap::new(),
       conditional_aggregate_ends: Vec::new(),
       row_layout: Default::default(),
       facts: None,
@@ -3309,20 +3313,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// holder when declared (`register_holder`); now that the branch has
   /// been visited, t also holds what that branch's value borrows.
   pub(crate) fn add_arm_holder_lenders(&mut self, name: &str, body: &'tcx Expr<'tcx>) {
-    if !self.raps.get(name).is_some_and(|rd| rd.rap.holds_borrow()) {
-      return;
-    }
     let Some(value) = branch_value_expr(body) else { return };
     let Some(ty) = self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value) else { return };
+    let mut closure_kinds = Vec::new();
+    let mut closure_lenders = Vec::new();
+    self.extend_closure_result_lenders(name, name, value, &mut closure_lenders, &mut closure_kinds);
+    if !self.raps.get(name).is_some_and(|rd| rd.rap.holds_borrow())
+      && (closure_lenders.is_empty() || !self.mark_holder(name)) {
+      return;
+    }
     // A branch of `let k = Some(if c { let r = &s1; r } else { .. });`
     // gives a reference the branch declared (#1453): k's value holds it,
     // so k borrows what it borrows, now that the branch has made it.
-    let (found, is_mut) = if ty.is_ref() {
+    let (mut found, is_mut) = if ty.is_ref() {
       let (lender, _, co) = self.get_ref_data_co(value);
       (std::iter::once(lender).chain(co).collect(), ty.ref_mutability().is_some_and(|m| m.is_mut()))
     } else {
       self.holder_lenders(value, ty)
     };
+    found.extend(closure_lenders);
     let line = expr_to_line(value, &self.tcx);
     for l in found.into_iter().filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_))) {
       let aliasing = get_aliasing_data(&l, &self.borrow_map);
@@ -3355,6 +3364,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             through: Vec::new(),
           });
         }
+      }
+    }
+    if let Some(rd) = self.borrow_map.get_mut(name) {
+      for (lender, mutable) in closure_kinds {
+        Self::record_lender_kind(&mut rd.lender_muts, &lender, mutable);
       }
     }
   }
@@ -7456,20 +7470,47 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if !matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) || init.span.from_expansion() {
       return;
     }
+    self.register_call_member_lenders(name, name, init, ty, false);
+  }
+
+  fn register_call_member_lenders(&mut self, root: &str, name: &str, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>, reassigning: bool) {
     // A tuple's elements too (`let q = pair(&s);`, #1341).
+    let closure_result = self.closure_result(root, init);
     for (field_name, field_ty) in self.member_fields(ty) {
       let fname = format!("{}.{}", name, field_name);
+      let has_fields = self.has_member_columns(field_ty);
+      if closure_result.is_some() && has_fields {
+        self.register_call_member_lenders(root, &fname, init, field_ty, reassigning);
+      }
+      if reassigning && !closure_result.is_some_and(|r| r.holders.contains_key(&fname)) {
+        continue;
+      }
       // A field drawn as one column that holds a borrow (`items:
       // Vec<&'a str>`) becomes a holder, as in a struct literal (#1088).
-      let holder = !field_ty.is_ref() && !self.has_member_columns(field_ty)
+      let holder = !field_ty.is_ref() && !has_fields
         && field_ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)))
         && matches!(self.raps.get(&fname).map(|rd| &rd.rap), Some(ResourceAccessPoint::Struct(Struct { is_member: true, .. })));
       if !holder && !self.borrow_map.contains_key(&fname) {
         continue;
       }
-      let (mut lenders, _, is_mut) = self.call_field_lenders(init, &field_name);
+      let (mut lenders, is_mut) = if reassigning {
+        // Signature lenders were resolved before overwriting the old fields.
+        self.borrow_map.get(&fname).map_or_else(|| (Vec::new(), false), |rd| {
+          let lenders = rd.all_lenders().into_iter().filter(|l| !matches!(l, ResourceTy::Anonymous)).collect();
+          (lenders, rd.ref_mutability)
+        })
+      } else if root == name {
+        let (lenders, _, is_mut) = self.call_field_lenders(init, &field_name);
+        (lenders, is_mut)
+      } else {
+        // The closure facts identify deeper projected fields.
+        (Vec::new(), false)
+      };
+      let mut lender_muts = Vec::new();
       let mut through = Vec::new();
-      if holder && self.narrow_holder_lenders(&fname, init, &mut lenders, &mut Vec::new(), &mut through) && lenders.is_empty() {
+      let narrowed = holder && self.narrow_holder_lenders(&fname, init, &mut lenders, &mut lender_muts, &mut through);
+      self.extend_closure_result_lenders(root, &fname, init, &mut lenders, &mut lender_muts);
+      if narrowed && lenders.is_empty() {
         self.mark_holder(&fname);
         continue;
       }
@@ -7491,14 +7532,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           borrow_span: None,
           loan_line: None,
           co_lenders: lenders,
-          lender_muts: Vec::new(),
+          lender_muts,
           through,
         });
       } else if let Some(rd) = self.borrow_map.get_mut(&fname) {
         rd.lender = lender;
         rd.co_lenders = lenders;
         rd.aliasing = aliasing;
-        self.note_loan_kinds(&fname, init);
+        if lender_muts.is_empty() {
+          self.note_loan_kinds(&fname, init);
+        } else {
+          rd.lender_muts = lender_muts;
+        }
       }
     }
   }
@@ -7531,9 +7576,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let mut lender_muts = self.holder_lender_muts(rhs);
     let mut through = Vec::new();
     self.narrow_holder_lenders(&name, rhs, &mut lenders, &mut lender_muts, &mut through);
+    self.extend_closure_result_lenders(&name, &name, rhs, &mut lenders, &mut lender_muts);
     if lenders.is_empty() {
       return;
     }
+    self.mark_holder(&name);
     let lender = lenders.remove(0);
     let aliasing = get_aliasing_data(&lender, &self.borrow_map);
     self.borrow_map.insert(name, RefData {
@@ -7648,6 +7695,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       self.note_loan_kinds(&fname, rhs);
     }
+    if self.closure_result(st.name(), rhs).is_some() {
+      self.register_call_member_lenders(st.name(), st.name(), rhs, ty, true);
+    }
   }
 
   /// `hold = H { r: &t };`: the reference fields' loans in
@@ -7750,7 +7800,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // references stored in v, not a borrow of v (#1094): a holder of
     // borrows whose own lenders all went is still one.
     let mut through = Vec::new();
-    if self.narrow_holder_lenders(name, init, &mut lenders, &mut lender_muts, &mut through) && lenders.is_empty() {
+    let narrowed = self.narrow_holder_lenders(name, init, &mut lenders, &mut lender_muts, &mut through);
+    self.extend_closure_result_lenders(name, name, init, &mut lenders, &mut lender_muts);
+    if narrowed && lenders.is_empty() {
       self.mark_holder(name);
       return;
     }
@@ -7812,6 +7864,62 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       lender_muts,
       through,
     });
+  }
+
+  fn closure_result(&self, root: &str, call: &Expr<'_>) -> Option<&'a crate::facts::schema::ClosureResultLoans> {
+    self.body_facts?.closure_result_loans.get(&(call.span.with_parent(None), root.to_owned()))
+  }
+
+  pub fn has_closure_result(&self, holder: &str, value: &'tcx Expr<'tcx>) -> bool {
+    let Some(value) = branch_value_expr(value) else { return false };
+    self.closure_result(holder, value).is_some_and(|r| r.holders.contains_key(holder))
+      || holder_branch_bodies(value).is_some_and(|arms|
+        arms.into_iter().any(|arm| self.has_closure_result(holder, arm)))
+  }
+
+  fn closure_result_lender(&self, loan: &crate::facts::LoanInfo) -> Option<ResourceTy> {
+    if !matches!(loan.kind, "shared" | "mut") || loan.through.is_some() { return None; }
+    self.raps.get(&loan.lender).map(|r| ResourceTy::Value(r.rap.clone()))
+  }
+
+  fn record_lender_kind(kinds: &mut Vec<(ResourceTy, bool)>, lender: &ResourceTy, mutable: bool) {
+    if let Some((_, was_mutable)) = kinds.iter_mut().find(|(l, _)| l == lender) {
+      *was_mutable |= mutable;
+    } else {
+      kinds.push((lender.clone(), mutable));
+    }
+  }
+
+  /// Visit the value-producing calls individually so an arm contributes
+  /// only the loans recorded at its own MIR call.
+  fn extend_closure_result_lenders(&self, root: &str, holder: &str, value: &'tcx Expr<'tcx>,
+                                  lenders: &mut Vec<ResourceTy>, kinds: &mut Vec<(ResourceTy, bool)>) {
+    let Some(facts) = self.body_facts.filter(|f| !f.closure_result_loans.is_empty()) else { return };
+    let Some(value) = branch_value_expr(value) else { return };
+    if let Some(arms) = holder_branch_bodies(value) {
+      for arm in arms {
+        self.extend_closure_result_lenders(root, holder, arm, lenders, kinds);
+      }
+      return;
+    }
+    let Some(result) = self.closure_result(root, value).and_then(|r| r.holders.get(holder)) else { return };
+    for loan in facts.loans.iter().filter(|l| result.loans.contains(&l.loan)) {
+      let Some(lender) = self.closure_result_lender(loan) else { continue };
+      Self::record_lender_kind(kinds, &lender, loan.kind == "mut");
+      if !lenders.contains(&lender) {
+        lenders.push(lender);
+      }
+    }
+  }
+
+  /// Keep the signature arrow only if a distinct ordinary argument loan
+  /// can account for it. One loan carried by both operands gets one arrow.
+  fn closure_result_supplies_lender(&self, root: &str, holder: &str, call: &Expr<'_>, lender: &ResourceTy) -> bool {
+    let Some(result) = self.closure_result(root, call).and_then(|r| r.holders.get(holder)) else { return false };
+    let Some(facts) = self.body_facts else { return false };
+    let mut matching = facts.loans.iter().filter(|l| self.closure_result_lender(l).as_ref() == Some(lender));
+    matching.clone().any(|l| result.loans.contains(&l.loan))
+      && !matching.any(|l| result.argument_loans.contains(&l.loan) && !result.loans.contains(&l.loan))
   }
 
   /// Whether a branch of the `if` / `match` `init` that a `let` binds a
@@ -9342,6 +9450,7 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   };
   let lenders: Vec<_> = rd.all_lenders().into_iter()
     .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) && own.contains(l))
+    .filter(|l| !self.closure_result_supplies_lender(lhs_rap.name(), lhs_rap.name(), call, l))
     .collect();
   if lenders.is_empty() {
     return false;
@@ -9483,6 +9592,7 @@ pub fn emit_struct_field_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'
     let frap = frap.rap.to_owned();
     let lenders: Vec<ResourceTy> = rd.all_lenders().into_iter()
       .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
+      .filter(|l| !self.closure_result_supplies_lender(&st.name, &fname, call, l))
       .collect();
     // A reference field whose argument has no column (`part("a")`, a
     // call's result we don't track): the field still gets its value
@@ -10504,8 +10614,41 @@ pub(crate) fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_m
 // This function does the work of adding an event for let stmts
 pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     let outer = self.emitting_span.replace(rhs.span);
-    self.match_rhs_at(lhs, rhs, evt);
+    self.match_rhs_at(lhs.clone(), rhs, evt);
+    self.draw_closure_result_borrows(&lhs, rhs);
     self.emitting_span = outer;
+  }
+
+  /// The call's usual initialization runs before the arrows for the
+  /// loans its closure operands contribute to the returned value.
+  fn draw_closure_result_borrows(&mut self, holder: &ResourceTy, call: &Expr<'_>) {
+    let ResourceTy::Value(root) = holder else { return };
+    let Some(result) = self.closure_result(root.name(), call) else { return };
+    let Some(facts) = self.body_facts else { return };
+    let func = match call.kind {
+      ExprKind::Call(f, _) => hirid_to_var_name(f.hir_id, &self.tcx),
+      ExprKind::MethodCall(segment, ..) => Some(segment.ident.to_string()),
+      _ => None,
+    };
+    for (name, field) in &result.holders {
+      let Some(rap) = self.raps.get(name).map(|rd| rd.rap.clone()) else { continue };
+      if !rap.holds_borrow() && !rap.is_ref() { continue; }
+      for loan in facts.loans.iter().filter(|loan| field.loans.contains(&loan.loan)) {
+        let Some(lender) = self.closure_result_lender(loan) else { continue };
+        let mutable = loan.kind == "mut";
+        let id = *self.unique_id;
+        let of_ref_var = lender.is_ref();
+        self.closure_result_arrivals.insert(id, result.arrival);
+        if !rap.is_ref() {
+          self.row_layout.closure_result_holders.insert(*rap.hash());
+        }
+        self.row_layout.aggregate_titles.insert(id, crate::svg_generator::hover_messages::closure_result_borrow(
+          &lender.name(), rap.name(), func.as_deref(), mutable, of_ref_var,
+        ));
+        let evt = if mutable { Evt::MBorrow } else { Evt::SBorrow };
+        self.add_borrow_ev_of_ref_var(result.row, evt, ResourceTy::Value(rap.clone()), lender, false, of_ref_var);
+      }
+    }
   }
 
   fn match_rhs_at(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
