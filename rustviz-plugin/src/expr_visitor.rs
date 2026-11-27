@@ -31,7 +31,7 @@ pub(crate) struct Transfer<'a> {
 pub(crate) struct Reborrow<'a> {
   pub loan: &'a LoanInfo,
   pub through: ResourceAccessPoint,
-  holder: &'a str,
+  pub holder: &'a str,
 }
 
 // A struct to help with appending ExternalEvents
@@ -2158,8 +2158,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // right-hand side runs first, so the value moves out and then comes
     // back with the new value. Its column draws the move before the
     // acquire, as for a destructuring cycle (#1343, #1411).
-    if let ExternalEvent::Move { from: ResourceTy::Value(from), to: ResourceTy::Value(to), id, .. } = &event {
-      if from.hash() == to.hash() && !self.moves_out_first.contains(id) {
+    if let ExternalEvent::Move { from, to, id, .. } = &event {
+      let reorder = match (from, to) {
+        (ResourceTy::Value(from), ResourceTy::Value(to)) => from.hash() == to.hash(),
+        // MIR proves there is no old payload to drop when this store runs.
+        (ResourceTy::Deref(from), ResourceTy::Deref(to)) =>
+          matches!(to.place_write(), PlaceWrite::AssignOverMoved) && from.hash() == to.hash(),
+        _ => false,
+      };
+      if reorder && !self.moves_out_first.contains(id) {
         self.moves_out_first.push(*id);
       }
     }
@@ -2346,7 +2353,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if *self.unique_id <= id {
         *self.unique_id = id + 1;
       }
-      self.move_struct_fields_away(line_num, b.name());
+      self.move_struct_fields_away(line_num, b.name(), &format!("*{}", b.name()));
       if let Some(to_name) = struct_name(to) {
         self.bind_struct_fields(line_num, &to_name);
       }
@@ -2386,6 +2393,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if to_struct.is_none() && !pass_through {
         return;
       }
+      let parent = match event {
+        ExternalEvent::Move { carried_with: Some((parent, _)), to: ResourceTy::Anonymous, .. } => parent,
+        _ => &from_name,
+      };
       for child in from_children {
         let field = &child.name()[from_name.len() + 1..];
         let dest = match (&to_struct, to) {
@@ -2402,26 +2413,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if is_copy && to_struct.is_none() {
           continue;
         }
-        let child_name = child.name().clone();
-        let carried_with = to_struct.as_ref().filter(|_| child.is_copy_owner() && !is_copy && !matches!(dest, ResourceTy::Anonymous))
-          .map(|to| (from_name.clone(), to.clone()));
+        // Preserve the root of an anonymous transfer while its nested
+        // fields are propagated. Only Copy fields use the Copy wording.
+        let carried_with = (!is_copy && (child.is_copy_owner()
+          || (matches!(dest, ResourceTy::Anonymous) && matches!(child, ResourceAccessPoint::Struct(_)))))
+          .then(|| (parent.clone(), to.name()));
         let from_child = ResourceTy::Value(child);
         let ev_id = *self.unique_id;
         *self.unique_id += 1;
-        let to_anonymous = matches!(dest, ResourceTy::Anonymous);
         let ev = if is_copy {
           ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None }
         } else {
           ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, carried_with, via_try: None, closure_value: false }
         };
         self.add_external_event(line_num, ev);
-        // A nested struct field moved into a function / closure
-        // (`drop(o)` moves `o.inner.v` too) goes to an Anonymous
-        // target, which the recursion through the synthesized event
-        // above doesn't follow; move its own fields here.
-        if to_anonymous && !is_copy {
-          self.move_struct_fields_away(line_num, &child_name);
-        }
       }
     } else if let Some(to_name) = to_struct {
       self.bind_struct_fields(line_num, &to_name);
@@ -2660,9 +2665,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// took the whole struct). No extra arrows: the struct's own arrow
   /// shows where the value went. Also the parts of a Box's payload
   /// moved out whole (`*b`, [`box_payload_of`]).
-  pub(crate) fn move_struct_fields_away(&mut self, line_num: usize, parent: &str) {
-    for child in self.struct_children(parent) {
-      let name = child.name().clone();
+  pub(crate) fn move_struct_fields_away(&mut self, line_num: usize, fields_of: &str, parent: &str) {
+    for child in self.struct_children(fields_of) {
+      let carried_with = Some((parent.to_owned(), String::new()));
       let ev_id = *self.unique_id;
       *self.unique_id += 1;
       self.add_external_event(line_num, ExternalEvent::Move {
@@ -2674,10 +2679,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         loop_head: LoopHead::No,
         break_alt: None,
         break_out: false,
-        carried_with: None, via_try: None,
+        carried_with, via_try: None,
         closure_value: false,
       });
-      self.move_struct_fields_away(line_num, &name);
     }
   }
 
@@ -3621,6 +3625,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       maybe_init: None,
       payload: false,
       contents_gone: false,
+      skipped: false,
     });
     *self.unique_id += 1;
   }
@@ -4223,7 +4228,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       (self.tcx.trait_of_assoc(method) == self.tcx.lang_items().fn_once_trait()
         && args.first()?.node.place() == Some(assignment.0)).then_some(bb)
     });
+    let staged = body.source_info(location).span.with_parent(None);
+    let skipped = self.body_facts.and_then(|facts| facts.effect_sites.get(&staged))
+      .is_some_and(|sites| sites.contains(&(location.block, false)));
     let timing = match invocation {
+      _ if skipped => CallTiming::Skipped,
       None => CallTiming::Never,
       Some(bb) if bb != location.block => CallTiming::AfterArguments,
       Some(_) => CallTiming::Direct,
@@ -5918,6 +5927,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
+  /// The drop of the Box payload on the normal assignment path.
+  pub(crate) fn box_payload_drop_at(&self, lhs: &Expr<'_>, box_owner: &ResourceAccessPoint) -> Option<&'static str> {
+    use rustc_middle::mir::{ProjectionElem, TerminatorKind};
+    let local = box_owner.owner_local()?;
+    let mut kinds = self.effects.get(&lhs.span.with_parent(None))?.iter().filter_map(|(_, ev)| {
+      let crate::facts::Fact::Drop { how, at_reassign: true, early_exit: None, .. } = ev.fact else { return None };
+      if ev.drop_route != crate::facts::DropRoute::Normal { return None; }
+      let TerminatorKind::Drop { place, .. } = self.mir_body.basic_blocks[ev.location.block].terminator().kind else { return None };
+      (place.local == local && place.projection.as_slice() == [ProjectionElem::Deref]).then_some(how)
+    });
+    let how = kinds.next()?;
+    kinds.all(|other| other == how).then_some(how)
+  }
+
   /// The outgoing value of an assignment drops after its RHS has finished.
   /// rustc attributes this terminator to the LHS, even for a multiline RHS.
   pub(crate) fn reassign_drop_at(&self, lhs: &Expr<'_>, target: &ResourceAccessPoint) -> Option<(usize, bool)> {
@@ -5997,7 +6020,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.approx_notes.push(ApproxNote::VecElement { id: *self.unique_id, staged, drops_on_exit, repeat, nested });
     self.add_ev(row, kind, to.clone(), src, false);
     if moved_whole {
-      self.move_struct_fields_away(row, path);
+      self.move_struct_fields_away(row, path, path);
     }
     !matches!(to, ResourceTy::Anonymous)
   }
@@ -6471,7 +6494,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let arg_ty = tycheck_results.node_type(arg.hir_id);
     let is_copyable = self.ty_is_copy(arg_ty, arg.hir_id.owner);
     // `take(p.x)` / `look(&p.name)` with p a reference (#266).
-    let from_ro = self.borrow_source(arg);
+    let mut from_ro = self.borrow_source(arg);
+    // A call to a consuming closure stages the receiver before making a
+    // separate result. An outer call receives the result, even when the
+    // receiver was consumed earlier in a labeled block's break operand.
+    if !arg_ty.is_ref() && from_ro.is_closure() {
+      if let ExprKind::Call(callee, _) = arg.kind {
+        if tycheck_results.type_dependent_def_id(arg.hir_id)
+          .is_some_and(|d| self.tcx.trait_of_assoc(d) == self.tcx.lang_items().fn_once_trait())
+          && self.transfer_at(callee).is_some_and(|t| matches!(t.kind, Evt::Move))
+        {
+          from_ro = hirid_to_var_name(callee.hir_id, &self.tcx)
+            .and_then(|n| self.raps.get(&fn_key(&n)))
+            .map_or(ResourceTy::Anonymous, |r| ResourceTy::Value(fn_result_rap(arg, r.rap.clone(), &self.tcx)));
+        }
+      }
+    }
     // Extend the lifetime of any reference RAP this arg touches so a
     // ref passed as a fn argument shows its dotted lifetime line out
     // to the call site. Critical for macro args like
@@ -9352,8 +9390,7 @@ pub fn register_iflet_let_bindings(
     // the pattern took, #627.)
     for v in moved_into_scrutinee {
         for r in self.tuple_scrutinee_unbound(&v, &moved_by_pattern) {
-            let event = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r), *self.unique_id, false);
-            *self.unique_id += 1;
+            let event = self.tuple_scrutinee_move(&v, r, into_tuple.clone());
             self.add_external_event(let_line, event);
         }
     }
@@ -10279,6 +10316,18 @@ pub fn tuple_scrutinee_unbound(&self, var: &ResourceAccessPoint, taken: &[Resour
         out.extend(self.tuple_scrutinee_unbound(&c, taken));
     }
     out
+}
+
+pub(crate) fn tuple_scrutinee_move(&mut self, root: &ResourceAccessPoint, field: ResourceAccessPoint, into: ResourceTy) -> ExternalEvent {
+    let carried_with = (field != *root && field.is_copy_owner())
+        .then(|| (root.name().clone(), into.name()));
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    let mut event = self.ext_ev_of_evt(Evt::Move, into, ResourceTy::Value(field), id, false);
+    if let ExternalEvent::Move { carried_with: parent, .. } = &mut event {
+        *parent = carried_with;
+    }
+    event
 }
 
 /// A `ref` / `ref mut` binding out of a tuple-literal scrutinee's

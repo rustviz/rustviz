@@ -1122,6 +1122,32 @@ impl Order<'_, '_> {
             && !ends.is_empty() && ends.is_subset(&restored)
     }
 
+    fn shadowed_borrow_lender(&self, ev: &E) -> Option<String> {
+        let (E::MutableBorrow { from, to, via: None, .. } | E::StaticBorrow { from, to, via: None, .. }) = ev else {
+            return None;
+        };
+        let span = self.spans.get(&ev.get_id())?;
+        let holder = place(to)?;
+        let mut loans = self.facts.loans.iter().filter(|loan| loan.runs
+            && loan.direct_holders.contains(&holder) && names_lender(from, loan)
+            && loan.issue.is_some_and(|at| span.contains(self.body.source_info(at).span))
+            && self.facts.columns.iter().any(|c| c.name == loan.lender));
+        let loan = loans.next()?;
+        if loans.next().is_some() { return None; }
+        let at = loan.issue?;
+        let stmt = self.body.basic_blocks[at.block].statements.get(at.statement_index)?;
+        let rustc_middle::mir::StatementKind::Assign(assignment) = &stmt.kind else { return None };
+        let rustc_middle::mir::Rvalue::Ref(_, _, borrowed) = &assignment.1 else { return None };
+        // The display distinguishes shadowed bindings by giving them a
+        // different label from the MIR debug name for that same local.
+        let shadowed = self.facts.bindings.locals.get(&borrowed.local).is_some_and(|label| {
+            self.body.var_debug_info.iter().any(|var| matches!(var.value,
+                rustc_middle::mir::VarDebugInfoContents::Place(p) if p.as_local() == Some(borrowed.local))
+                && var.name.as_str() != label)
+        });
+        shadowed.then(|| loan.lender.clone())
+    }
+
     fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout) {
         let mut lines: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, (line, ev)) in events.iter_mut().enumerate() {
@@ -1129,6 +1155,9 @@ impl Order<'_, '_> {
                 for arm in branches {
                     self.order_list(&mut arm.e_data, &mut arm.line_map, layout);
                 }
+            }
+            if let Some(lender) = self.shadowed_borrow_lender(ev) {
+                layout.shadowed_borrow_lenders.insert(ev.get_id(), lender);
             }
             lines.entry(*line).or_default().push(i);
         }
@@ -1341,6 +1370,7 @@ pub struct RowLayout {
     /// Both column dots and the connecting arrow describe the same aggregate operand.
     pub(crate) pattern_payloads: BTreeMap<usize, (String, &'static str)>,
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
+    pub(crate) shadowed_borrow_lenders: BTreeMap<usize, String>,
     pub(crate) closure_result_holders: BTreeSet<u64>,
     pub(crate) stored_lender_loans: BTreeMap<u64, BTreeSet<usize>>,
     pub(crate) stored_loans: BTreeMap<usize, StoredLoan>,
@@ -1385,6 +1415,7 @@ impl RowLayout {
         self.arm_points.append(&mut other.arm_points);
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.aggregate_titles.append(&mut other.aggregate_titles);
+        self.shadowed_borrow_lenders.append(&mut other.shadowed_borrow_lenders);
         self.closure_result_holders.append(&mut other.closure_result_holders);
         self.stored_lender_loans.append(&mut other.stored_lender_loans);
         self.restored.append(&mut other.restored);

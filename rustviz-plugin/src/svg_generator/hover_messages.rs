@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainRef, ChainUse, FailPath, NoValueBefore, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, TiedInputs, ViaCarrier};
+use crate::svg_generator::data::{AltRuntime, ArgTie, ChainFailHow, ChainRef, ChainUse, FailPath, NoValueBefore, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, TiedInputs, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -499,6 +499,10 @@ pub fn event_dot_ref_init_from_caller(my_name: &String, is_mut: bool) -> String 
 // is drawn on top of the regular Acquire dot at the same position,
 // so this tooltip is the only one a user can hover; it has to
 // communicate both events.
+pub fn event_dot_replace_at_place(place: &str) -> String {
+    format!("The old value at {} is dropped and the replacement is stored there", styled_name_html(place))
+}
+
 pub fn event_dot_owner_drop_at_reassign(my_name: &String, note: &str) -> String {
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
@@ -542,8 +546,6 @@ pub fn event_dot_owner_drop_at_reassign_box_contents_moved(my_name: &String) -> 
 // decides). This writes into the existing Box. `holds`: the
 // Box's `Owner::holds` (`the String it holds`).
 pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Option<&str>, maybe: Option<bool>) -> String {
-    // (Starts ". Its previous ", so it subsumes the line's plain
-    // acquire: `reassign_subsumes_acquire`.)
     let ty = holds.and_then(|h| h.strip_suffix(" it holds")).and_then(|t| t.strip_prefix("the "));
     let what = ty.map_or_else(|| String::from("contents"), escape_tooltip_name);
     let plural = ty.is_none();
@@ -557,7 +559,7 @@ pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Optio
             what, if plural { "are" } else { "is" }, moved_above(by_cond), if plural { "them" } else { "it" }
         ),
     };
-    format!("{} acquires ownership of a new resource. {}", styled_name_html(deref_name), rest)
+    format!("A value is stored at {}. {}", styled_name_html(deref_name), rest)
 }
 
 // Scope end of a Box whose contents need no drop (`Box<P>`, P with no
@@ -965,7 +967,7 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
             .is_some_and(|(name, tail)| (tail.starts_with(" is dropped") || tail.starts_with(" (including "))
                 && acquire.strip_prefix(name).is_some_and(|rest| rest.starts_with(" acquires ownership of the resource the `?` takes out of ")));
     };
-    reassign.strip_prefix(name)
+    reassign == skipped_reassignment(name) || reassign.strip_prefix(name)
         .and_then(|rest| rest.strip_prefix(" acquires ownership of a new resource"))
         .is_some_and(|rest| {
             rest.strip_prefix("; its previous resource")
@@ -1198,10 +1200,16 @@ pub fn try_drop_before_own_try(drop_text: &str) -> Option<String> {
 pub fn try_drop_then_reassign(drop_text: &str, reassign: &str) -> Option<String> {
     let (head, owner) = drop_text.split_once(". If the `?` succeeds, nothing happens to ")?;
     owner.strip_suffix(" here.")?;
-    if !reassign.contains(" acquires ownership of a new resource") {
+    if !reassign.contains(" acquires ownership of a new resource")
+        && !reassign.starts_with("The old value at ") {
         return None;
     }
     let reassign = reassign.strip_suffix('.').unwrap_or(reassign);
+    // Mid-sentence, after the colon.
+    let reassign = match reassign.strip_prefix("The old value at ") {
+        Some(rest) => format!("the old value at {rest}"),
+        None => reassign.to_owned(),
+    };
     Some(format!("{head}. If the `?` succeeds, the assignment runs: {reassign}."))
 }
 
@@ -3453,6 +3461,19 @@ pub fn event_dot_assignment_join(name: &str, drops: bool) -> String {
     format!("{me} may have no value when this block ends. The borrow checker considers the break as well as fallthrough. It can't prove that {me} holds an assigned value on both, so {me} can't be used here.{scope_end}")
 }
 
+pub fn event_dot_skipped_assignment_join(name: &str) -> String {
+    let me = styled_name_html(name);
+    format!("The borrow checker considers the break as well as fallthrough, so {me} may have no value when this block ends and can't be used here. At runtime the block skips the assignment.")
+}
+
+pub fn event_dot_skipped_reassignment(name: &str) -> String {
+    skipped_reassignment(&styled_name_html(name))
+}
+
+fn skipped_reassignment(name: &str) -> String {
+    format!("The borrow checker treats {name} as assigned on this path. The assignment is skipped at runtime.")
+}
+
 pub fn state_maybe_init(name: &str, cell: &crate::facts::table::Cell) -> String {
     let Some(mixed) = cell.mixed_init else { return state_maybe(name, cell.cause) };
     let moved = match (mixed.imaginary_move, mixed.whole_move) {
@@ -3592,6 +3613,17 @@ pub fn event_dot_branch_merge_maybe_moved_no_snapshot(name: &str, value: bool, n
 pub fn state_imaginary_unassigned(name: &str) -> String {
     let me = styled_name_html(name);
     format!("{me} is assigned on every path that runs. The borrow checker also checks an unreachable path that skips the assignment, so {me} can't be used here")
+}
+
+pub fn event_dot_runtime_assigned(name: &str, resource: bool, mutable: bool, reassigned: Option<bool>, drop_note: &str) -> String {
+    let name = styled_name_html(name);
+    let until = if mutable { " until it's assigned again" } else { "" };
+    let mut title = format!("{name} holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so {name} can't be used here{until}.");
+    if resource {
+        let (holds, note) = split_drop_note(drop_note);
+        title.push_str(&format!(" Its resource{holds} is dropped {}{note}.", drop_time(&name, reassigned)));
+    }
+    title
 }
 
 /// 2.x's "s's resource is being shared by one or more variables", and who
@@ -5701,6 +5733,11 @@ pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block:
     }
 }
 
+pub fn event_dot_runtime_block_move(name: &str) -> String {
+    let name = styled_name_html(name);
+    format!("{name} was consumed on every path that completes the block at runtime. The borrow checker rejects uses of {name} after the block")
+}
+
 // At the end of a labeled block (#1286), for a variable declared before
 // it that the code on the way to the block's end moves, after a `break`
 // out of the block that skips that code: `'a: { if c { break 'a 1; }
@@ -6496,6 +6533,11 @@ pub fn break_alt_receiver_suffix() -> String {
 /// break_alt_receiver_suffix for `alt`'s construct: a labeled block can
 /// also end at its last expression (#1134).
 pub fn break_alt_receiver_suffix_for(alt: &crate::svg_generator::data::BreakAlt) -> String {
+    match alt.runtime {
+        AltRuntime::Selected => return format!(" (from {})", alt_how(alt)),
+        AltRuntime::Skipped => return String::new(),
+        AltRuntime::Possible => {}
+    }
     match alt.end {
         crate::svg_generator::data::AltEnd::Loop => break_alt_receiver_suffix(),
         _ => break_alt_block_receiver_suffix(),
@@ -6508,8 +6550,17 @@ fn break_alt_block_receiver_suffix() -> String {
 
 /// Appended to the source's dot and to the arrow: the copy or move
 /// happened only if this `break` ended the loop.
+pub fn skipped_break_alt(alt: &crate::svg_generator::data::BreakAlt) -> Option<String> {
+    (alt.runtime == AltRuntime::Skipped)
+        .then(|| format!("At runtime, the {} skips {}", alt_noun(alt), alt_how(alt)))
+}
+
 pub fn break_alt_if_suffix(alt: &crate::svg_generator::data::BreakAlt) -> String {
-    format!(", if the {} ended with {}", alt_noun(alt), alt_how(alt))
+    match alt.runtime {
+        AltRuntime::Selected => format!(", when the {} ends with {}", alt_noun(alt), alt_how(alt)),
+        AltRuntime::Skipped => format!(". This exit is skipped at runtime"),
+        AltRuntime::Possible => format!(", if the {} ended with {}", alt_noun(alt), alt_how(alt)),
+    }
 }
 
 /// The lender's dot when a `break` borrows from it for the receiver
@@ -6519,6 +6570,7 @@ pub fn break_alt_if_suffix(alt: &crate::svg_generator::data::BreakAlt) -> String
 /// used while the borrow is live"): rustc rejects that use while the
 /// receiver is live whichever `break` ran.
 pub fn with_break_alt_lend(title: &str, alt: &crate::svg_generator::data::BreakAlt) -> String {
+    if let Some(skipped) = skipped_break_alt(alt) { return skipped; }
     let suffix = break_alt_if_suffix(alt);
     // The clauses' "; ", not the end of an escaped entity (`&gt; `)
     // in a styled name.
@@ -6544,7 +6596,17 @@ pub fn event_dot_break_alt_move(my_name: &String, to: &String, alt: &crate::svg_
     } else {
         format!("{0}'s {1}", name, what)
     };
-    if alt.in_loop {
+    if let Some(skipped) = skipped_break_alt(alt) {
+        let first = format!("{skipped}.");
+        if alt.in_loop {
+            format!("{first} The borrow checker still checks the move of {moved}")
+        } else {
+            format!("{first} The borrow checker still checks the move of {moved}, so {name} can't be used after the {noun}")
+        }
+    } else if alt.runtime == AltRuntime::Selected {
+        let restriction = if alt.in_loop { String::new() } else { format!(", so {name} can't be used after the {noun}") };
+        format!("{moved} is moved to {to} when the {noun} ends with {how}{restriction}")
+    } else if alt.in_loop {
         format!("{0} is moved to {1} if the {noun} ended with {2}", moved, to, how)
     } else {
         format!(
@@ -6563,8 +6625,10 @@ pub fn event_dot_break_alt_move_to_caller(my_name: &String, alt: &crate::svg_gen
     } else {
         format!("{0}'s {1}", name, what)
     };
-    // (Or a labeled block, #1288.)
-    format!("{0} is moved to the caller if the {1} ended with {2}", moved, alt_noun(alt), alt_how(alt))
+    if let Some(skipped) = skipped_break_alt(alt) { return skipped; }
+    let when = if alt.runtime == AltRuntime::Selected { "when" } else { "if" };
+    let verb = if alt.runtime == AltRuntime::Selected { "ends" } else { "ended" };
+    format!("{moved} is moved to the caller {when} the {} {verb} with {}", alt_noun(alt), alt_how(alt))
 }
 
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
@@ -6580,6 +6644,7 @@ pub fn event_dot_closure_call_once(
     let f = styled_name_html(my_name);
     use crate::svg_generator::data::CallTiming;
     let prefix = match timing {
+        CallTiming::Skipped => return format!("The call to {f} is skipped at runtime"),
         CallTiming::Never => return format!("{f} is moved before the arguments are evaluated. The call never starts."),
         CallTiming::AfterArguments => format!("{f} is moved before the arguments are evaluated. If they finish, "),
         CallTiming::Direct => String::new(),
@@ -6776,13 +6841,30 @@ pub fn arrow_end_title(from: &ResourceTy, to: &ResourceTy, static_lender: Option
     format!("If {holder} holds a {borrow} affecting {place}, that borrow ends here. It no longer restricts access to {place}")
 }
 
+pub fn event_dot_copy_field_in_moved_parent(field: &str, parent: &str) -> String {
+    format!("{} moves as a whole, so {} is no longer accessible here. The field is still Copy",
+        styled_name_html(parent), styled_name_html(field))
+}
+
+pub fn event_dot_copy_field_into_tuple(field: &str, parent: &str, tuple: &str) -> String {
+    format!("{} moves as a whole into {}, carrying {} with it. The field is still Copy",
+        styled_name_html(parent), format!("the temporary tuple {}", styled_name_html(tuple)), styled_name_html(field))
+}
+
+pub fn event_dot_copy_field_returned(field: &str, parent: &str) -> String {
+    format!("{} moves as a whole to the caller, carrying {} with it. The field is still Copy",
+        styled_name_html(parent), styled_name_html(field))
+}
+
 /// The full title of an arrow between two columns: `arrow_title`, then
 /// where it comes from and goes to, then the special cases (a returned
 /// call result, an `Rc` call, a borrow ending, a `break` alternative, a
 /// borrow a call result keeps).
 pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, option_ref: bool) -> String {
     if let ExternalEvent::Move { carried_with: Some((parent, dest)), .. } = external_event {
-        return field_carried_with(&from.name(), &to.name(), parent, dest);
+        if !matches!(to, ResourceTy::Caller | ResourceTy::Anonymous) {
+            return field_carried_with(&from.name(), &to.name(), parent, dest);
+        }
     }
     let mut title = arrow_title(external_event);
     // complete title
@@ -6859,6 +6941,9 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
          | ExternalEvent::Copy { break_alt: Some(alt), .. }
          | ExternalEvent::StaticBorrow { break_alt: Some(alt), .. }
          | ExternalEvent::MutableBorrow { break_alt: Some(alt), .. } = external_event {
+        if let Some(skipped) = skipped_break_alt(alt) {
+            return skipped;
+        }
         title.push_str(&break_alt_if_suffix(alt));
     }
     if let ExternalEvent::StaticBorrow { via: Some(via), .. }
@@ -6892,6 +6977,15 @@ pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &Resource
             format!("{title}: the borrow checker keeps {all} borrowed while {field} is in use")
         }
     }
+}
+
+pub fn is_forwarded_borrow(tie: &ArgTie, lenders: usize) -> bool {
+    lenders >= 2 && tie.tied.len() == 1 && tie.stored_in.is_empty() && !tie.via_outlives && !tie.holds_all
+}
+
+pub fn event_dot_forwarded_borrow(name: &String, via: &crate::svg_generator::data::BorrowVia, lenders: &[String]) -> String {
+    let suffix = arrow_borrow_via_call_suffix(name, &via.func, lenders, via.also_unnamed, &via.tie, via.carrier, &via.passed_on, false);
+    format!("The borrow checker tracks {} as possible lenders for {}{suffix}", or_list(lenders), styled_name_html(name))
 }
 
 /// The field's own dot where those borrows start (`arrow_field_lenders_title`).
@@ -7219,6 +7313,10 @@ pub fn event_dot_loop_runs_on(my_name: &str, owns: bool, exits: LoopExits, moved
 /// reaches it: there is nothing left to drop.
 pub fn event_dot_no_resource_dropped_suffix() -> String {
     ". No resource is dropped.".to_owned()
+}
+
+pub fn runtime_drop_flag() -> &'static str {
+    " Rust tracks this with a runtime drop flag."
 }
 
 /// A scope end that drops the column's resource; `drop_note` is the

@@ -179,6 +179,19 @@ pub struct BodyFacts {
     /// Mutable reborrows of a whole referent at the operand's MIR source span.
     #[serde(skip)]
     pub implicit_mut_reborrows: BTreeSet<(rustc_span::Span, rustc_middle::mir::Local)>,
+    /// Assignment and call sites, with their reachability on the runtime CFG.
+    #[serde(skip)]
+    pub effect_sites: BTreeMap<rustc_span::Span, Vec<(rustc_middle::mir::BasicBlock, bool)>>,
+    /// MIR replacement drops keyed by the LHS span and its local. A site
+    /// can be lowered more than once, so this records whether any copy runs.
+    #[serde(skip)]
+    pub reassignment_sites: BTreeMap<(rustc_span::Span, rustc_middle::mir::Local), bool>,
+    /// Drop sites with a flag before the additional runtime CFG refinements.
+    #[serde(skip)]
+    pub drop_flags: BTreeSet<rustc_middle::mir::Location>,
+    /// Drop sites where one part of the place has its own flag.
+    #[serde(skip)]
+    pub drop_part_flags: BTreeSet<(rustc_middle::mir::Location, String)>,
     /// Borrow issues whose references are staged directly in an aggregate.
     #[serde(skip)]
     pub issued_operand_loans: BTreeSet<usize>,
@@ -285,9 +298,10 @@ pub struct Join {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub changes: BTreeMap<String, JoinChange>,
     /// A real write reaches this join on one edge. The other leaves the
-    /// place empty (false), or skips initialization only in borrowck (true).
+    /// place empty (`Sometimes`), skips initialization only in borrowck
+    /// (`Always`), or runs no write at all (`Skipped`).
     #[serde(skip)]
-    pub assignments: BTreeMap<String, bool>,
+    pub assignments: BTreeMap<String, JoinAssignment>,
     #[serde(skip)]
     pub dead_implicit_else: bool,
 }
@@ -317,6 +331,13 @@ pub struct JoinChange {
     pub test_writes_on_all_paths: bool,
     pub writes_away: bool,
     pub entry_own: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JoinAssignment {
+    Sometimes,
+    Always,
+    Skipped,
 }
 
 pub struct BindingSource {
@@ -725,10 +746,17 @@ pub struct State {
     /// Loans live through an Option field or a reference to the whole Option.
     #[serde(skip)]
     pub option_holds: BTreeMap<String, Vec<usize>>,
-    /// Borrow checking includes an unreachable path skipping initialization.
-    /// The place is initialized on every executable path to this boundary.
+    /// Borrow checking permits an empty place here, but every executable
+    /// path reaches this boundary with the place initialized.
     #[serde(skip)]
     pub always_assigned: BTreeSet<String>,
+    /// The runtime paths all moved the place, but borrow checking still
+    /// counts a path that holds a value (a write only a dead path reaches).
+    #[serde(skip)]
+    pub borrowck_maybe: BTreeSet<String>,
+    /// A partial value whose remaining fields have no destructor to run.
+    #[serde(skip)]
+    pub partial_without_drop: BTreeSet<String>,
     /// For a possibly empty place, a later assignment before scope exit on
     /// every (true) or only some (false) continuing runtime paths.
     #[serde(skip)]
@@ -773,6 +801,13 @@ pub struct Row {
     /// Used for the straight segment that meets it, including at CFG joins.
     #[serde(skip)]
     pub before: Option<State>,
+    /// Whether any of this row's forward incoming edges can execute.
+    #[serde(skip)]
+    pub runtime_entry: Option<bool>,
+    /// Bindings initialized by a labeled-block result on this row,
+    /// at the end of the row on paths through MIR's completed-binding read.
+    #[serde(skip)]
+    pub completed_bindings: Vec<State>,
     #[serde(skip)]
     pub block_end: bool,
     /// The row's code that runs leaves it only by jumps past the next row
@@ -847,6 +882,8 @@ pub struct Arm {
     pub edge: SwitchEdge,
     #[serde(skip)]
     pub runs: bool,
+    #[serde(skip)]
+    pub runs_at_runtime: bool,
     /// Index of the branch on this row (one per `SwitchInt` with arms
     /// here), and of the arm within it (MIR successor order).
     pub branch: usize,

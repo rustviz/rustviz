@@ -14,7 +14,7 @@
 //! (`code_line_attrs`).
 
 use crate::expr_visitor_utils::display_text;
-use crate::svg_generator::data::{Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceTy, State, VisualizationData};
+use crate::svg_generator::data::{AltRuntime, BreakAlt, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceTy, State, VisualizationData};
 use std::collections::HashMap;
 
 /// Element kinds (`data-rv-kind`).
@@ -161,6 +161,8 @@ fn escape(s: &str) -> String {
 /// `docs/element-ids.md`).
 pub fn event_name(e: &Event) -> &'static str {
     match e {
+        Event::Move { break_alt: Some(BreakAlt { runtime: AltRuntime::Skipped, .. }), .. }
+        | Event::Duplicate { break_alt: Some(BreakAlt { runtime: AltRuntime::Skipped, .. }), .. } => SKIPPED_EXIT,
         Event::Acquire { .. } => "acquire",
         Event::Duplicate { .. } => "duplicate",
         Event::Copy { .. } => "copy",
@@ -209,10 +211,16 @@ pub fn event_name(e: &Event) -> &'static str {
 /// split dot is `branch`.
 pub const BRANCH_JOIN: &str = "branch_join";
 
+/// A note on a transfer belonging to an exit the runtime skips.
+pub const SKIPPED_EXIT: &str = "skipped_exit";
+
 /// `data-rv-event` of an arrow, call icon or function logo: the
 /// `ExternalEvent` variant, in snake_case.
 pub fn external_event_name(e: &ExternalEvent) -> &'static str {
     match e {
+        ExternalEvent::Move { break_alt, .. } | ExternalEvent::Copy { break_alt, .. }
+        | ExternalEvent::StaticBorrow { break_alt, .. } | ExternalEvent::MutableBorrow { break_alt, .. }
+            if break_alt.as_ref().is_some_and(|alt| alt.runtime == AltRuntime::Skipped) => SKIPPED_EXIT,
         ExternalEvent::Bind { .. } => "bind",
         ExternalEvent::Copy { .. } => "copy",
         ExternalEvent::Move { .. } => "move",

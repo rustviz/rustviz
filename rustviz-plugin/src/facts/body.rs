@@ -1525,6 +1525,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             t.kind = TerminatorKind::Goto { target: real_target };
         }
     }
+    // Borrow boundaries and display paths still refer to the original MIR
+    // locations. The runtime dataflow below can clone a loop entry.
+    let real_predecessors = rt_body.basic_blocks.predecessors().clone();
     // Blocks that run: borrowck checks the imaginary ones too (states keep
     // its view), but events only happen on code that runs.
     let mut runs: BTreeSet<rustc_middle::mir::BasicBlock> = BTreeSet::new();
@@ -1537,6 +1540,63 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
     }
+    // Drop elaboration runs before the constant and range refinements.
+    // Record a runtime flag even if the executable paths all set it.
+    let drop_body = rt_body.clone();
+    let drop_md = MoveData::gather_moves(&drop_body, tcx, |_| true);
+    let mut drop_init = MaybeInitializedPlaces::new(tcx, &drop_body, &drop_md)
+        .iterate_to_fixpoint(tcx, &drop_body, None).into_results_cursor(&drop_body);
+    let mut drop_uninit = MaybeUninitializedPlaces::new(tcx, &drop_body, &drop_md)
+        .iterate_to_fixpoint(tcx, &drop_body, None).into_results_cursor(&drop_body);
+    let mut drop_flags = BTreeSet::new();
+    let mut drop_part_flags = BTreeSet::new();
+    let mut reassignment_sites = BTreeMap::<_, bool>::new();
+    // Keep the checked CFG for usability and for describing the effects
+    // in source arms. Runtime initialization also excludes a switch edge
+    // when MIR supplies a constant condition.
+    for data in rt_body.basic_blocks_mut().iter_mut() {
+        let TerminatorKind::SwitchInt { discr, targets } = &data.terminator().kind else { continue };
+        let constant = match discr {
+            Operand::Constant(c) => Some(c),
+            Operand::Copy(place) | Operand::Move(place) => data.statements.last().and_then(|s| {
+                let StatementKind::Assign(a) = &s.kind else { return None };
+                let Rvalue::Use(Operand::Constant(c)) = &a.1 else { return None };
+                (place == &a.0 && place.as_local().is_some()).then_some(c)
+            }),
+            _ => None,
+        };
+        if let Some(value) = constant.filter(|c| c.const_.ty().is_bool())
+            .and_then(|c| c.const_.try_eval_bool(tcx, typing_env)) {
+            data.terminator_mut().kind = TerminatorKind::Goto { target: targets.target_for_value(u128::from(value)) };
+        }
+    }
+    let runtime_copies = super::runtime::enter_nonempty_ranges(tcx, typing_env, &mut rt_body);
+    let mut executes = BTreeSet::new();
+    let mut work = vec![rustc_middle::mir::START_BLOCK];
+    while let Some(bb) = work.pop() {
+        if (bb.index() >= body.basic_blocks.len() || runs.contains(&bb)) && executes.insert(bb) {
+            work.extend(rt_body.basic_blocks[bb].terminator().successors());
+        }
+    }
+    // The original MIR locations remain the identities used by source rows.
+    // Runtime dataflow must read every reachable execution of each location.
+    let runtime_blocks = |bb| std::iter::once(bb)
+        .chain(runtime_copies.get(&bb).into_iter().flatten().copied())
+        .filter(|b| executes.contains(b));
+    let runtime_locations = |loc: Location| runtime_blocks(loc.block)
+        .map(move |block| Location { block, ..loc });
+    let executes_at = |block| runtime_blocks(block).next().is_some();
+    let original_blocks: BTreeMap<_, _> = runtime_copies.iter()
+        .flat_map(|(&original, copies)| copies.iter().map(move |&copy| (copy, original))).collect();
+    let original_location = |loc: Location| Location {
+        block: original_blocks.get(&loc.block).copied().unwrap_or(loc.block),
+        ..loc
+    };
+    let runtime_rows = Rows { body: &rt_body, tcx };
+    let executed_successors = |loc: Location| -> BTreeSet<Location> {
+        runtime_locations(loc).flat_map(|at| runtime_rows.real_succs(at))
+            .filter(|s| executes.contains(&s.block)).map(original_location).collect()
+    };
     let rt_md = MoveData::gather_moves(&rt_body, tcx, |_| true);
     let rt_moved_entry = maybe_moved_entry(&rt_body, &rt_md);
     // Keep the row and loan model's executable edges. Repeated Boolean
@@ -1557,14 +1617,30 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // this edge to dominate the target before using block dominance to
     // establish which enclosing decisions an issuance depends on.
     let dom = rt_body.basic_blocks.dominators();
-    let exclusive_edges: Vec<_> = switches.iter().map(|s| s.edge).filter(|e|
-        runs.contains(&e.switch.block) && runs.contains(&e.successor)
-        && !dom.dominates(e.successor, e.switch.block)
-        && rt_body.basic_blocks.predecessors()[e.successor].iter().all(|&p|
-            !runs.contains(&p) || p == e.switch.block || dom.dominates(e.successor, p))
-    ).collect();
-    let issuance_path = |at: Location| exclusive_edges.iter().copied().filter(|e|
-        runs.contains(&at.block) && dom.dominates(e.successor, at.block)).collect();
+    let exclusive_edges: Vec<_> = switches.iter().filter_map(|s| {
+        let edge = s.edge;
+        let targets: BTreeSet<_> = runtime_locations(edge.switch).flat_map(|at| runtime_rows.real_succs(at))
+            .filter(|target| executes.contains(&target.block) && original_location(*target).block == edge.successor)
+            .map(|target| target.block).filter(|&target| {
+                let mut enters_from_switch = false;
+                let exclusive = rt_body.basic_blocks.predecessors()[target].iter().copied()
+                    .filter(|p| executes.contains(p)).all(|p| {
+                        if dom.dominates(target, p) { return true; }
+                        let from_switch = original_location(rt_body.terminator_loc(p)) == edge.switch;
+                        enters_from_switch |= from_switch;
+                        from_switch
+                    });
+                exclusive && enters_from_switch
+            }).collect();
+        (!targets.is_empty()).then_some((edge, targets))
+    }).collect();
+    let issuance_path = |at: Location| {
+        let blocks: Vec<_> = runtime_blocks(at.block).collect();
+        exclusive_edges.iter().filter_map(|(edge, targets)| {
+            (!blocks.is_empty() && blocks.iter().all(|&block| targets.iter().any(|&target| dom.dominates(target, block))))
+                .then_some(*edge)
+        }).collect()
+    };
     let mut storage = MaybeStorageLive::new(std::borrow::Cow::Owned(always_storage_live_locals(body)))
         .iterate_to_fixpoint(tcx, body, None)
         .into_results_cursor(body);
@@ -3136,7 +3212,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 let carries_at_drop = || table.zip(drop_origins.get(&place.local)).is_some_and(|(t, origins)| {
                     held_in(origins, t.start_index(at)).contains(loan)
                 });
-                if *loan < base && runs.contains(&at.block) && drops_at_reassign(place, target)
+                if *loan < base && executes_at(at.block) && drops_at_reassign(place, target)
                     && ty.needs_drop(tcx, typing_env) && carries_at_drop()
                 {
                     reassign_drop_holders.entry(place.local).or_default().insert(*loan);
@@ -3151,7 +3227,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
         ev.caller_slot = caller_slot;
-        if let Some(to) = ev.occurrence.successor {
+        if let Some(to) = ev.occurrence.successor.filter(|s| executed_successors(ev.location).contains(s)) {
             ev.fieldless_operand = source_slots.fieldless_operand(ev.location, to).and_then(|place|
                 Some(EndPlace::new(tcx, place, cx.name(place)?)));
         }
@@ -3248,6 +3324,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         continue;
                     }
                     let succs = succs_of(loc);
+                    let executable = executed_successors(loc);
                     for s in succs {
                         if held_by_place(hp, t.start_index(s)).contains(&l.loan) {
                             continue;
@@ -3271,7 +3348,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         // Propagation across this edge requires the same live
                         // reference origin on both ends. The successor alone
                         // can contain a loan introduced by another predecessor.
-                        f.1.continuing_places = refs.iter().filter_map(|(_, p, n)| {
+                        f.1.continuing_places = refs.iter().filter(|_| executable.contains(&s)).filter_map(|(_, p, n)| {
                             let TyKind::Ref(region, ..) = *decl_place_ty(tcx, body, *p).kind() else { return None };
                             let origin = Origin::from(region_vid(region)?);
                             let out = out_for(bi)?;
@@ -3599,11 +3676,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // Walk backwards to the last effect on each field. A join can
     // hide that the two fields are initialized on complementary paths,
     // or that only a field store can supply the value still present.
-    let field_origins = |paths: &[MovePathIndex], at: Location, after: bool| {
+    let field_origins = |paths: &[MovePathIndex], at: &[Location], after: bool| {
         // A bit records fields whose most recent effect still needs
         // finding. The other masks record initialized fields and refills.
         let all = (1u8 << paths.len()) - 1;
-        let mut work = vec![(at, after, all, 0u8, 0u8)];
+        let mut work: Vec<_> = at.iter().map(|&loc| (loc, after, all, 0u8, 0u8)).collect();
         let mut seen = BTreeSet::new();
         let mut outcomes = BTreeSet::new();
         let covers = |a: MovePathIndex, b: MovePathIndex| {
@@ -3642,7 +3719,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 outcomes.insert((held, refilled));
             } else {
                 work.extend(rt_body.basic_blocks.predecessors()[loc.block].iter()
-                    .filter(|p| runs.contains(p) && !rt_body.basic_blocks[**p].is_cleanup)
+                    .filter(|p| executes.contains(p) && !rt_body.basic_blocks[**p].is_cleanup)
                     .map(|&p| (rt_body.terminator_loc(p), true, pending, held, refilled)));
             }
         }
@@ -3652,21 +3729,21 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // enclosing aggregate, including nested columns with no Drop of
     // their own. A lost field and all its descendants count only once.
     let rt_doms = rt_body.basic_blocks.dominators();
-    let variant_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: Location, after: bool, drop_at: Option<Location>, root: MovePathIndex, name: &str| {
+    let variant_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, drop_at: Option<Location>, root: MovePathIndex, name: &str| {
         let place = rt_md.move_paths[root].place;
         let ty = place.ty(&body.local_decls, tcx).ty;
         let TyKind::Adt(def, args) = *ty.kind() else { return Vec::new() };
         if !def.is_enum() || !ty_info(ty).1 { return Vec::new(); }
-        let moved = may_after(&rt_moved_entry, &|st, l| moved_transfer(&rt_md, &rt_body, st, l), at, after);
-        let state = rt.state(&[at], after, root);
+        let moved: BTreeSet<_> = at.iter().flat_map(|&loc|
+            may_after(&rt_moved_entry, &|st, l| moved_transfer(&rt_md, &rt_body, st, l), loc, after)).collect();
+        let state = rt.state(at, after, root);
         if !state.may_init || state.may_uninit { return Vec::new(); }
         // Like ElaborateDrops::collect_drop_flags, use the paths which
         // are both maybe initialized and maybe uninitialized at the
         // actual Drop, including enum downcasts. An exit sharing that
         // Drop can still know more about what reaches it.
-        let flagged = drop_at.filter(|loc| runs.contains(&loc.block))
-            .map(|loc| rt.state(&[loc], false, root).sub_maybe)
-            .unwrap_or_default();
+        let drops: Vec<_> = drop_at.into_iter().flat_map(runtime_locations).collect();
+        let flagged = rt.state(&drops, false, root).sub_maybe;
         let downcasts: BTreeMap<_, _> = descendants(&rt_md, root).into_iter().filter_map(|path| {
             match &rt_md.move_paths[path].place.projection[place.projection.len()..] {
                 [ProjectionElem::Downcast(_, variant)] => Some((*variant, path)),
@@ -3676,7 +3753,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         // If a downcast is always initialized, that is the only variant
         // reaching this exit. A known inactive variant has no move to report.
         let active = downcasts.iter().find_map(|(&variant, &path)| {
-            let st = rt.state(&[at], after, path);
+            let st = rt.state(at, after, path);
             (st.may_init && !st.may_uninit).then_some(variant)
         });
         def.variants().iter_enumerated().filter_map(|(variant, data)| {
@@ -3694,7 +3771,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         let downcast = downcast?;
                         let path = rt_md.move_paths[downcast].first_child?;
                         if !moved.contains(&path) { return None; }
-                        let st = rt.state(&[at], after, path);
+                        let st = rt.state(at, after, path);
                         let TyKind::Adt(def, _) = ty.kind() else { return None; };
                         let ty = tcx.item_name(def.did()).to_string();
                         if !st.may_init {
@@ -3714,8 +3791,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             Some(VariantDrop { column: name.to_owned(), variant: data.name.to_string(), payload, tracks_variant_init })
         }).collect()
     };
-    let partial_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: Location, after: bool, drop_at: Option<Location>, top: MovePathIndex| {
-        let state = rt.state(&[at], after, top);
+    let partial_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, drop_at: Option<Location>, top: MovePathIndex| {
+        let state = rt.state(at, after, top);
         if !state.ever_init || (state.may_init && state.sub_moved.is_empty() && state.sub_maybe.is_empty()) {
             return Vec::new();
         }
@@ -3737,7 +3814,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 continue;
             }
             let Some((_, _, name)) = columns.iter().find(|(_, p, _)| *p == place) else { continue };
-            let st = rt.state(&[at], after, m);
+            let st = rt.state(at, after, m);
             // Moving the entire Box transfers its allocation as well.
             if ty.is_box() && !st.may_init {
                 continue;
@@ -3750,11 +3827,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             let definitely_moved: BTreeSet<_> = st.sub_moved.iter().copied().collect();
             let unavailable: BTreeSet<_> = st.sub_moved.iter().chain(&st.sub_maybe).copied().collect();
-            let fields = field_drops(rt, &[at], after, m);
+            let fields = field_drops(rt, at, after, m);
             let hidden = column_info.iter().any(|col| col.hidden_fields
                 && columns.iter().any(|(_, p, n)| *n == col.name && p.local == place.local
                     && p.projection.starts_with(place.projection)));
-            let drops_resource = needs_drop && rest_how(rt, &[at], after, m) != "nothing_to_drop";
+            let drops_resource = needs_drop && rest_how(rt, at, after, m) != "nothing_to_drop";
             let mut split = PartialDrop { drops_resource, incomplete: hidden && drops_resource, ..PartialDrop::default() };
             let mut flagged_fields = Vec::new();
             let mut observed_enums = BTreeSet::new();
@@ -3795,7 +3872,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             if let Some(parent) = parent {
                                 observed_enums.insert((parent, name));
                             }
-                            if parent.is_some_and(|p| rest_how(rt, &[at], after, p) == "nothing_to_drop") {
+                            if parent.is_some_and(|p| rest_how(rt, at, after, p) == "nothing_to_drop") {
                                 if !split.payloads_empty.contains(name) {
                                     split.payloads_empty.push(name.clone());
                                 }
@@ -3803,12 +3880,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 // Retain a definite move explanation only if
                                 // a real transfer precedes this scope end.
                                 if rt_md.moves.iter().any(|mv| {
-                                    if mv.path != ch || !runs.contains(&mv.source.block) { return false; }
-                                    let precedes = if mv.source.block == at.block {
-                                        mv.source.statement_index < at.statement_index || after && mv.source == at
-                                    } else {
-                                        rt_doms.dominates(mv.source.block, at.block)
-                                    };
+                                    if mv.path != ch || !executes.contains(&mv.source.block) { return false; }
+                                    let precedes = at.iter().all(|&at| {
+                                        if mv.source.block == at.block {
+                                            mv.source.statement_index < at.statement_index || after && mv.source == at
+                                        } else {
+                                            rt_doms.dominates(mv.source.block, at.block)
+                                        }
+                                    });
                                     precedes && matches!(rt_body.basic_blocks[mv.source.block].statements.get(mv.source.statement_index).map(|st| &st.kind),
                                         Some(StatementKind::Assign(asg)) if matches!(asg.1, Rvalue::Use(Operand::Move(_))))
                                 }) && !split.payloads_moved.contains(name) {
@@ -3899,7 +3978,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if at.statement_index > 0 {
                 work.push(Location { statement_index: at.statement_index - 1, ..at });
             } else {
-                work.extend(rt_body.basic_blocks.predecessors()[at.block].iter()
+                work.extend(real_predecessors[at.block].iter()
                     .filter(|p| runs.contains(p) && !body.basic_blocks[**p].is_cleanup)
                     .map(|p| body.terminator_loc(*p)));
             }
@@ -3947,9 +4026,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let mut residual_drops = Vec::new();
     let mut record_residual = |rt: &mut Flow<'_, '_, 'tcx>, place: Place<'tcx>, site, at, after| {
         let LookupResult::Exact(root) = rt_md.rev_lookup.find(place.as_ref()) else { return };
-        let moved = may_after(&rt_moved_entry, &|st, l| moved_transfer(&rt_md, &rt_body, st, l), at, after);
+        let at: Vec<_> = runtime_locations(at).collect();
+        if at.is_empty() { return; }
+        let moved: BTreeSet<_> = at.iter().flat_map(|&loc|
+            may_after(&rt_moved_entry, &|st, l| moved_transfer(&rt_md, &rt_body, st, l), loc, after)).collect();
         let only_assigned = |path| !descendants(&rt_md, path).iter().any(|p| moved.contains(p));
-        let how = rest_how(rt, &[at], after, root);
+        let how = rest_how(rt, &at, after, root);
         residual_drops.push(ResidualDrop {
             local: place.local, site, path: cx.is_user(place).then(|| cx.name(place)).flatten(),
             how, only_assigned: only_assigned(root), staged: false,
@@ -3974,11 +4056,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }) {
             if !ty_info(field.ty(&body.local_decls, tcx).ty).1 { continue; }
             let (field_how, only_assigned) = match rt_md.rev_lookup.find(field.as_ref()) {
-                LookupResult::Exact(path) => (rest_how(rt, &[at], after, path), only_assigned(path)),
+                LookupResult::Exact(path) => (rest_how(rt, &at, after, path), only_assigned(path)),
                 LookupResult::Parent(Some(parent)) => {
                     // An untracked field holds a value exactly when its
                     // nearest tracked parent is initialized.
-                    let state = rt.state(&[at], after, parent);
+                    let state = rt.state(&at, after, parent);
                     let field_how = match (state.may_init, state.may_uninit) {
                         (true, false) => "drops",
                         (true, true) => "drops_if_init",
@@ -4189,7 +4271,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         if let LookupResult::Exact(top) = rt_md.rev_lookup.find(Place::from(*l).as_ref()) {
                             let site = cx.rows.exit_site.get(&loc).map(|&at| cx.r.exit_span(at));
                             scope_partials.entry(ev.0).or_default().extend(
-                                partial_drops(&mut rt, loc, false, None, top).into_iter().map(|(local, name, parts)| (site, local, name, parts)));
+                                partial_drops(&mut rt, &runtime_locations(loc).collect::<Vec<_>>(), false, None, top).into_iter().map(|(local, name, parts)| (site, local, name, parts)));
                         }
                         push(&mut evs, ev);
                     }
@@ -4232,16 +4314,17 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 // record the actual cleanup on the call's own row (Q2).
                 let UnwindAction::Cleanup(start) = *unwind else { continue };
                 if !tcx.sess.panic_strategy().unwinds()
-                    || skipped_closure_returns.contains_key(&loc.block) { continue; }
+                    || !executes_at(loc.block) || skipped_closure_returns.contains_key(&loc.block) { continue; }
                 let loan_cleanup = loan_cleanups.contains(&loc);
                 if !loan_cleanup && vec_buffers.is_empty() { continue; }
+                let runtime = runtime_locations(loc).collect::<Vec<_>>();
                 let drops = cleanup_drops(body, start);
                 if !loan_cleanup {
                     let Some(closure) = called_closure(tcx, func) else { continue };
                     if closure_can_return(tcx, closure) || !closure_has_panic_route(tcx, closure) { continue; }
                     if !drops.iter().any(|(_, place)| vec_buffers.contains(place)
                         && matches!(rt_md.rev_lookup.find(place.as_ref()), LookupResult::Exact(mpi)
-                            if rt.state(&[loc], false, mpi).may_init)) { continue; }
+                            if rt.state(&runtime, false, mpi).may_init)) { continue; }
                 }
                 // Read init at this call, before other unwind edges
                 // merge into the cleanup block. Moves at the call and
@@ -4253,7 +4336,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let Some(path) = cx.name(place) else { continue };
                     if !ty_info(place.ty(&body.local_decls, tcx).ty).1 { continue; }
                     let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) else { continue };
-                    let how = rest_how(&mut rt, &[loc], false, mpi);
+                    let how = rest_how(&mut rt, &runtime, false, mpi);
                     if how == "nothing_to_drop" { continue; }
                     let mut ev = cx.ev(loc, Fact::Drop { path, how, at_reassign: false, early_exit: None, also_on_exits: Vec::new() });
                     ev.1.drop_route = DropRoute::Unwind;
@@ -4264,6 +4347,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             TerminatorKind::Drop { place, target, .. } => {
                 let at_reassign = drops_at_reassign(*place, *target);
+                let runtime = runtime_locations(loc).collect::<Vec<_>>();
+                if at_reassign {
+                    let site = body.source_info(loc).span.with_parent(None);
+                    *reassignment_sites.entry((site, place.local)).or_default() |= !runtime.is_empty();
+                }
+                if runtime.is_empty() { continue; }
                 let early_exit = cx.rows.early_exit.get(&loc).map(|(r, _)| *r);
                 let exit = cx.rows.exit_site.get(&loc).copied();
                 let shared = cx.rows.shared_exits.get(&loc).map(Vec::as_slice).unwrap_or_default();
@@ -4278,13 +4367,37 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     }
                 }
                 let state = match rt_md.rev_lookup.find(place.as_ref()) {
-                    LookupResult::Exact(mpi) => Some(rt.state(&[loc], false, mpi).word()),
+                    LookupResult::Exact(mpi) => Some(rt.state(&runtime, false, mpi).word()),
                     LookupResult::Parent(_) => None,
                 };
                 if cx.is_user(*place) {
                     let path = cx.name(*place).unwrap_or_default();
+                    let mut flagged_parts = Vec::new();
+                    if let LookupResult::Exact(mpi) = drop_md.rev_lookup.find(place.as_ref()) {
+                        drop_init.seek_before_primary_effect(loc);
+                        drop_uninit.seek_before_primary_effect(loc);
+                        if drop_init.get().contains(mpi) && drop_uninit.get().contains(mpi) {
+                            drop_flags.insert(loc);
+                        }
+                        // Drop elaboration opens a partly moved aggregate into
+                        // per-field drops. Each part that needs drop and may be
+                        // initialized or moved out has its own flag, and the
+                        // whole place's drop has one when any part does (a
+                        // sibling part has none).
+                        for m in descendants(&drop_md, mpi).into_iter().filter(|m| *m != mpi) {
+                            let part = drop_md.move_paths[m].place;
+                            if drop_init.get().contains(m) && drop_uninit.get().contains(m)
+                                && part.ty(&body.local_decls, tcx).ty.needs_drop(tcx, typing_env) {
+                                drop_part_flags.insert((loc, path.clone()));
+                                if let Some(name) = cx.name(part) {
+                                    drop_part_flags.insert((loc, name.clone()));
+                                    flagged_parts.push((part, name));
+                                }
+                            }
+                        }
+                    }
                     let how = match rt_md.rev_lookup.find(place.as_ref()) {
-                        LookupResult::Exact(mpi) => rest_how(&mut rt, &[loc], false, mpi),
+                        LookupResult::Exact(mpi) => rest_how(&mut rt, &runtime, false, mpi),
                         LookupResult::Parent(_) => "drops",
                     };
                     let also_on_exits: Vec<usize> = shared.iter().map(|(r, _)| *r).collect();
@@ -4297,18 +4410,20 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     // the exit's row).
                     if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) {
                         for (r, at) in shared {
-                            let how_there = rest_how(&mut rt, &[*at], true, mpi);
+                            let edge = runtime_locations(*at).collect::<Vec<_>>();
+                            if edge.is_empty() { continue; }
+                            let how_there = rest_how(&mut rt, &edge, true, mpi);
                             let (row, site) = try_span(*at).map_or_else(
                                 || (*r, cx.r.exit_span(*at)),
                                 |site| (cx.r.line_lo(site), site),
                             );
                             scope_partials.entry(row).or_default().extend(
-                                partial_drops(&mut rt, *at, true, Some(loc), mpi).into_iter()
+                                partial_drops(&mut rt, &edge, true, Some(loc), mpi).into_iter()
                                     .map(|(local, name, parts)| (Some(site), local, name, parts)));
                             if how_there == "nothing_to_drop" {
                                 continue;
                             }
-                            let parts = field_drops(&mut rt, &[*at], true, mpi);
+                            let parts = field_drops(&mut rt, &edge, true, mpi);
                             let mut items: Vec<(String, &'static str)> = parts.into_iter().map(|(_, _, n, h)| (n, h)).collect();
                             if is_box {
                                 items.push((path.clone(), how_there));
@@ -4332,13 +4447,22 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         }
                     }
                     let parts = match rt_md.rev_lookup.find(place.as_ref()) {
-                        LookupResult::Exact(top) => field_drops(&mut rt, &[loc], false, top),
+                        LookupResult::Exact(top) => field_drops(&mut rt, &runtime, false, top),
                         LookupResult::Parent(_) => Vec::new(),
                     };
                     // Only early exits reach this drop: each has its own above.
                     if !cx.rows.exit_only.contains(&loc) {
                         let whole = (path, how, also_on_exits);
                         let mut items: Vec<(String, &'static str, Vec<usize>)> = parts.into_iter().map(|(_, _, n, h)| (n, h, Vec::new())).collect();
+                        // A runtime path can hold the complete aggregate even
+                        // when drop elaboration emitted a guarded field drop.
+                        for (part, name) in flagged_parts {
+                            if items.iter().any(|(n, _, _)| *n == name) { continue; }
+                            if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(part.as_ref()) {
+                                let how = rest_how(&mut rt, &runtime, false, mpi);
+                                items.push((name, how, Vec::new()));
+                            }
+                        }
                         if is_box {
                             items.push(whole);
                         } else {
@@ -4352,7 +4476,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                     |site| (cx.r.line_lo(site), Some(site)),
                                 );
                                 scope_partials.entry(row).or_default().extend(
-                                    partial_drops(&mut rt, loc, false, Some(loc), top).into_iter()
+                                    partial_drops(&mut rt, &runtime, false, Some(loc), top).into_iter()
                                         .map(|(local, name, parts)| (site, local, name, parts)));
                             }
                         }
@@ -4406,7 +4530,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let shared = cx.rows.shared_exits.get(&loc).cloned().unwrap_or_default();
                     if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) {
                         for (r, at) in &shared {
-                            if rest_how(&mut rt, &[*at], true, mpi) == "nothing_to_drop" {
+                            let edge = runtime_locations(*at).collect::<Vec<_>>();
+                            if edge.is_empty() || rest_how(&mut rt, &edge, true, mpi) == "nothing_to_drop" {
                                 continue;
                             }
                             let mut ev = cx.ev(loc, Fact::TempDrop { what: what.clone(), created_line, extended, early_exit: Some(*r) });
@@ -4488,7 +4613,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     };
     let predecessors = |loc: Location| {
         if runs.contains(&loc.block) {
-            &rt_body.basic_blocks.predecessors()[loc.block]
+            &real_predecessors[loc.block]
         } else {
             &body.basic_blocks.predecessors()[loc.block]
         }
@@ -4521,9 +4646,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // local. A later loop iteration can declare the same MIR local again.
     let mut cleanup_places = BTreeMap::new();
     let rt_rows = Rows { body: wording_body, tcx };
+    let runtime_successors = |loc: Location| {
+        let succs = rt_rows.real_succs(loc);
+        if loc.statement_index < wording_body.basic_blocks[loc.block].statements.len() { return succs; }
+        succs.into_iter().filter(|s| executes.contains(&s.block)).collect::<Vec<_>>()
+    };
     let mut next_assignment = |place: Place<'tcx>, exits: &[Location], after: bool| {
         let mut work = if after {
-            exits.iter().flat_map(|l| rt_rows.real_succs(*l)).collect()
+            exits.iter().flat_map(|l| runtime_successors(*l)).collect()
         } else { exits.to_vec() };
         let mut seen = BTreeSet::new();
         let writes = |dest: Place<'tcx>| dest.local == place.local && place.projection.starts_with(dest.projection);
@@ -4577,7 +4707,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     continue;
                 }
             }
-            let succs = rt_rows.real_succs(l);
+            let succs = runtime_successors(l);
             // A diverging call (including panic) has no normal successor.
             if succs.is_empty() {
                 ended = true;
@@ -4627,7 +4757,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let rt_exits = if let Some(runtime) = runtime {
             runtime
         } else {
-            default_runtime = exits.iter().copied().filter(|e| runs.contains(&e.block)).collect::<Vec<_>>();
+            default_runtime = exits.iter().copied().flat_map(runtime_locations).collect::<Vec<_>>();
             &default_runtime
         };
         let moved_here = |mpi, include_parts| {
@@ -4711,6 +4841,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if s.payload_maybe || s.payload_moved {
                 st.maybe_empty_box.insert(name.clone());
             }
+            if s.word() == "maybe" && w == "moved" { st.borrowck_maybe.insert(name.clone()); }
             record_type(name, *place);
             if w == "maybe" {
                 // Moved on some way here, or only never assigned?
@@ -4730,10 +4861,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     })
                 };
                 let imaginary = moved && rt_mpi.is_some() && !runtime_move();
-                // Never moved at all (borrowck's maybe is "never assigned") but
-                // assigned on every path that runs: the unreachable path skips it.
-                if !moved && rt_here.as_ref().is_some_and(|r| r.may_init && !r.may_uninit) {
+                // Borrow checking may see an empty place, although every
+                // path that actually runs holds a value here.
+                if rt_here.as_ref().is_some_and(|r| r.word() == "own") {
                     st.always_assigned.insert(name.clone());
+                }
+                if rt_mpi.is_some_and(|rm| rt_here.as_ref().is_some_and(|r| r.word() == "partly")
+                    && rest_how(&mut rt, &rt_exits, after, rm) == "nothing_to_drop") {
+                    st.partial_without_drop.insert(name.clone());
                 }
                 let mixed = moved && never_assigned_somewhere();
                 let whole_move = mixed && moved_here(*mpi, false);
@@ -4871,8 +5006,17 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     if unwind { st.unwind_before_write.insert(name.clone()); }
                 }
             }
-            st.state.insert(name.clone(), if pw == "partly" { "own" } else { pw });
+            // A field without its own move path may still be initialized
+            // when a sibling's move affects the tracked parent's state.
+            // Ask whether the ancestor itself was ever empty.
+            let live_sibling = !through_ref && pw == "maybe" && exits.iter().all(|&loc| {
+                let moved = may_after(&moved_entry, &|st, l| moved_transfer(&move_data, body, st, l), loc, after);
+                let unassigned = may_after(&unassigned_entry, &|st, l| unassigned_transfer(&move_data, body, st, l), loc, after);
+                !moved.contains(parent) && !unassigned.contains(parent)
+            });
+            st.state.insert(name.clone(), if pw == "partly" || live_sibling { "own" } else { pw });
             record_type(name, *fp);
+            if live_sibling { continue; }
             if let Some(c) = st.cause.get(&pn).copied() {
                 // An untracked field can inherit a possible move of its
                 // parent even when the runtime moves only a sibling.
@@ -5267,7 +5411,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let arm_edges: Vec<_> = switches.iter().filter_map(|exit| {
         let arm = super::SourceArm { branch: exit.branch?, index: exit.arm? };
         let edge = exit.edge;
-        (!drop_holders_at_reassign.is_empty() && runs.contains(&edge.switch.block) && runs.contains(&edge.successor))
+        (!drop_holders_at_reassign.is_empty() && executed_successors(edge.switch).contains(&edge.successor.start_location()))
             .then_some((arm, edge.successor))
     }).collect();
     let mut arm_entries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, BTreeSet<_>>>::default();
@@ -5297,6 +5441,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     struct BranchSpans<'hir> {
         if_else: Vec<(&'hir Expr<'hir>, &'hir Expr<'hir>, &'hir Expr<'hir>, Span)>,
         conditionals: Vec<&'hir Expr<'hir>>,
+        labeled: BTreeSet<Span>,
     }
     impl<'hir> intravisit::Visitor<'hir> for BranchSpans<'hir> {
         fn visit_expr(&mut self, expr: &'hir Expr<'hir>) {
@@ -5308,6 +5453,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             match expr.kind {
                 ExprKind::If(guard, then, Some(els)) if !expr.span.from_expansion() =>
                     self.if_else.push((guard, then, els, expr.span)),
+                ExprKind::Block(_, Some(_)) if !expr.span.from_expansion() => {
+                    self.labeled.insert(expr.span);
+                }
                 _ => {}
             }
             intravisit::walk_expr(self, expr);
@@ -5439,8 +5587,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let Some(name) = column_name(path) else { continue };
                     if entry_state.state.get(&name) == Some(&"moved")
                         && scrutinee_spans.iter().any(|&span| contains(span, loc))
-                        && edges.iter().all(|&&(_, source, _)| runs.contains(&source)
-                            && rt_body.basic_blocks.dominators().dominates(block, source))
+                        && edges.iter().all(|&&(_, source, _)| executes_at(source)
+                            && runtime_blocks(source).all(|source| runtime_blocks(block)
+                                .any(|block| rt_body.basic_blocks.dominators().dominates(block, source))))
                     {
                         scrutinee_moves.insert(name);
                     }
@@ -5544,12 +5693,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     || cx.rows.row.get(s).is_some_and(|r| next.is_some_and(|n| *r > n))
             });
         }
+        row.runtime_entry = entries.get(&line).map(|locs| locs.iter().any(|l| executes_at(l.block)));
         row.before = entries.get(&line).map(|locs| state_at(&locs.iter().copied().collect::<Vec<_>>(), false, false, None));
         if let Some(specs) = cx.rows.arms.get(&line) {
             let nested: BTreeSet<_> = specs.iter().filter_map(|s| s.parent).collect();
             for (i, s) in specs.iter().enumerate() {
                 row.arms.push(Arm {
                     runs: s.exits.iter().any(|e| runs.contains(&e.block)),
+                    runs_at_runtime: s.exits.iter().any(|e| executes_at(e.block)),
                     branch: s.branch,
                     arm: s.arm,
                     parent: s.parent,
@@ -5599,6 +5750,22 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             && body.local_decls[place.local].ty.ref_mutability().is_some_and(|m| m.is_mut()))
             .then_some((st.source_info.span.with_parent(None), place.local))
     }).collect();
+    let mut effect_sites = BTreeMap::<_, Vec<_>>::new();
+    for &bb in &runs {
+        let data = &body.basic_blocks[bb];
+        if data.is_cleanup { continue; }
+        let runs = executes_at(bb);
+        let mut add = |span: Span| effect_sites.entry(span.with_parent(None)).or_default().push((bb, runs));
+        for statement in &data.statements {
+            if matches!(statement.kind, StatementKind::Assign(_)) {
+                add(statement.source_info.span);
+            }
+        }
+        let term = data.terminator();
+        if matches!(term.kind, TerminatorKind::Call { .. }) {
+            add(term.source_info.span);
+        }
+    }
     // Read the MIR continuation before its first store or drop.
     let mut joins = rustc_data_structures::fx::FxIndexMap::default();
     let boundaries = super::control::conditional_joins(tcx, body, &cx.rows, &branch_spans.conditionals,
@@ -5624,7 +5791,40 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let edge_runs = |from: Location| runs.contains(&from.block)
             && (at.statement_index != 0 || real_successor_blocks(body, from.block).contains(&at.block));
         let incoming: Vec<_> = preds.iter().copied().filter(|&from| edge_runs(from)).collect();
+        // Runtime dataflow reads every executable copy of an edge's source;
+        // a constant condition or range can leave a checked edge dead.
+        let edge_executes = |from: Location| edge_runs(from) && executes_at(from.block);
+        let runtime_incoming: Vec<_> = incoming.iter().copied().flat_map(runtime_locations).collect();
         if incoming.is_empty() { continue; }
+        let completed_local = body.basic_blocks[at.block].statements.get(at.statement_index).and_then(|first| {
+            let StatementKind::FakeRead(read) = &first.kind else { return None };
+            let (rustc_middle::mir::FakeReadCause::ForLet(_), place) = &**read else { return None };
+            place.as_local()
+        });
+        if let Some(local) = completed_local.filter(|_| branch_spans.labeled.contains(&span)) {
+            let line = tcx.sess.source_map().lookup_char_pos(span.hi()).line;
+            // Follow the completed initializer to the end of its row.
+            // More MIR on that row can move or borrow the new binding.
+            let mut work = vec![at];
+            let mut seen = BTreeSet::new();
+            let mut exits = Vec::new();
+            while let Some(loc) = work.pop() {
+                if !seen.insert(loc) { continue; }
+                for next in cx.r.real_succs(loc) {
+                    if cx.row_of(next) > line
+                        || (next.block != loc.block && !body.basic_blocks.dominators().dominates(at.block, next.block)) {
+                        exits.push(next);
+                    } else {
+                        work.push(next);
+                    }
+                }
+            }
+            let mut completed = state_at(&exits, false, false, None);
+            completed.state.retain(|name, _| completed.locals.get(name) == Some(&Some(local)));
+            if let Some(row) = out_rows.iter_mut().find(|r| r.line == line).filter(|_| !completed.state.is_empty()) {
+                row.completed_bindings.push(completed);
+            }
+        }
         // The arms' join connectors precede the merged state. A loan's
         // holder can still be initialized on one incoming edge only.
         if !arm_edges.is_empty() {
@@ -5648,7 +5848,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let mut state = if unshared {
             state_at(&[at], false, false, None)
         } else {
-            state_at(&preds, true, false, Some(&incoming))
+            state_at(&preds, true, false, Some(&runtime_incoming))
         };
 
         let tests: Vec<_> = match tcx.hir_node(id) {
@@ -5710,14 +5910,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let mut assignments = BTreeMap::new();
         let if_edges = preds.len() >= 2 && preds.iter().all(|p| body.source_info(*p).span == span);
         let edge_states: Vec<_> = preds.iter().map(|&from| {
-            let executable = edge_runs(from);
-            let runtime = executable.then(|| std::slice::from_ref(&from)).unwrap_or_default();
+            let executable = edge_executes(from);
+            let runtime: Vec<Location> = if executable { runtime_locations(from).collect() } else { Vec::new() };
             // A sole checked predecessor includes its normal return effect
             // at the destination (a Call initializes its result there).
             let mut edge_state = if unshared && preds.len() == 1 {
                 state.state.clone()
             } else {
-                state_at(&[from], true, !executable, Some(runtime)).state
+                state_at(&[from], true, !edge_runs(from), Some(&runtime)).state
             };
             match body[from.block].terminator().kind {
                 TerminatorKind::Call { destination, target: Some(target), .. }
@@ -5787,22 +5987,31 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if let Some(mixed) = state.mixed_init.get_mut(name) {
                 mixed.assigned_in_some_arms = wrote && !writes_on_all_paths;
             }
-            if state.state.get(name) == Some(&"maybe") {
+            // Runtime says the value is gone, though borrowck keeps it
+            // as a maybe: the write the checker considers may not run.
+            let skipped = state.borrowck_maybe.contains(name);
+            if skipped || state.state.get(name) == Some(&"maybe") {
                 if moved && state.cause.get(name) == Some(&"moved") {
                     state.moved_in_arm.insert(name.clone());
                 }
                 if if_edges && place.projection.is_empty() && wrote {
                     let always = state.always_assigned.contains(name);
+                    let runtime_own = |runs: bool| edge_states.iter().filter(|edge|
+                        edge.runs == runs && edge.state.get(name) == Some(&"own")).map(|edge| edge.from).collect::<Vec<_>>();
+                    let own = runtime_own(true);
                     let runtime_empty = edge_states.iter().any(|edge| edge.runs
                         && matches!(edge.state.get(name), Some(&"moved" | &"unassigned")));
-                    if always || runtime_empty {
-                        let mut work: Vec<_> = edge_states.iter().filter(|edge|
-                            edge.runs && edge.state.get(name) == Some(&"own")).map(|edge| edge.from).collect();
+                    let (word, mut work) = if own.is_empty() {
+                        (skipped.then_some(JoinAssignment::Skipped), runtime_own(false))
+                    } else {
+                        ((always || runtime_empty).then_some(if always { JoinAssignment::Always } else { JoinAssignment::Sometimes }), own)
+                    };
+                    if let Some(word) = word {
                         let mut seen = BTreeSet::new();
                         while let Some(l) = work.pop() {
                             if !seen.insert(l) { continue; }
                             if writes.contains(&l) {
-                                assignments.insert(name.clone(), always);
+                                assignments.insert(name.clone(), word);
                                 break;
                             }
                             work.extend(&region[&l]);
@@ -5826,8 +6035,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let mut stores: BTreeMap<String, BTreeMap<Location, Vec<usize>>> = field_stores.iter()
             .map(|(path, v)| (path.clone(), v.iter().cloned().collect())).collect();
         let mut preds: BTreeMap<Location, Vec<Location>> = BTreeMap::new();
-        for &loc in cx.rows.row.keys().filter(|l| runs.contains(&l.block)) {
-            for next in cx.r.real_succs(loc) { preds.entry(next).or_default().push(loc); }
+        for &loc in cx.rows.row.keys().filter(|l| executes_at(l.block)) {
+            for next in executed_successors(loc) { preds.entry(next).or_default().push(loc); }
             let data = &body.basic_blocks[loc.block];
             let Some(st) = data.statements.get(loc.statement_index) else {
                 // Only the normal return edge writes the destination. The
@@ -5877,6 +6086,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         for e in out_rows.iter_mut().flat_map(|r| &mut r.facts) {
             let Fact::Repoint { holder, reaching, .. } = &mut e.fact else { continue };
             let loc = e.location;
+            if !executes_at(loc.block) { continue; }
             let Some(defs) = stores.get(holder) else { continue };
             let mut work = preds.get(&loc).cloned().unwrap_or_default();
             let mut seen = BTreeSet::new();
@@ -5916,6 +6126,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         inline_holder_ends,
         evaluated_spans,
         implicit_mut_reborrows,
+        effect_sites,
+        reassignment_sites,
+        drop_flags,
+        drop_part_flags,
         argument_stores, receiver_loans, restored_reborrows,
         imaginary_edges,
         constructed_vecs,

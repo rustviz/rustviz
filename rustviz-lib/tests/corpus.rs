@@ -2686,7 +2686,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the reference; `s` and `x` keep their resources.
         must_contain: &[
             "r's mutable reference is moved (not the resource it points to)",
-            "r's mutable reference is moved to the caller (not the resource it points to)",
+            "a mutable reference to *r, reborrowed through r, is returned to the caller; the data it points to is not copied",
             "a's reference is copied (not the value it points to)",
             "Move from r to r2",
             "s goes out of scope. Its resource is dropped.",
@@ -3041,9 +3041,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // wording, "modified through *r" (2026-11-06 decision), not an
         // operator reborrow of `r` (#260).
         must_contain: &[
-            "*r acquires ownership of a new resource; its previous resource is dropped",
-            "*q acquires ownership of a new resource; its previous resource is dropped",
-            "*b acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *r is dropped and the replacement is stored there",
+            "The old value at *q is dropped and the replacement is stored there",
+            "The old value at *b is dropped and the replacement is stored there",
             "*n is assigned a new value",
             "*rq is assigned a new value",
             "the resource r points to is modified through *r",
@@ -3076,9 +3076,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*r is assigned a copy of *z",
             "*r is assigned a new value",
             "Move from t to *ra",
-            "*ra acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *ra is dropped and the replacement is stored there",
             "Move from u to *b",
-            "*b acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *b is dropped and the replacement is stored there",
             "Move from q2 to *rq",
             "*rq is assigned a new value",
             "the value r points to is modified through *r",
@@ -3462,7 +3462,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // one to the other; `+=` is not an actor (#908).
             "the value n points to is modified through *n",
             "s holds a mutable reference; it can read and write the borrowed resource",
-            "*s acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *s is dropped and the replacement is stored there",
             "q holds a mutable reference; it can read and write the borrowed resource",
             "*k's value is copied",
         ],
@@ -4367,7 +4367,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v[2] is assigned a new value",
             "v[0] is assigned a copy of *z",
             "Move from s to names[0]",
-            "names[0] acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at names[0] is dropped and the replacement is stored there",
             // `+=` on a String calls `add_assign`: nothing is overwritten.
             "names's resource is modified through names[0]",
             "s's resource is moved",
@@ -4380,9 +4380,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from y to grid[0][1]",
             "grid's value is modified through grid[1][1]",
             "cube[0][0][1] is assigned a new value",
-            "rows[0][0] acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at rows[0][0] is dropped and the replacement is stored there",
             "Move from p to ps[0]",
-            "ps[0] acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at ps[0] is dropped and the replacement is stored there",
             "p.name's resource is moved",
             "p.name goes out of scope. No resource is dropped.",
         ],
@@ -4427,11 +4427,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "xs[i] is assigned a copy of x",
             "xs's mutable borrow ends",
             "Move from s to dst[0]",
-            "dst[0] acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at dst[0] is dropped and the replacement is stored there",
             "dst's mutable borrow ends",
             "s goes out of scope. No resource is dropped.",
             "Move from String::from to r[0]",
-            "r[0] acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at r[0] is dropped and the replacement is stored there",
             "r's mutable borrow of v ends. This borrow no longer restricts access to v. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
@@ -4469,7 +4469,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*boxes[0] is assigned a new value",
             // Overwriting a String through the stored reference drops the
             // old String; no column shows it, so the tooltip says it.
-            "*names[0] acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *names[0] is dropped and the replacement is stored there",
             // `vec![Holder { r: &mut z }]` holds a mutable borrow of z
             // (#692), an i32: a value (#719).
             "Mutable borrow from z to hs",
@@ -4627,7 +4627,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "t.1 is assigned a new value",
             // A named Copy source is named (`t.1 = n`).
             "t.1 is assigned a copy of n",
-            "v.last_mut().unwrap().name acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at v.last_mut().unwrap().name is dropped and the replacement is stored there",
             "u.0 acquires ownership of a new resource; its previous resource is dropped",
             "Move from String::from to t.0",
             "Move from s to u.0",
@@ -5135,7 +5135,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p is bound to a value from the caller",
             "p is bound to a value",
             "p's value is moved",
-            "p.x's value is moved",
+            "p moves as a whole, so p.x is no longer accessible here. The field is still Copy",
             "p holds a value",
             "p goes out of scope",
         ],
@@ -6605,9 +6605,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `Pt` isn't Copy but has no drop glue: a value, not a resource (#484).
         must_contain: &[
             "p still owns its value here: the branch that moved p returned before reaching this point",
+            "p moves as a whole to the caller, carrying p.x with it. The field is still Copy",
         ],
         must_not_contain: &[
             "p still owns its resource here",
+            "p.x's value is moved to the caller",
         ],
     },
     TooltipExpect {
@@ -6628,13 +6630,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from z to p.x",
             "p.x is assigned a copy of z",
             "Move from a to p.name",
-            "p.name acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at p.name is dropped and the replacement is stored there",
             "the resource p points to is modified through p.name",
             "the resource p points to is modified through p.inner.v",
             "(*p).x is assigned a new value",
             "t.0 is assigned a new value",
             "Move from String::from to t.1",
-            "t.1 acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at t.1 is dropped and the replacement is stored there",
             "r.x is assigned a new value",
             "w.r.x is assigned a new value",
             "self.c is assigned a new value",
@@ -6668,9 +6670,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.x is assigned a new value",
             "Move from String::from to p.name",
             "Move from v to p.name",
-            "p.name acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at p.name is dropped and the replacement is stored there",
             "Move from String::from to *s",
-            "*s acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *s is dropped and the replacement is stored there",
         ],
         must_not_contain: &[
             "p.x acquires ownership of a resource",
@@ -6695,9 +6697,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*r is assigned a copy of y",
             "*r is assigned a new value",
             "Move from t to *ra",
-            "*ra acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *ra is dropped and the replacement is stored there",
             "Move from u to *b",
-            "*b acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *b is dropped and the replacement is stored there",
             "Move from q2 to *rq",
             // Q is a struct of integers: nothing to drop, so a plain
             // assignment, not a resource (#484).
@@ -7036,7 +7038,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // had no branch at all (and before #148 this panicked, #264).
         must_contain: &[
             "t acquires ownership of a new resource; its previous resource is dropped",
-            "*r acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *r is dropped and the replacement is stored there",
         ],
         must_not_contain: &[
             "the resource r points to is modified through *r",
@@ -7509,15 +7511,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // through `*w` drops the fields' old values too (#268).
         must_contain: &[
             "Move from String::from to r.a",
-            "r.a acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at r.a is dropped and the replacement is stored there",
             // (r.n: a Copy integer, nothing to drop.)
             "r.n is assigned a new value",
-            "r.inner.v acquires ownership of a new resource; its previous resource is dropped",
-            "q.v acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at r.inner.v is dropped and the replacement is stored there",
+            "The old value at q.v is dropped and the replacement is stored there",
             "s.a acquires ownership of a new resource; its previous resource is dropped",
             "s.inner.v acquires ownership of a new resource; its previous resource is dropped",
             "s.inner acquires ownership of a new resource; its previous resource is dropped",
-            "*w acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *w is dropped and the replacement is stored there",
         ],
         must_not_contain: &[
             "r.a acquires ownership of a resource",
@@ -8037,7 +8039,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u.a acquires ownership of a new resource; its previous resource is dropped",
             // `*f = String::from("b")` reads like a plain assignment on
             // f's column too (2026-11-05 decision).
-            "*f acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *f is dropped and the replacement is stored there",
         ],
         must_not_contain: &[
             "the resource f points to is modified through *f",
@@ -10955,7 +10957,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "edition2024/if_let_chain_deref_write",
         must_contain: &[
-            "*r acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *r is dropped and the replacement is stored there",
             "*r may have been assigned a new resource: when the condition assigns to *r and then turns out false, the else branch runs after that assignment, so here *r holds either its previous resource or the new one. When the assignment runs, it drops *r's previous resource.",
             // n holds a String either way.
             "n goes out of scope. Its resource is dropped.",
@@ -11229,7 +11231,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p's resource is moved to the caller",
             "q's resource is moved to the caller",
             "p still owns its resource here: the branch that moved p returned before reaching this point",
-            "p goes out of scope. Its resource is dropped.",
+            "p goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
         ],
         must_not_contain: &[
             "=s goes out of scope. Its resource is dropped.",
@@ -13257,15 +13259,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "deferred_init_loop",
         must_contain: &[
             "On a later iteration of the loop, the resource an earlier iteration gave s is dropped here first, if s still holds it (Rust tracks this with a runtime drop flag).",
-            "s may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when s goes out of scope.",
-            "s goes out of scope. Its resource is dropped here only if the loop above assigned s (Rust tracks this with a runtime drop flag).",
+            "s holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so s can't be used here until it's assigned again. Its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
             "On a later iteration of the loop, the resource an earlier iteration gave t is dropped here first, if t still holds it (Rust tracks this with a runtime drop flag).",
             "t may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when t is assigned again.",
             "t acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned t (Rust tracks this with a runtime drop flag).",
-            "n may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again).",
+            "n holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so n can't be used here until it's assigned again.",
         ],
         must_not_contain: &[
-            "=s goes out of scope. Its resource is dropped.",
+            "s goes out of scope. Its resource is dropped here only if the loop above assigned s",
             "t acquires ownership of a new resource; its previous resource is dropped",
             "On a later iteration of the loop, the resource an earlier iteration gave n",
             "only if the loop above assigned n",
@@ -13808,10 +13810,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v[1] is assigned a new value",
             "a[2] is assigned a new value",
             // A String element: the old one is dropped, and it says so.
-            "w[0] acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at w[0] is dropped and the replacement is stored there",
             "Move from String::from to w[0]",
-            "u[0] acquires ownership of a new resource; its previous resource is dropped",
-            "u[1] acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at u[0] is dropped and the replacement is stored there",
+            "The old value at u[1] is dropped and the replacement is stored there",
         ],
         must_not_contain: &[
             // An assignment is not an in-place update, and `+=` isn't an assignment.
@@ -13956,7 +13958,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "anonymous_deref",
         must_contain: &[
-            "*s acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *s is dropped and the replacement is stored there",
             "Move from String::from to *s",
         ],
         must_not_contain: &[
@@ -14257,7 +14259,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's resource is moved",
             "x is passed to push by mutable reference (as self, implicitly borrowed). push may read or write it",
             "x's resource is mutably borrowed by push; x can't be used while the borrow is live",
-            "x goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "x goes out of scope. No resource is dropped. Rust tracks this with a runtime drop flag.",
             "s acquires ownership from the caller",
             "s is the owner of the resource",
             "s goes out of scope. Its resource is dropped.",
@@ -17158,10 +17160,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "*y is assigned a new value",
             "v's resource is modified through e",
             "*m.get_mut(…).unwrap() is assigned a new value",
-            "*names.get_mut(0).unwrap() acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *names.get_mut(0).unwrap() is dropped and the replacement is stored there",
             "Move from String::from to *names.get_mut(0).unwrap()",
-            "*n acquires ownership of a new resource; its previous resource is dropped",
-            "*it acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *n is dropped and the replacement is stored there",
+            "The old value at *it is dropped and the replacement is stored there",
             // x's own column keeps its texts.
             "the value x points to is modified through *x",
             "x's mutable borrow ends",
@@ -17359,8 +17361,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the path that didn't move it. Both said "its previous
         // resource is dropped".
         must_contain: &[
-            "*e acquires ownership of a new resource. Its previous String was moved out earlier, so nothing is dropped.",
-            "*f acquires ownership of a new resource. Its previous String is dropped here only if no branch above moved it out (Rust tracks this with a runtime drop flag).",
+            "A value is stored at *e. Its previous String was moved out earlier, so nothing is dropped.",
+            "A value is stored at *f. Its previous String is dropped here only if no branch above moved it out (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
             "=*e acquires ownership of a new resource; its previous resource is dropped",
@@ -17460,7 +17462,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // type.
         must_contain: &[
             "e's contents may have been moved out above, so e can't be used from here on until *e or e is assigned again.",
-            "*e acquires ownership of a new resource. Its previous String is dropped here only if nothing above moved it out (Rust tracks this with a runtime drop flag).",
+            "A value is stored at *e. Its previous String is dropped here only if nothing above moved it out (Rust tracks this with a runtime drop flag).",
             "f's contents may have been moved out above, so f can't be used from here on until *f or f is assigned again.",
             "f acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
             "g's contents may have been moved out above, so g can't be used from here on.",
@@ -17572,12 +17574,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // …". Checked with a `Drop`-printing type (and the Box's address
         // is unchanged).
         must_contain: &[
-            "*bx acquires ownership of a new resource; its previous resource is dropped",
-            "**rb acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *bx is dropped and the replacement is stored there",
+            "The old value at **rb is dropped and the replacement is stored there",
             "Move from String::from to **rb",
-            "*cx acquires ownership of a new resource; its previous resource is dropped",
-            "***rrc acquires ownership of a new resource; its previous resource is dropped",
-            "**p acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *cx is dropped and the replacement is stored there",
+            "The old value at ***rrc is dropped and the replacement is stored there",
+            "The old value at **p is dropped and the replacement is stored there",
         ],
         must_not_contain: &[
             "bx acquires ownership of a new resource; its previous resource (including the String it holds) is dropped",
@@ -17967,7 +17969,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource w points to is modified through r",
             "the resource u points to is modified through m",
             "*y is assigned a new value",
-            "*n acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *n is dropped and the replacement is stored there",
             "v is a mutable borrow from the caller",
             "v holds a mutable reference; it can read and write the borrowed resource",
             "the resource v points to is mutably borrowed by x through v; v can't be used while the borrow is live",
@@ -19300,8 +19302,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e's mutable borrow ends",
             "y no longer borrows the resource t points to",
             "t's mutable borrow ends",
-            "*u acquires ownership of a new resource; its previous resource is dropped",
-            "*q acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *u is dropped and the replacement is stored there",
+            "The old value at *q is dropped and the replacement is stored there",
             "the value n points to is modified through x",
             "x no longer borrows the value n points to",
         ],
@@ -20484,8 +20486,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource a points to is modified through x when x points into it (x points into the resource a or b points to)",
             "the resource b points to is modified through x when x points into it (x points into the resource a or b points to)",
             "the resource d points to is modified through y",
-            "*x acquires ownership of a new resource; its previous resource is dropped, when x points into the resource e points to (x points into the resource e or f points to)",
-            "*x acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *x is dropped and the replacement is stored there, when x points into the resource e points to (x points into the resource e or f points to)",
+            "The old value at *x is dropped and the replacement is stored there",
             "p's resource is modified through x when x points into it (x points into p's resource or q's value)",
             "q's value is modified through x when x points into it (x points into p's resource or q's value)",
         ],
@@ -20495,7 +20497,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource c points to is modified through",
             // #1365: f was moved into the loop's iterator by `chain(f)`;
             // its column ended there.
-            "*x acquires ownership of a new resource; its previous resource is dropped, when x points into the resource f points to (x points into the resource e or f points to)",
+            "The old value at *x is dropped and the replacement is stored there, when x points into the resource f points to (x points into the resource e or f points to)",
             "f's mutable borrow ends",
         ],
     },
@@ -21339,7 +21341,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the `?` here returns early, t's resource is dropped. If the `?` succeeds, the assignment runs: t acquires ownership of a new resource; its previous resource is dropped.",
             "If the `?` here returns early, p's resource is dropped. If the `?` succeeds, the assignment to p.f runs.",
             "If the `?` here returns early, p.f's resource is dropped. If the `?` succeeds, the assignment runs: p.f acquires ownership of a new resource; its previous resource is dropped.",
-            "If the `?` here returns early, v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: v[0] acquires ownership of a new resource; its previous resource is dropped.",
+            "If the `?` here returns early, v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: the old value at v[0] is dropped and the replacement is stored there.",
             "If the `?` here returns early, u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
             "If the `?` here returns early, x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
             "x's resource is mutably borrowed by push_str; x can't be used while the borrow is live",
@@ -21352,6 +21354,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "nothing happens to p here",
             "nothing happens to p.f here",
             "nothing happens to v here",
+            "If the `?` succeeds, v's resource isn't dropped here.",
             "nothing happens to u here",
             "nothing happens to x here",
             "nothing happens to y here",
@@ -23564,13 +23567,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // column (#1163) and when a `match` / `if let` scrutinee's tuple
         // takes it. main left p.a "holds a copyable value" to its scope end.
         must_contain: &[
-            "p.a's value is moved",
-            "q.a's value is moved",
-            "p.a's value is moved into the temporary tuple (s, p)",
+            "p moves as a whole, so p.a is no longer accessible here. The field is still Copy",
+            "q moves as a whole, so q.a is no longer accessible here. The field is still Copy",
+            "p moves as a whole into the temporary tuple (s, p), carrying p.a with it. The field is still Copy",
             "q.b's value is moved",
-            "q.b.a's value is moved",
+            "q moves as a whole, so q.b.a is no longer accessible here. The field is still Copy",
         ],
-        must_not_contain: &[],
+        must_not_contain: &["p.a's value is moved into the temporary tuple (s, p)", "q.b.a's value is moved"],
     },
     TooltipExpect {
         name: "slice_elem_moves_1285",
@@ -24012,7 +24015,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `let _ = y;` moves nothing, and t is Copy.
         must_contain: &[
             "p's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
-            "p.a's value is moved",
+            "p moves as a whole, so p.a is no longer accessible here. The field is still Copy",
             "q's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
             "u's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
             "v's value is moved into a temporary that is discarded at the end of this statement (it has nothing to drop)",
@@ -24616,13 +24619,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // payload's parts is one dot, as `*b2 = (..)` is.
         must_contain: &[
             "Move from u to *b",
-            "*b acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *b is dropped and the replacement is stored there",
             "Move from make to *b3",
-            "*b3 acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *b3 is dropped and the replacement is stored there",
             "Move from o to *b2",
             "*b2 acquires ownership of a new resource. Its previous b2.0 was moved out earlier, so nothing of it is dropped.",
             "Move from o2 to *b4",
-            "*b4 acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *b4 is dropped and the replacement is stored there",
         ],
         must_not_contain: &[
             "=*b2 acquires ownership of a resource",
@@ -26822,7 +26825,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // an `if` / `else` that assigns b on both paths it said "(or, if it
         // isn't, when it goes out of scope)": b is assigned on every path.
         must_contain: &[
-            "o may be partially moved above, so it can't be used as a whole after the if until it's assigned again. If the assignment runs and o still holds its old resource (including the String it holds, if any), that resource is dropped when o is assigned again. If a panic unwinds before the assignment, cleanup can drop the resource o still holds. If execution reaches the end of o's scope while it still holds its resource (including the String it holds, if any), it is dropped there.",
+            "o may be partially moved above, so it can't be used as a whole after the if until it's assigned again. If the assignment runs and o still holds its old resource (including the String it holds, if any), that resource is dropped when o is assigned again. If a panic unwinds before the assignment, cleanup can drop the resource o still holds.",
             "e may be partially moved above, so it can't be used as a whole after the if until it's assigned again. If the assignment runs and e still holds its old resource (including the String it holds, if any), that resource is dropped when e is assigned again. If a panic unwinds before the assignment, cleanup can drop the resource e still holds.",
             "p keeps its value at runtime. The borrow checker considers a move on an unreachable path, so p can't be used here (until it's assigned again).",
             "b may be partially moved above, so it can't be used as a whole after the if until it's assigned again. If the assignment runs and b still holds its old resource (including the String it holds, if any), that resource is dropped when b is assigned again. If a panic unwinds before the assignment, cleanup can drop the resource b still holds.",
@@ -26961,7 +26964,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // on main m's column was State::Invalid from the write on).
         must_contain: &[
             "r no longer borrows the resource m points to",
-            "*m acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *m is dropped and the replacement is stored there",
             "m.a's resource is no longer immutably borrowed",
         ],
         must_not_contain: &[],
@@ -27342,8 +27345,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when s goes out of scope.",
             "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
-            "t was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If t still holds a value, its resource is dropped when t goes out of scope.",
-            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "t holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so t can't be used here until it's assigned again. Its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
             "u may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when u goes out of scope.",
             "w was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If w still holds a value, its resource is dropped when w goes out of scope.",
         ],
@@ -27355,21 +27358,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w has no value yet",
         ],
     },
-    // #1514: a variable a loop may have left unassigned, assigned in a
-    // conditional nested in one arm: the outer join says it may have no
-    // value (main drew no dot there, and t "the owner" after a `match`
-    // whose arm assigns it on both inner paths).
+    // #1514: borrowck still considers the path that skips initialization.
+    // Both ranges are nonempty. At runtime the nested write to s drops
+    // the loop's value, and t has a value to drop at scope exit.
     TooltipExpect {
         name: "loop_maybe_init_nested_assign_1514",
         must_contain: &[
-            "s acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned s (Rust tracks this with a runtime drop flag).",
-            "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
-            "t may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when t goes out of scope.",
-            "t goes out of scope. Its resource is dropped here only if t still holds it (Rust tracks this with a runtime drop flag).",
+            "s acquires ownership of a new resource; its previous resource is dropped. Rust tracks this with a runtime drop flag. This assignment runs on only some paths through this expression.",
+            "s holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so s can't be used here until it's assigned again. Its resource is dropped when s goes out of scope.",
+            "t holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so t can't be used here until it's assigned again. Its resource is dropped when t goes out of scope.",
+            "t goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
         ],
         must_not_contain: &[
-            "=s acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned s (Rust tracks this with a runtime drop flag). This assignment runs on only some paths through this expression.",
-            "=t goes out of scope. Its resource is dropped.",
+            "t may have no value after the branches",
+            "If it has one, its resource is dropped when t goes out of scope",
+            "t goes out of scope. Its resource is dropped here only if t still holds it",
         ],
     },
     // #1533: after a conditional that may have left s holding a value, a
@@ -28682,6 +28685,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &["de.a isn't moved in any of the branches above"],
     },
     TooltipExpect {
+        // The partial drop states which field moved and why no payload
+        // remains in the enum field; the flag clause alone loses that.
+        name: "known_bugs/1595_struct_arm_parts_moved",
+        must_contain: &["op goes out of scope. op.a was moved out earlier. No value inside op.opt remains to drop here. No resource is dropped. op.opt's None variant carries no payload. For op.opt's Some variant, the String payload was moved out. Rust tracks the move with a runtime drop flag."],
+        must_not_contain: &[],
+    },
+    TooltipExpect {
         // Inserting a borrow of s at any of the last three ifs gives
         // E0382. Only the first if's assignment can replace the drop.
         name: "rv3_issues/1584_maybe_held_two_returning_ifs",
@@ -28748,7 +28758,264 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the same lifetime as its argument, so it may point into either",
         ],
     },
+    TooltipExpect {
+        // The return place receives a mutable reborrow through s in MIR.
+        name: "issue_1909_reborrow_return",
+        must_contain: &["a mutable reference to *s, reborrowed through s, is returned to the caller; the data it points to is not copied"],
+        must_not_contain: &["s's mutable reference is moved to the caller"],
+    },
+    TooltipExpect {
+        // The tie constrains both possible argument lenders even when
+        // static_holder's MIR returns a reference to GLOBAL.
+        name: "issue_1909_forwarded_origin",
+        // Migrated to the #1913 signature convention: holder's signature
+        // ties the struct's lifetime to its argument, which is the
+        // reference longest returned (return paths from both inputs).
+        must_contain: &[
+            "Immutable borrow from s or t to h.r: holder's signature gives the struct it returns the same lifetime as its argument. holder receives a shared reborrow of the reference returned by longest. The code in longest has return paths from both inputs. At the caller, both stay borrowed while h.r is in use",
+            "Immutable borrow from s or t to h.r: static_holder's signature gives the struct it returns the same lifetime as its argument. static_holder receives a shared reborrow of the reference returned by longest. The code in longest has return paths from both inputs. At the caller, both stay borrowed while h.r is in use",
+            "The borrow checker tracks s or t as possible lenders for h.r: static_holder's signature gives the struct it returns the same lifetime as its argument. static_holder receives a shared reborrow of the reference returned by longest. The code in longest has return paths from both inputs. At the caller, both stay borrowed while h.r is in use",
+        ],
+        must_not_contain: &[
+            "The possible borrow sources come through that argument",
+            "it may point into either, so both stay borrowed while h.r is in use",
+        ],
+    },
+    TooltipExpect {
+        // Drop elaboration drops the old value at *m before storing s there.
+        name: "issue_1909_replace_referent",
+        must_contain: &[
+            "The old value at *m is dropped and the replacement is stored there",
+            "m's mutable borrow ends",
+            "The old value at *b is dropped and the replacement is stored there",
+        ],
+        must_not_contain: &["*m acquires ownership of a new resource", "*b acquires ownership of a new resource"],
+    },
+    TooltipExpect {
+        // The MIR move operand is the whole tuple. The i32 field is Copy.
+        name: "issue_1909_aggregate_move",
+        must_contain: &["tp moves as a whole, so tp.1 is no longer accessible here. The field is still Copy"],
+        must_not_contain: &["tp.1's value is moved"],
+    },
+    TooltipExpect {
+        // The operand of each loan is the second binding of s.
+        name: "issue_1909_named_lender",
+        must_contain: &["m2 mutably borrows a resource from s₂", "r immutably borrows a resource from s₂"],
+        must_not_contain: &["=m2 mutably borrows a resource", "=r immutably borrows a resource"],
+    },
+    TooltipExpect {
+        // A read of s3 after the labeled initializer is accepted by rustc.
+        name: "issue_1909_block_binding",
+        must_contain: &["s3 is the owner of the resource"],
+        must_not_contain: &["s3 may have no value here because it hasn't been assigned on every path"],
+    },
+    TooltipExpect {
+        // Rustc accepts a read of tp.1 after the let-else. Only tp.0 moved.
+        name: "issue_1909_sibling_move",
+        must_contain: &["tp.1 holds a copyable value"],
+        must_not_contain: &["tp.1 can't be used here"],
+    },
+    TooltipExpect {
+        // The break calls FnOnce::call_once. The call result carries the
+        // capture into arr, and rustc rejects a read of c after the block.
+        name: "issue_1909_closure_break",
+        must_contain: &[
+            "Calling c consumes it on the branch that exits here",
+            "c was consumed on every path that completes the block at runtime. The borrow checker rejects uses of c after the block",
+            "c goes out of scope. No resource is dropped. Rust tracks this with a runtime drop flag.",
+        ],
+        must_not_contain: &["c isn't moved in any of the branches above", "c goes out of scope. Its 1 captured resource is dropped."],
+    },
+    TooltipExpect {
+        // The runtime executes both iterations. A read before the next
+        // assignment still fails rustc's initialization check.
+        name: "issue_1909_range_init",
+        must_contain: &["s holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so s can't be used here until it's assigned again. Its resource is dropped when s is assigned again."],
+        must_not_contain: &["the loop may end before assigning it", "here only if the loop above assigned s"],
+    },
+    TooltipExpect {
+        // Drop instrumentation shows the new value is always dropped
+        // at scope exit. The checker still rejects reads at the join.
+        name: "issue_1909_true_assignment",
+        must_contain: &[
+            "s holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so s can't be used here until it's assigned again. Its resource is dropped when s goes out of scope.",
+            "s goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+        ],
+        must_not_contain: &["s may have no value after the branches", "only if s still holds it"],
+    },
+    TooltipExpect {
+        // Constant true takes the break. Rustc still checks the move
+        // from tp.0 in the skipped tail and forbids a later read of it.
+        name: "issue_1909_skipped_tail",
+        must_contain: &[
+            "s3 acquires ownership of a resource (from break 'blk String::from(\"x\"))",
+            "At runtime, the block skips its last expression, tp.0",
+            "At runtime, the block skips its last expression, tp.0. The borrow checker still checks the move of tp.0's resource, so tp.0 can't be used after the block",
+            // MIR guards the drop of tp.0 with a flag, although the flag is
+            // always set when the scope ends.
+            "tp goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "tp.0 goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+        ],
+        must_not_contain: &[
+            "from whichever break or last expression ended the block",
+            "Move from tp.0 to s3, if the block ended with its last expression",
+            "tp.0 may have been moved: the block can end with its last expression",
+            "tp.0 goes out of scope. Its resource is dropped here only if",
+        ],
+    },
+    TooltipExpect {
+        // whole_move: `take` is a parameter, so on the path that assigned p
+        // and did not take, p still holds its resource at scope end. The
+        // moves sit in a nested branch, not in "each branch that assigned".
+        name: "mixed_init_review_1902",
+        must_contain: &["p goes out of scope. Its resource is dropped here only if p still holds it (Rust tracks this with a runtime drop flag)."],
+        must_not_contain: &["p goes out of scope. No resource is dropped: each branch above that assigned p moved it away."],
+    },
+    TooltipExpect {
+        // MIR selects the breaks. The compiler still checks the move of
+        // s, so a subsequent read of it fails with E0382.
+        name: "issue_1909_review_exits",
+        must_contain: &[
+            "At runtime, the block skips its last expression, { t }",
+            "At runtime, the block skips its last expression, b",
+            "At runtime, the block skips its last expression, &b",
+            "s's resource is moved to z when the block ends with break 'blk s, so s can't be used after the block",
+        ],
+        must_not_contain: &[
+            "t's resource is moved to the caller",
+            "b's value is copied. This exit is skipped",
+            "b's resource is immutably borrowed by z",
+            "Immutable borrow from b to z",
+        ],
+    },
+    TooltipExpect {
+        // ElaborateDrops removes the drop before the Box payload store,
+        // and keeps the final drop of the now-complete Box. Neither tuple
+        // has a String left to drop. The Rc's flag and refcount both matter.
+        name: "issue_1909_review_drop",
+        must_contain: &[
+            "p goes out of scope. No resource is dropped. Rust tracks this with a runtime drop flag.",
+            "A value is stored at *b. Its previous String was moved out earlier, so nothing is dropped.",
+            "b goes out of scope. Its resource is dropped (including the String it holds).",
+            "The borrow checker treats p as possibly moved here, so p can't be used here. No resource remains in p on the paths that run.",
+            "r holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so r can't be used here. Its resource is dropped when r goes out of scope (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
+            "s goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+        ],
+        must_not_contain: &[
+            "The old value at *b is dropped",
+            "*b acquires ownership of a new resource",
+            "Its contents were moved out earlier, so the Box doesn't drop them",
+            "p holds a value here on every path that runs",
+            "s goes out of scope. Its resource is dropped here only if the loop above assigned s",
+        ],
+    },
+    TooltipExpect {
+        // These three caller bodies respectively skip call_once, invoke
+        // it inside Some, and move the receiver before evaluating an
+        // argument that can return early.
+        name: "issue_1909_review_closure",
+        must_contain: &[
+            "The call to c is skipped at runtime",
+            "c goes out of scope. Its 1 captured resource is dropped. Rust tracks this with a runtime drop flag.",
+            "c was consumed on every path that completes the block at runtime. The borrow checker rejects uses of c after the block",
+            "c is moved into a temporary before evaluating the call arguments on the branch that exits here",
+            "c is moved before the arguments are evaluated. If they finish, c is moved into the call (an FnOnce closure can only be called once). If the call starts, s, which c captured, is moved out of the closure as the call's result",
+        ],
+        must_not_contain: &[
+            "c isn't moved in any of the branches above",
+            "c's resource is moved to z when the block ends with break 'blk Some(c())",
+        ],
+    },
 ];
+
+#[test]
+fn closure_break_ends_the_owned_segment_1909() {
+    let timeline = run_with_local_backend("issue_1909_closure_break").timeline_panel_string();
+    let elements = common::svg::rv_elements(&timeline);
+    let owned: Vec<_> = elements.iter().filter(|e| e.kind == "line" && e.var.as_deref() == Some("c")
+        && e.state.as_deref() == Some("full_privilege")).collect();
+    // MIR moves the receiver on row 5. The straight segment must reach
+    // the consuming call and must never draw ownership below it.
+    assert!(owned.iter().any(|e| e.line_end.as_deref() == Some("5")), "{owned:?}");
+    assert!(owned.iter().all(|e| e.line_end.as_deref().unwrap().parse::<usize>().unwrap() <= 5), "{owned:?}");
+}
+
+#[test]
+fn completed_block_binding_reads_later_mir_on_the_same_row_1909() {
+    // Rustc rejects an access to s before r.push (E0502).
+    assert_owner_title("issue_1909_review_binding", "s", 13, 14, Some("revoked_privilege"),
+        "s's resource is mutably borrowed by r", "s is the owner");
+    let timeline = run_with_local_backend("issue_1909_review_binding").timeline_panel_string();
+    // Rustc rejects a read on row 6 after the same-row consumption (E0382).
+    assert!(!common::svg::rv_elements(&timeline).iter().any(|e| e.kind == "line"
+        && e.var.as_deref() == Some("s") && e.state.as_deref() == Some("full_privilege")
+        && e.line.as_deref().is_some_and(|start| start.parse::<usize>().unwrap() <= 5)
+        && e.line_end.as_deref().is_some_and(|end| end.parse::<usize>().unwrap() > 5)));
+}
+
+#[test]
+fn reborrow_return_dot_and_arrow_1909() {
+    let timeline = run_with_local_backend("issue_1909_reborrow_return").timeline_panel_string();
+    for id in ["s@L2:dot:", "s>caller@L2:arrow:"] {
+        let title = tooltip_of_id(&timeline, id).unwrap_or_else(|| panic!("missing {id}"));
+        assert!(title.contains("a mutable reference to *s, reborrowed through s, is returned to the caller"), "{id}: {title}");
+        assert!(!title.contains("s's mutable reference is moved to the caller"), "{id}: {title}");
+    }
+}
+
+#[test]
+fn skipped_caller_transfer_and_returned_field_dot_and_arrow_1909() {
+    let timeline = run_with_local_backend("issue_1909_review_exits").timeline_panel_string();
+    for id in ["t@L5:dot:", "t>caller@L5:arrow:"] {
+        let title = tooltip_of_id(&timeline, id).unwrap_or_else(|| panic!("missing {id}"));
+        assert!(title.contains("At runtime, the block skips its last expression, { t }"), "{id}: {title}");
+        assert!(!title.contains("t's resource is moved to the caller"), "{id}: {title}");
+    }
+    let timeline = run_with_local_backend("return_early_no_drop").timeline_panel_string();
+    for id in ["p.x@L11:dot:", "p.x>caller@L11:arrow:"] {
+        let title = tooltip_of_id(&timeline, id).unwrap_or_else(|| panic!("missing {id}"));
+        assert!(title.contains("p moves as a whole to the caller, carrying p.x with it"), "{id}: {title}");
+        assert!(!title.contains("p.x's value is moved to the caller"), "{id}: {title}");
+    }
+}
+
+#[test]
+fn holder_use_and_unrelated_sibling_at_their_boundaries_1909() {
+    // Rustc rejects drop(t) before black_box(&h) (E0505), and
+    // accepts the same drop immediately after it.
+    for lender in ["s", "t"] {
+        assert_owner_title("issue_1909_forwarded_origin", lender, 31, 32, Some("partial_privilege"),
+            "being shared", "is the owner");
+    }
+    assert_owner_title("issue_1909_forwarded_origin", "t", 32, 33, Some("full_privilege"),
+        "is the owner", "being shared");
+    // Matching moves tp.0, and rustc accepts a read of tp.1 after the let-else.
+    for row in [9, 20] {
+        assert_owner_title("issue_1909_sibling_move", "tp.1", row, row + 1, Some("full_privilege"),
+            "tp.1 holds a copyable value", "tp.1 can't be used");
+    }
+}
+
+#[test]
+fn restored_box_payload_reaches_its_scope_drop_1909() {
+    // ElaborateDrops moves the payload, stores it back, and drops
+    // the restored Box at scope exit.
+    assert_owner_title("issue_1909_review_drop", "b", 2, 3, Some("full_privilege"),
+        "b is the owner of the resource", "was moved out");
+}
+
+#[test]
+fn runtime_drop_facts_cover_first_range_visit_and_skip_dead_writes_1909() {
+    let rv = run_with_local_backend("issue_1909_review_drop");
+    let facts = rv.facts().unwrap();
+    let skipped = fact_row(fact_body(facts, "skipped_write"), 14);
+    assert!(!skipped["facts"].as_array().unwrap().iter().any(|f|
+        f["ev"] == "Drop" && f["path"] == "s" && f["at_reassign"] == true));
+    // The first next returns Some and the break precludes another visit.
+    let first = fact_row(fact_body(facts, "first_iteration"), 29);
+    assert!(first["facts"].as_array().unwrap().iter().any(|f|
+        f["ev"] == "Drop" && f["path"] == "s" && f["how"] == "drops"), "{first}");
+}
 
 #[test]
 fn aggregate_operand_issue_rows_1657() {
@@ -38140,11 +38407,11 @@ fn get_mut_writes_are_drawn_on_the_collection() {
         ("v", "*y = 7;", "*y is assigned a new value", Some("v's resource is no longer mutably borrowed")),
         ("m", "*m.get_mut(\"k\").unwrap() = 5;", "*m.get_mut(…).unwrap() is assigned a new value", Some("m's resource is no longer mutably borrowed")),
         ("names", "*names.get_mut(0).unwrap() = String::from(\"c\");",
-            "*names.get_mut(0).unwrap() acquires ownership of a new resource; its previous resource is dropped",
+            "The old value at *names.get_mut(0).unwrap() is dropped and the replacement is stored there",
             Some("names's resource is no longer mutably borrowed")),
-        ("names", "*n = String::from(\"d\");", "*n acquires ownership of a new resource; its previous resource is dropped",
+        ("names", "*n = String::from(\"d\");", "The old value at *n is dropped and the replacement is stored there",
             Some("names's resource is no longer mutably borrowed")),
-        ("b.items", "*it = String::from(\"f\");", "*it acquires ownership of a new resource; its previous resource is dropped",
+        ("b.items", "*it = String::from(\"f\");", "The old value at *it is dropped and the replacement is stored there",
             Some("b.items's resource is no longer mutably borrowed")),
         ("v", "*e *= 2;", "v's resource is modified through e", None),
     ] {
@@ -38172,7 +38439,7 @@ fn get_mut_writes_through_a_ref_param_are_drawn_on_it() {
         ("w", "*r *= 2;", "the resource w points to is modified through r", "r no longer borrows the resource w points to"),
         ("u", "*m += 10;", "the resource u points to is modified through m", "m no longer borrows the resource u points to"),
         ("t", "*y = 7;", "*y is assigned a new value", "y no longer borrows the resource t points to"),
-        ("names", "*n = String::from(\"z\");", "*n acquires ownership of a new resource; its previous resource is dropped",
+        ("names", "*n = String::from(\"z\");", "The old value at *n is dropped and the replacement is stored there",
             "n no longer borrows the resource names points to"),
     ] {
         let at = (label_x(&tl, column), code_row_y(&code, line));
@@ -38525,7 +38792,7 @@ fn param_writes_are_drawn_on_the_parameter() {
         ("r", closes[4], "the `for` loop's iterator no longer borrows the resource r points to", Some("r's mutable borrow ends")),
         ("s", closes[4], "s's resource is no longer mutably borrowed", None),
         ("t", code_row_y(&code, "*y = 7;"), "y no longer borrows the resource t points to", Some("t's mutable borrow ends")),
-        ("u", code_row_y(&code, "*q = vec![9];"), "*u acquires ownership of a new resource; its previous resource is dropped",
+        ("u", code_row_y(&code, "*q = vec![9];"), "The old value at *u is dropped and the replacement is stored there",
             Some("q no longer borrows the resource u points to")),
         ("n", code_row_y(&code, "*x += 1;"), "the value n points to is modified through x", Some("x no longer borrows the value n points to")),
     ];
@@ -38965,7 +39232,7 @@ fn chain_writes_are_drawn_on_each_column_x_may_point_into() {
     let assign = code_row_y(&code, "*x = String::new();");
     let double = code_row_y(&code, "*x *= 2;");
     let either = |n: &str| format!("the resource {n} points to is modified through x when x points into it (x points into the resource a or b points to)");
-    let assigned = |n: &str| format!("*x acquires ownership of a new resource; its previous resource is dropped, when x points into the resource {n} points to (x points into the resource e or f points to)");
+    let assigned = |n: &str| format!("The old value at *x is dropped and the replacement is stored there, when x points into the resource {n} points to (x points into the resource e or f points to)");
     let rows = [
         ("a", incr, either("a")),
         ("b", incr, either("b")),
@@ -38991,7 +39258,7 @@ fn chain_writes_are_drawn_on_each_column_x_may_point_into() {
         assert!(!there.contains(&at), "{:?} on {}'s column: {:?}", wrong, column, there);
     }
     // x's own dot says the old value is dropped, wherever x points.
-    let x_drop = dots_where(&tl, |lines| lines.iter().any(|l| l == "*x acquires ownership of a new resource; its previous resource is dropped"));
+    let x_drop = dots_where(&tl, |lines| lines.iter().any(|l| l == "The old value at *x is dropped and the replacement is stored there"));
     assert!(x_drop.iter().any(|&(_, y)| y == assign), "no dot on the `*x = String::new();` row says the old value is dropped: {:?}", x_drop);
 }
 
@@ -41903,15 +42170,15 @@ fn loan_ends_before_conflicting_use_1529_1516() {
         ][..]),
         ("write_after_reborrow_1516", &[
             &["r no longer borrows the resource m points to",
-              "*m acquires ownership of a new resource; its previous resource is dropped",
+              "The old value at *m is dropped and the replacement is stored there",
               "m's mutable borrow ends"][..],
             &["r no longer borrows the value m points to", "*m is assigned a new value"][..],
             &["r2 no longer borrows the resource m points to",
-              "*m acquires ownership of a new resource; its previous resource is dropped"][..],
+              "The old value at *m is dropped and the replacement is stored there"][..],
             &["r3 no longer borrows the resource m points to",
-              "*m acquires ownership of a new resource; its previous resource is dropped"][..],
+              "The old value at *m is dropped and the replacement is stored there"][..],
             &["m.a's resource is no longer immutably borrowed",
-              "m.a acquires ownership of a new resource; its previous resource is dropped"][..],
+              "The old value at m.a is dropped and the replacement is stored there"][..],
         ][..]),
     ] {
         let tips = tooltip_lines(&run_with_local_backend(snippet).timeline_panel_string());
@@ -43785,6 +44052,29 @@ fn conditional_forks_use_their_own_init_state_1916() {
             assert_review_title(tip, &[want], &[wrong, early]);
         }
     }
+}
+
+#[test]
+fn skipped_labeled_block_assignment_uses_checked_wording_1909() {
+    let svg = run_with_local_backend("rv3_1916_same_row_assignment").timeline_panel_string();
+    let join = tooltip_of_id(&svg, "s@L7:dot:branch_join").expect("labeled block join");
+    // MIR takes the break. Rustc still considers the fallthrough, and
+    // rejects a read here with E0382.
+    assert_review_title(&join,
+        &["s may have no value when this block ends and can't be used here", "At runtime the block skips the assignment."],
+        &["it is dropped there"]);
+}
+
+#[test]
+fn skipped_else_write_uses_checked_wording_1909() {
+    let svg = run_with_local_backend("geometry_1907/rv3_1907_2711_10_fork_without_dot").timeline_panel_string();
+    let elements = rv_elements(&svg, "s@L8:dot:");
+    let (_, tip, ..) = elements.iter().find(|(id, ..)| id.contains("owner_drop_at_reassign")).expect("skipped else write");
+    // Pre-elaboration MIR checks an assignment on the else edge.
+    // Execution never takes the edge and drops no old value there.
+    assert_review_title(tip,
+        &["The borrow checker treats s as assigned on this path. The assignment is skipped at runtime."],
+        &["previous resource", "acquires ownership"]);
 }
 
 #[test]
