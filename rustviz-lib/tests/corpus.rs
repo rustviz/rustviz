@@ -42363,8 +42363,6 @@ fn loan_ends_before_conflicting_use_1529_1516() {
             &["r no longer borrows the value m points to", "*m is assigned a new value"][..],
             &["r2 no longer borrows the resource m points to",
               "The old value at *m is dropped and the replacement is stored there"][..],
-            &["r3 no longer borrows the resource m points to",
-              "The old value at *m is dropped and the replacement is stored there"][..],
             &["m.a's resource is no longer immutably borrowed",
               "The old value at m.a is dropped and the replacement is stored there"][..],
         ][..]),
@@ -42375,6 +42373,13 @@ fn loan_ends_before_conflicting_use_1529_1516() {
                 "{snippet}: no dot says, in this order, {seq:#?}\ndots: {tips:#?}");
         }
     }
+    // `*m = String::from(r3)`: the call's argument is its own operand
+    // transfer now, so r3's end and the store are on consecutive dots of
+    // the row rather than one. Rustc still ends r3 before the write.
+    let tips: Vec<String> = tooltip_lines(&run_with_local_backend("write_after_reborrow_1516").timeline_panel_string())
+        .into_iter().flatten().collect();
+    let end = tips.iter().position(|t| t == "r3 no longer borrows the resource m points to").expect("r3's end");
+    assert!(tips[end..].iter().any(|t| t == "The old value at *m is dropped and the replacement is stored there"), "{tips:#?}");
     // The shared reference is copied at String::from. Its last use and
     // the store both belong to L42, with distinct marks in MIR order.
     let svg = run_with_local_backend("write_after_reborrow_1516").timeline_panel_string();

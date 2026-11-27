@@ -6752,6 +6752,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             self.row_layout.aggregate_titles.insert(*self.unique_id, title);
           }
           self.add_read_transfer(&read, if moving { Evt::Move } else { Evt::Copy }, to_ro, from);
+          // The ordinary replay of a short-circuit RHS doesn't see
+          // through the parent's move. End each reference field here
+          // even if it could be copied out of the holder on its own.
+          if moving {
+            if let Some(transfer) = self.transfer_at(arg).filter(|t| matches!(t.kind, Evt::Move)) {
+              if let Some(moved) = self.body_facts.and_then(|b| b.drop_moves.get(&transfer.location)) {
+                for field in &moved.fields {
+                  if let Some(rd) = self.raps.place(moved.local, field).filter(|r| r.rap.is_ref()) {
+                    self.add_ev(transfer.row, Evt::Move, ResourceTy::Anonymous, ResourceTy::Value(rd.rap.clone()), false);
+                  }
+                }
+              }
+            }
+          }
           return;
         }
         OperandEffect::Borrow { source, mutable, of_ref_slot } => {
