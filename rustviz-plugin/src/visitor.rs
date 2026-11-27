@@ -30,7 +30,7 @@ fn is_let_chain(expr: &Expr) -> bool {
 /// True if `pat` matches every value of its type. Conservative: only
 /// bindings, `_`, tuples, references / boxes, and struct patterns (not
 /// enum variants) of such patterns count.
-fn pat_is_irrefutable(pat: &Pat, typeck: &rustc_middle::ty::TypeckResults) -> bool {
+pub(crate) fn pat_is_irrefutable(pat: &Pat, typeck: &rustc_middle::ty::TypeckResults) -> bool {
   let is_struct = |qpath: &QPath| matches!(typeck.qpath_res(qpath, pat.hir_id),
     Res::Def(DefKind::Struct | DefKind::Ctor(CtorOf::Struct, _), _));
   match pat.kind {
@@ -387,7 +387,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (a constructor never receives anything, #768).
     let ctor_value = !e.span.from_expansion()
       && matches!(e.kind, ExprKind::Call(callee, args) if is_ctor_path(callee, tycheck_results)
-        && args.iter().any(|a| ctor_part_carries_value(a, tycheck_results)
+        && args.iter().any(|a| ctor_part_carries_value(self.tcx, a, tycheck_results)
           // `Some(*b)`: the Box's contents (#1191).
           || self.box_contents_of(a).is_some()
           // `Some(B { name: s })`: what the literal is built from (#1143).
@@ -397,7 +397,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       && !self.is_copy_literal_value(e);
     if (matches!(e.kind, ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Array(..)) && !e.span.from_expansion())
       || ctor_value
-      || vec_macro_elems(e).is_some() {
+      || vec_macro_elems(self.tcx, e).is_some() {
       // `User { email, .. }` / `(s, 1)` / `[s, t]` as the returned value: the
       // literal's field initialisers move/copy their sources into
       // the returned value.
@@ -1614,7 +1614,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.visit_expr(tail);
       }
       ExprKind::Call(_, args) => {
+        let repeated = vec_macro_elems(self.tcx, expr).and_then(|elems| elems.first())
+          .filter(|first| args.first().is_some_and(|a| a.hir_id == first.hir_id));
         for a in args {
+          if repeated.is_some_and(|first| a.hir_id == first.hir_id) {
+            self.draw_vec_place(a, None);
+          }
           self.descend_through_expansion(a);
         }
         // A panic macro unwinds once its message's arguments have
@@ -1668,7 +1673,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.descend_through_expansion(inner);
       }
       ExprKind::Array(items) | ExprKind::Tup(items) => {
+        let vec = vec_macro_elems(self.tcx, expr).is_some();
         for i in items {
+          if vec {
+            if !self.vec_element_reached(i, expr.span.ctxt().outer_expn()) { continue; }
+            self.draw_vec_place(i, None);
+          }
           self.descend_through_expansion(i);
         }
       }
@@ -2097,9 +2107,9 @@ fn holds_try(e: &Expr<'_>) -> bool {
 /// a variable or field, a call's result (#783), or a tuple, array or
 /// `vec![…]` literal holding one (`Some((s, 1))`, `Some(vec![s])`,
 /// #1185). Those go to the caller inside the returned value.
-fn ctor_part_carries_value<'tcx>(a: &'tcx Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'_>) -> bool {
-  if let Some(elems) = vec_macro_elems(a) {
-    return elems.iter().any(|e| ctor_part_carries_value(e, typeck));
+fn ctor_part_carries_value<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, a: &'tcx Expr<'tcx>, typeck: &rustc_middle::ty::TypeckResults<'_>) -> bool {
+  if let Some(elems) = vec_macro_elems(tcx, a) {
+    return elems.iter().any(|e| ctor_part_carries_value(tcx, e, typeck));
   }
   if a.span.from_expansion() {
     return matches!(a.kind, ExprKind::Path(_) | ExprKind::Field(..));
@@ -2107,7 +2117,7 @@ fn ctor_part_carries_value<'tcx>(a: &'tcx Expr<'tcx>, typeck: &rustc_middle::ty:
   match a.kind {
     ExprKind::Path(_) | ExprKind::Field(..) => true,
     ExprKind::Call(..) | ExprKind::MethodCall(..) => !typeck.node_type(a.hir_id).is_ref(),
-    ExprKind::Tup(elems) | ExprKind::Array(elems) => elems.iter().any(|e| ctor_part_carries_value(e, typeck)),
+    ExprKind::Tup(elems) | ExprKind::Array(elems) => elems.iter().any(|e| ctor_part_carries_value(tcx, e, typeck)),
     _ => false,
   }
 }
@@ -3482,6 +3492,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `if c { return 1; } else { return 2; }` as `()`, not `!`, so the
   /// type alone misses a nested `else if` whose branches all return.
   pub fn expr_diverges(&self, e: &'tcx Expr<'tcx>) -> bool {
+    let value = match e.kind { ExprKind::Assign(_, rhs, _) => rhs, _ => e };
+    if self.unfinished_vec(value) { return true; }
     if self.tcx.typeck(e.hir_id.owner).expr_ty_opt(e).is_some_and(|ty| ty.is_never()) {
       return true;
     }
@@ -5369,6 +5381,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
           }
         };
         self.add_fn(fn_name.clone());
+        self.closure_call_events(expr, fn_expr);
         let defer = args.iter().skip(1).any(|a| holds_try(a));
         self.visit_call_args(args, &fn_name, defer, |_| {});
         // `g()` with `g` a `Box<dyn Fn() + '_>` holding a borrow:
@@ -5386,9 +5399,6 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
             self.update_rap(&rap, line);
           }
         }
-        // `f(..)` with `f` a local `FnOnce` closure: the call moves
-        // it, after the arguments are evaluated (#271).
-        self.closure_call_events(fn_expr, expr_to_line(expr, &self.tcx));
         // `f()` with `let f = || unsafe { COUNT = 9; };`: the call
         // writes the static (a closure names a static, it doesn't
         // capture it; #1203).
@@ -6881,6 +6891,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   fn visit_assign(&mut self, expr: &'tcx Expr<'tcx>, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>) {
+    if self.unfinished_vec(rhs_expr) {
+      self.visit_expr(rhs_expr);
+      return;
+    }
     // `a = lhs` inside a destructuring assignment: draw it as
     // `a = <the part of the RHS lhs holds>`. That part was
     // already visited with the whole RHS.
@@ -8081,6 +8095,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let n_before_drops = self.preprocessed_events.len();
     let payload_target = drop_target.as_ref().map(|r| *r.hash());
     for ((((rap, maybe_moved), parts), loop_head), by_cond) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts).zip(loop_head).zip(by_conds) {
+      let drop_line = if crate::facts::is_vec_expansion(self.tcx, rhs_expr.span.ctxt().outer_expn()) {
+        match self.reassign_drop_at(lhs_expr, &rap) {
+          Some((row, true)) => row,
+          Some((_, false)) => continue,
+          None => drop_line,
+        }
+      } else { drop_line };
       let hash = *rap.hash();
       let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
         || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
@@ -9432,6 +9453,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if matches!(e, Evt::Move | Evt::Copy) && (!inline || is_partial) {
           member_binds.push(to_ro.clone());
         }
+        let pat_line = self.pattern_loans.get(to_ro.hash()).map_or(pat_line, |l| l.line);
         if inline {
           self.add_external_event(pat_line, ext_ev);
         } else {
@@ -9517,6 +9539,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           (ExternalEvent::Move { from, is_partial: false, .. }, false) => box_payload_of(from).map(|b| b.name().clone()),
           _ => None,
         };
+        let pat_line = self.pattern_loans.get(to_ro.hash()).map_or(pat_line, |l| l.line);
         if inline {
           self.add_external_event(pat_line, ext_ev);
         } else {
@@ -9640,17 +9663,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // live. Not the loan of the binding itself that a guard takes
       // (`Some(t) if t.len() > 1`: the guard sees t through a reference
       // to it, also named t), which ends with the guard.
-      let region_end = mir_b_data.iter()
+      let pattern_loan = from.extract_rap().and_then(|r| self.pattern_loans.get(r.hash()));
+      let region_end = if let Some(loan) = pattern_loan {
+        // A single dot can represent only an endpoint common to the paths.
+        let [line] = loan.end_lines.as_slice() else { continue };
+        Some(*line)
+      } else {
+        mir_b_data.iter()
         .filter(|m| (m.assigned_place.as_deref() == Some(name.as_str()) && m.borrowed_place.as_deref() != Some(name.as_str())
             && (pat_line..=pat_end).contains(&m.region.0))
           || whole_loan == Some(m.span))
         .map(|m| m.region.1)
-        .max();
+        .max()
+      };
       // A loan the arm's value carries out of the `match` ends where
       // that value's last use ends it, after the branches join: as for
       // `if let Some(x) = &o { x } else { &t }`, `emit_borrow_ends`
       // ends it, not the arm.
-      if value_uses_binding && region_end.is_none_or(|l| l > end) {
+      if (value_uses_binding || pattern_loan.is_some()) && region_end.is_none_or(|l| l > end) {
         continue;
       }
       self.borrow_map.remove(&name);
@@ -10201,7 +10231,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           if iterand_evt.is_none() {
             self.pattern_literal = match head_arg.kind {
               ExprKind::Array(elems) if !head_arg.span.from_expansion() => Some(elems),
-              _ => vec_macro_elems(head_arg),
+              _ => vec_macro_elems(self.tcx, head_arg),
             };
           }
           self.register_pattern_bindings_anon(user_pat, for_line);
@@ -10656,7 +10686,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// is drawn.
   fn literal_head_lenders(&self, head: &'tcx Expr<'tcx>) -> Option<Vec<ResourceTy>> {
     let literal = matches!(head.kind, ExprKind::Array(..) | ExprKind::Repeat(..)) && !head.span.from_expansion()
-      || vec_macro_elems(head).is_some();
+      || vec_macro_elems(self.tcx, head).is_some();
     if !literal {
       return None;
     }
@@ -10781,14 +10811,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       ExprKind::Tup(items) | ExprKind::Array(items) => items.iter().collect(),
       ExprKind::Repeat(x, _) => vec![x],
-      _ => match vec_macro_elems(e) {
+      _ => match vec_macro_elems(self.tcx, e) {
         Some(items) => items.iter().collect(),
         // `vec![]`, a `format!`: nothing is moved in.
         None => return Some(Vec::new()),
       },
     };
+    let vec = vec_macro_elems(self.tcx, e).is_some();
     for x in elems {
-      if is_place_expr(x) {
+      if vec && is_place_expr(x) {
+        if let Some(crate::expr_visitor::Transfer { row, kind: Evt::Move, path, to: dest, .. }) = self.transfer_at(x) {
+          if let Some(rap) = self.raps.get(path).filter(|_| dest != "<temp>") {
+            places.push((rap.rap.clone(), row));
+          }
+        }
+      } else if vec && vec_macro_elems(self.tcx, x).is_some() {
+        places.extend(self.literal_moved_places(x)?);
+      } else if is_place_expr(x) {
         if self.needs_drop(typeck.expr_ty(x), e.hir_id.owner) {
           if let Some(src) = fetch_rap(x, &self.tcx, &self.raps) {
             places.push((src, expr_to_line(x, &self.tcx)));
@@ -11109,7 +11148,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let let_else_literal = matches!(part, Some(TempPart::LetElse(None)))
       && matches!(expr.kind, ExprKind::Tup(_) | ExprKind::Struct(..) | ExprKind::Array(_));
-    let tmp = self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into, part);
+    let tmp = self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into, part, false);
     if let (true, Some(t)) = (let_else_literal, &tmp) {
       self.note_let_else_literal_temp(expr, t.clone());
     }
@@ -11500,6 +11539,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     owner: Option<HirId>,
     into: Vec<(ResourceAccessPoint, usize)>,
     part: Option<TempPart>,
+    iterator_elements: bool,
   ) -> Option<ResourceAccessPoint> {
     // Branch events are sliced out by line, so a one-line `match` / `if`
     // can't hold a column of its own (the same limit as #354 / #459).
@@ -11565,6 +11605,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Variables moved into the temporary (`vec![s];`, #570; the fields
     // `P { n: 1, ..p }` takes from p, #574).
     for (src, src_line) in into {
+      if iterator_elements { self.approx_notes.push(ApproxNote::IteratorElement { id: *self.unique_id }); }
       self.update_rap(&src, line);
       self.add_ev(src_line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(src), false);
     }
@@ -11644,7 +11685,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // isn't something a student wrote.
     let shown = strip_module_paths(&ty.to_string());
     let shown = if shown.contains('{') { "iterator".to_owned() } else { shown };
-    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, Vec::new(), None)
+    let elements = vec_macro_elems(self.tcx, head).and_then(|_| self.literal_moved_places(head)).unwrap_or_default();
+    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, elements, None, true)
   }
 
   /// True iff `expr` sits inside an `if` / `match` that starts and ends
@@ -12650,6 +12692,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // and returns it. Treat it as `let y = e;` so the move / copy /
     // borrow (and, for `dbg!(&x)`, the lender) is e's.
     let init = dbg_single_arg(init).unwrap_or(init);
+    if self.unfinished_vec(init) {
+      if !is_skipped { self.visit_expr(init); }
+      return;
+    }
     // For `let s = if … { … } else { … };` (and the match analog),
     // emit the Move-into-LHS events FIRST. Match_rhs's If/Match arms
     // recurse into each branch's trailing expression and emit a

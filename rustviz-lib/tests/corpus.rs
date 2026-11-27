@@ -30561,6 +30561,13 @@ fn for_ref_copy_of_stored_ref_borrows_only_via_the_iterator() {
     let name = "for_ref_copy_str";
     let rv = run_with_local_backend(name);
     let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
+    for (binding, last_use) in [("w", r#"println!("{}", w);"#), ("k", r#"println!("{} {}", k, n);"#)] {
+        let end = format!("{binding}'s immutable borrow ends");
+        let dots = dots_listing_tooltip(&timeline, &end);
+        assert_eq!(dots.len(), 1, "{binding} ends once");
+        assert!(timeline_tooltips(&timeline).contains(&format!("{end} (what it borrows from isn't shown)")));
+        assert!((dots[0].1 - code_row_y(&code, last_use)).abs() < 1.0, "{binding} ends at its last use");
+    }
     for (var, kind, start, for_src, body_src) in [
         ("words", "immutably", "words's resource is immutably borrowed by the `for` loop's iterator; words is read-only until the loop ends",
          "for &w in &words {", "println!(\"{}\", w);"),
@@ -40570,4 +40577,163 @@ fn arm_leg_no_value_yet_is_dashed_1866() {
     let timeline = rv.timeline_panel_string();
     assert!(timeline.contains("data-rv-id=\"ym@L40-41:branch_line:full_privilege_uninit"), "ym's leg on L40 is dashed");
     assert!(!timeline.contains("data-rv-id=\"ym@L40-41:branch_line:full_privilege\""), "not solid");
+}
+
+/// rustc rejects a read of each consumed String (E0382). On the path where
+/// the closure call returns, the following element is consumed as well.
+/// A non-returning element has no normal successor in MIR.
+#[test]
+fn vec_element_transfers_follow_mir() {
+    for (case, transfers) in [
+        ("rv3_issues/1682_vec_macro_elem_with_format", &[("s2", "v")][..]),
+        ("rv3_issues/1744_vec_macro_nested_vec", &[("s2", "v")]),
+        ("rv3_issues/1779_vec_macro_loop_and_closure_elements", &[("loop_s", "lv"), ("call_s", "cv")]),
+    ] {
+        let svg = run_with_local_backend(case).timeline_panel_string();
+        let tips = timeline_tooltips(&svg);
+        for (src, dst) in transfers {
+            let arrow = format!("Move from {src} to {dst}");
+            if *src == "call_s" {
+                assert!(tips.iter().any(|t| t.ends_with(&arrow) && t.contains("the transfer never runs")), "{case}: {arrow}");
+                assert!(tooltip_lines(&svg).iter().any(|lines| lines.first().is_some_and(|t| t.contains("this exit never runs"))
+                    && lines.iter().any(|t| t.contains("call_s goes out of scope"))));
+            } else if case.contains("1744_") {
+                assert!(tips.iter().any(|t| t.contains(&arrow) && t.contains("inner vector")), "{case}: {arrow}");
+            } else {
+                assert_eq!(tips.iter().filter(|t| **t == arrow).count(), 1, "{case}: {arrow}");
+            }
+        }
+        assert!(!tips.iter().any(|t| t.contains("Move from r to v")), "format! reads its argument");
+    }
+    let svg = run_with_local_backend("known_bugs/1682_vec_macro_element_move").timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    for unbuilt in ["pv", "qv", "wv", "bv"] {
+        assert!(!svg.contains(&format!("data-rv-id=\"{unbuilt}@")), "{unbuilt} is never initialized or read");
+    }
+    for src in ["panic_s", "quit_s", "wrap_s", "block_s"] {
+        assert!(!tips.iter().any(|t| t.contains(&format!("Move from {src} to "))), "{src} is never evaluated");
+    }
+}
+
+/// The boxed array's first operand is a MIR move before the second operand
+/// assigns to item. The later i32 operand is a MIR copy. The executable
+/// asserts both the original element and the replacement are still correct.
+#[test]
+fn vec_elements_are_evaluated_before_reassignment() {
+    let svg = run_with_local_backend("vec_element_evaluation_1682").timeline_panel_string();
+    assert!(svg.contains("item@L5:dot:move"));
+    assert!(svg.contains("item@L6:dot:acquire"));
+    let tips = timeline_tooltips(&svg);
+    assert!(!tips.iter().any(|t| t.contains("previous resource") && t.contains("is dropped")));
+    assert!(tips.iter().any(|t| t == "Copy from count to counts"));
+}
+
+/// call_once takes the old f before the argument assigns g to f. The next
+/// call consumes that replacement. On the conditional path, p.z survives
+/// the call of p.f (rustc accepts a read of p.z there).
+#[test]
+fn fnonce_receiver_precedes_its_arguments() {
+    let svg = run_with_local_backend("rv3_issues/1704_fnonce_field_and_arg_reassign").timeline_panel_string();
+    for id in ["h.f@L4:dot:closure_call", "f@L7:dot:closure_call+acquire", "f@L8:dot:closure_call"] {
+        assert!(svg.contains(&format!("data-rv-id=\"{id}\"")), "missing {id}");
+    }
+    let tips = timeline_tooltips(&svg);
+    assert!(!tips.iter().any(|t| t.contains("its previous resource") && t.contains("is dropped")));
+    assert!(tips.iter().any(|t| t == "f goes out of scope. No resource is dropped."));
+    assert!(!tips.iter().any(|t| t.contains("and the borrow it holds")));
+    let svg = run_with_local_backend("known_bugs/1627_closure_captures_review").timeline_panel_string();
+    for row in [32, 33] {
+        assert!(tooltip_of_id(&svg, &format!("f@L{row}:dot:duplicate")).unwrap().contains("f's value is copied"));
+    }
+    let svg = run_with_local_backend("rv3_issues/1730_fnonce_field_partly_moved").timeline_panel_string();
+    assert!(svg.contains("p.f@L4:dot:closure_call"));
+    assert!(!svg.contains("p.z@L4:dot:closure_call"));
+    assert_owner_title("rv3_issues/1730_fnonce_field_partly_moved", "p.z", 4, 6, Some("full_privilege"), "p.z is the owner", "moved");
+    assert!(tooltip_of_id(&svg, "p.z@L7:dot:owner_go_out_of_scope").unwrap().contains("Its resource is dropped"));
+}
+
+/// MIR makes a fresh loan of the place holding the reference. Its last
+/// use in the arm gives that place back. Neither a move nor a copy of r
+/// would have these endpoints.
+#[test]
+fn scrutinee_borrows_the_reference_binding() {
+    for (name, kind, start, end) in [
+        ("1638_match_mut_ref_of_ref_var", "mutable", 4, 5),
+        ("1638_match_mut_ref_of_ref_var_b", "static", 4, 5),
+        ("1811_irrefutable_while_let", "mutable", 5, 6),
+    ] {
+        let svg = run_with_local_backend(&format!("rv3_issues/{name}")).timeline_panel_string();
+        let tips = timeline_tooltips(&svg);
+        let borrow = if kind == "static" { "Immutable" } else { "Mutable" };
+        assert!(tips.contains(&format!("{borrow} borrow from r to s")), "{name}");
+        assert!(!tips.iter().any(|t| t == "Move from r to s" || t == "Copy from r to s"), "{name}");
+        assert!(svg.contains(&format!("r@L{start}:dot:{kind}_lend")), "{name}: lender row");
+        assert!(svg.contains(&format!("r@L{end}:dot:{kind}_reacquire")), "{name}: last use");
+    }
+    let tips = timeline_tooltips(&run_with_local_backend("known_bugs/1638_borrow_ref_scrutinee").timeline_panel_string());
+    for arrow in ["Mutable borrow from r to arm", "Mutable borrow from r to last", "Mutable borrow from h.r to field"] {
+        assert!(tips.iter().any(|t| t == arrow), "{arrow}");
+    }
+}
+
+#[test]
+fn review_scrutinee_places_and_escaped_loan() {
+    let svg = run_with_local_backend("known_bugs/1638_borrow_ref_scrutinee").timeline_panel_string();
+    for (id, wanted) in [
+        ("s@L8:dot:", "the value at **s is modified"),
+        ("field@L31:dot:", "the value at **field is modified"),
+        ("shared@L12:dot:duplicate", "**shared's value is copied"),
+        ("arm@L14:dot:mutable_borrow", "arm is bound to a mutable reference to r"),
+        ("r@L11-12:line:", "r holds a mutable reference"),
+        ("r@L11-12:line:", "r is immutably borrowed by shared"),
+    ] {
+        assert!(tooltip_of_id(&svg, id).unwrap().contains(wanted), "{id}: {wanted}");
+    }
+    let svg = run_with_local_backend("rv3_issues/1811_irrefutable_while_let").timeline_panel_string();
+    assert!(!svg.contains("may not run at all"));
+    let svg = run_with_local_backend("move_evaluation_review").timeline_panel_string();
+    assert!(!svg.contains("r@L61:dot:mutable_reacquire"), "the loan was forwarded to x");
+    assert!(tooltip_of_id(&svg, "r@L63:dot:mutable_reacquire").unwrap().contains("r is no longer mutably borrowed"));
+}
+
+#[test]
+fn review_callable_operands_and_results() {
+    let svg = run_with_local_backend("move_evaluation_review").timeline_panel_string();
+    let capture = tooltip_of_id(&svg, "s@L46:dot:").unwrap();
+    assert!(capture.contains("s is moved into the closure when it is created") && !capture.contains("moved into the call"));
+    assert!(tooltip_of_id(&svg, "f@L50:dot:closure_call").unwrap().contains("If the call starts, s, which f captured, is dropped"));
+    assert!(tooltip_of_id(&svg, "f@L54:dot:").unwrap().contains("The call never starts"));
+    let svg = run_with_local_backend("rv3_issues/1623_call_fnonce_param_tail").timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    assert!(tips.iter().any(|t| t == "Move of the result of f() to the caller"));
+    assert!(!tips.iter().any(|t| t == "Move from f to the caller"));
+}
+
+#[test]
+fn review_vec_staging_and_reachability() {
+    let svg = run_with_local_backend("move_evaluation_review").timeline_panel_string();
+    assert!(!svg.contains("s@L10:dot:move"), "element(s) is never evaluated");
+    assert!(tooltip_of_id(&svg, "b@L8:dot:move").unwrap().contains("*b's resource is moved"));
+    let tips = timeline_tooltips(&svg);
+    assert!(!tips.iter().any(|t| t.contains("Move from r to consume")));
+    assert!(tooltip_of_id(&svg, "r@L14:dot:move").unwrap().contains("held temporarily"));
+    assert_eq!(tooltip_of_id(&svg, "parcel.payload@L70:dot:move").unwrap(), "parcel.payload's resource is moved to the caller");
+    let count = tooltip_of_id(&svg, "s@L26:dot:move").unwrap();
+    assert!(count.contains("returns early, it drops the staged value") && count.contains("zero count"));
+    assert!(!svg.contains("v@L19:dot:acquire"), "the old v is still read by the next element");
+    assert!(!svg.contains("v@L18:dot:owner_drop_at_reassign"), "the RHS still uses the old vector");
+    assert!(tooltip_of_id(&svg, "v@L21:dot:").unwrap().contains("previous resource"), "the replacement follows the clone");
+    assert!(tooltip_of_id(&svg, "s@L32:dot:move").unwrap().contains("zero count drops the element"));
+    assert!(tooltip_of_id(&svg, "s@L37:dot:move").unwrap().contains("held temporarily"));
+    let staged = tooltip_of_id(&svg, "x@L42:dot:duplicate").unwrap();
+    assert!(staged.contains("the transfer never runs") && staged.matches("x's value is copied").count() == 2, "{staged}");
+    assert!(!staged.starts_with("Rust checks"), "only the second copy is unreachable");
+    let svg = run_with_local_backend("rv3_issues/1779_vec_macro_loop_and_closure_elements").timeline_panel_string();
+    assert!(tooltip_of_id(&svg, "cv@L8-").unwrap().contains("never initialized"));
+    assert!(tooltip_of_id(&svg, "cv@L11:dot:").unwrap().contains("never runs"));
+    let svg = run_with_local_backend("known_bugs/1682_mixed_vec_elements").timeline_panel_string();
+    let first = tooltip_of_id(&svg, "first@L41:dot:").unwrap();
+    assert!(first.contains("returns early, it drops the staged value") && first.contains("becomes a vector element"));
+    assert!(tooltip_of_id(&svg, "head@L30:dot:move").unwrap().contains("iterator yields its elements by value"));
+    assert!(tooltip_of_id(&svg, "s2@L6:dot:move").unwrap().contains("can't be used until"));
 }

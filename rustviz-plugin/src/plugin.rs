@@ -287,7 +287,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             // one they moved an earlier fn's events about (#1532).
             let mut fn_events: Vec<(usize, ExternalEvent)> = Vec::new();
             let mut visitor = ExprVisitor::new(
-              tcx, body, hir_body, bwf, fn_start_line,
+              tcx, body, hir_body, bwf, body_facts(body.source.def_id().expect_local()), fn_start_line,
               &mut line_map2, &mut fn_events, rap_hash_num, &a_map,
               &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
             );
@@ -358,7 +358,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         // one they moved an earlier fn's events about (#1532).
         let mut fn_events: Vec<(usize, ExternalEvent)> = Vec::new();
         let mut visitor = ExprVisitor::new(
-          tcx, body, hir_body, bwf, fn_start_line,
+          tcx, body, hir_body, bwf, body_facts(body.source.def_id().expect_local()), fn_start_line,
           &mut line_map2, &mut fn_events, rap_hash_num, &a_map,
           &mut a_line_map, &mut owner_to_hash, &mut ids, output, &skip_lines,
         );

@@ -3830,6 +3830,10 @@ pub fn event_dot_holder_acquire(my_name: &String, from_name: &String) -> String 
     )
 }
 
+pub fn event_dot_replaced_callable(name: &str, source: &str) -> String {
+    format!("{} takes over {}'s value. Any borrows that value holds move with it", styled_name_html(name), styled_name_html(source))
+}
+
 // `let o = Some(r);`, `let v = vec![r];` with r a `&mut` (#1128): the
 // reference r held is moved into o's value, so o now holds the borrow.
 pub fn event_dot_holder_takes_ref(my_name: &String, from_name: &String) -> String {
@@ -6168,12 +6172,22 @@ pub fn event_dot_break_alt_move_to_caller(my_name: &String, alt: &crate::svg_gen
 // body's MIR (see closure_capture_fates).
 pub fn event_dot_closure_call_once(
     my_name: &String,
-    fates: &[crate::svg_generator::data::CapturedFate],
+    fates: Option<&[crate::svg_generator::data::CapturedFate]>,
+    timing: crate::svg_generator::data::CallTiming,
 ) -> String {
     use crate::svg_generator::data::CapturedEnd;
     let f = styled_name_html(my_name);
+    use crate::svg_generator::data::CallTiming;
+    let prefix = match timing {
+        CallTiming::Never => return format!("{f} is moved before the arguments are evaluated. The call never starts."),
+        CallTiming::AfterArguments => format!("{f} is moved before the arguments are evaluated. If they finish, "),
+        CallTiming::Direct => String::new(),
+    };
+    let Some(fates) = fates else {
+        return format!("{prefix}{f} is moved into the call (FnOnce::call_once takes its receiver by value)");
+    };
     let mut msg = format!(
-        "{0} is moved into the call (an FnOnce closure can only be called once)", f);
+        "{prefix}{f} is moved into the call (an FnOnce closure can only be called once)");
     for fate in fates {
         let s = styled_name_html(&fate.name);
         let tail = match fate.end {
@@ -6186,7 +6200,8 @@ pub fn event_dot_closure_call_once(
             CapturedEnd::Moved =>
                 "is moved on or dropped by the call",
         };
-        msg.push_str(&format!(". {0}, which {1} captured, {2}", s, f, tail));
+        let during = if matches!(timing, CallTiming::AfterArguments) { "If the call starts, " } else { "" };
+        msg.push_str(&format!(". {during}{s}, which {f} captured, {tail}"));
     }
     msg
 }
@@ -6876,6 +6891,8 @@ pub fn event_dot_process_exit(name: &String, owns: Option<bool>, exit: &NoDropEx
         ),
     }
 }
+
+pub const UNREACHED_TRANSFER: &str = "Rust checks this transfer on the preceding closure's return path. The closure never returns, so the transfer never runs.";
 
 /* Approximation notes (`ApproxNote`): what a figure simplifies, added to
    the tooltip of a dot drawn on the construct anyway. Each is one

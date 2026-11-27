@@ -35,6 +35,7 @@ struct PendingDot {
     event: bool,
     /// A function-call icon (`f`) is drawn here.
     call: bool,
+    never_initialized: bool,
     /// The column's name, the row the dot is on and the events drawn on
     /// it, for its `data-rv-*` attributes (`rv_attrs`).
     var: String,
@@ -51,6 +52,7 @@ enum DotNote {
     /// it runs at most once (`ApproxNote::Loop`).
     Loop(bool, bool),
     Other(String),
+    UnreachedScopeExit,
 }
 
 impl DotNote {
@@ -58,6 +60,7 @@ impl DotNote {
         match self {
             DotNote::Loop(declares, at_most_once) => hover_messages::approx_note_loop(*declares, *at_most_once),
             DotNote::Other(t) => t.clone(),
+            DotNote::UnreachedScopeExit => "This dot describes normal scope exit. The closure never returns, so this exit never runs. If it unwinds, values still owned here are dropped during unwinding.".to_owned(),
         }
     }
 }
@@ -118,7 +121,7 @@ impl DotLayer {
         let i = *self.at.entry((hash, x, y)).or_insert_with(|| {
             dots.push(PendingDot {
                 hash, x, y, owner_key, is_member,
-                lines: Vec::new(), drop: false, event: false, call: false,
+                lines: Vec::new(), drop: false, event: false, call: false, never_initialized: false,
                 var: column.name.clone(), row, events: Vec::new(), notes: Vec::new(),
             });
             dots.len() - 1
@@ -236,6 +239,18 @@ impl DotLayer {
             }
         }
         for note in notes {
+            if let ApproxNote::UnreachedValue { hash } = note {
+                for dot in &mut self.dots {
+                    if dot.hash == *hash { dot.never_initialized = true; }
+                }
+            }
+            if let ApproxNote::UnreachedTransfer { scope_ends, .. } = note {
+                for (hash, end) in scope_ends {
+                    if let Some(col) = by_col.get(hash) {
+                        add(&mut self.dots, first_in(col, *end, *end), DotNote::UnreachedScopeExit);
+                    }
+                }
+            }
             if let ApproxNote::At { hash, lines: (lo, hi), text } = note {
                 if let Some(col) = by_col.get(hash) {
                     add(&mut self.dots, first_in(col, *lo, *hi), DotNote::Other(text.clone()));
@@ -336,11 +351,12 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
 /// A dot's tooltip with its approximation notes, each on a line of its
 /// own after the events' text (which stays as it was).
 fn with_approx_notes(title: String, notes: &[DotNote]) -> String {
-    let mut lines: Vec<String> = Vec::new();
+    let qualifies = |note: &DotNote| matches!(note, DotNote::UnreachedScopeExit);
+    let mut lines: Vec<_> = notes.iter().filter(|n| qualifies(n)).map(DotNote::text).collect();
     if !title.is_empty() {
         lines.push(title);
     }
-    lines.extend(notes.iter().map(DotNote::text));
+    lines.extend(notes.iter().filter(|n| !qualifies(n)).map(DotNote::text));
     lines.join("&lt;br&gt;")
 }
 
@@ -353,7 +369,16 @@ struct WithRv<'a, T: Serialize> {
 }
 
 fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
-    let title = with_approx_notes(merged_dot_title(&dot.lines), &dot.notes);
+    let title = if dot.never_initialized {
+        let name = styled_name_html(&dot.var);
+        if dot.call {
+            format!("The call shown here never runs because {name} is never initialized")
+        } else {
+            format!("The closure never returns, so {name} is never initialized and has no value to drop")
+        }
+    } else {
+        with_approx_notes(merged_dot_title(&dot.lines), &dot.notes)
+    };
     let (cx, cy) = (dot.x, dot.y);
     let kind = if dot.event { rv_attrs::DOT } else { rv_attrs::CALL };
     let rv = Rv::new(kind).events(&dot.events).var(&dot.var).row(dot.row).drop(dot.drop).attrs();
@@ -2666,7 +2691,15 @@ fn render_dot(
                             hover_messages::event_dot_ref_assign(&name, f, false, rap.is_mutref()),
                         _ => None,
                     };
-                    if let Some(title) = union_write_title(event, rap, &name, visualization_data, *hash) {
+                    let replacement = match (history[..i].last(), event) {
+                        (Some((_, Event::ClosureCall { fates: None, .. })), Event::Acquire { from: ResourceTy::Value(source), .. })
+                            if rap.holds_borrow() && !source.is_fn() && !source.is_ref() =>
+                            Some(hover_messages::event_dot_replaced_callable(&name, source.name())),
+                        _ => None,
+                    };
+                    if let Some(title) = replacement {
+                        data.title = title;
+                    } else if let Some(title) = union_write_title(event, rap, &name, visualization_data, *hash) {
                         data.title = title;
                     } else if let Some(title) = ref_assign_title {
                         data.title = title;
@@ -2781,6 +2814,42 @@ fn render_dot(
         // may come before (#1020).
         if let Event::OwnerGoOutOfScope { early: Some(e), .. } | Event::RefGoOutOfScope { early: Some(e) } = event {
             data.title = hover_messages::event_dot_scope_end_after_loop_return(&data.title, e, false);
+        }
+        for note in &visualization_data.approx_notes {
+            match note {
+                ApproxNote::VecElement { id, staged, drops_on_exit, repeat, .. } if event.get_id() == *id => {
+                    if let Event::Move { is, .. } = event {
+                        if *staged {
+                            data.title.push_str(". The value is held temporarily while the vector is being built");
+                            if *drops_on_exit {
+                                data.title.push_str(". If the `?` returns early, it drops the staged value");
+                                if !repeat { data.title.push_str(". If construction finishes, the value becomes a vector element"); }
+                            }
+                            if *repeat { data.title.push_str(". A zero count drops the element and leaves the vector empty"); }
+                        }
+                        if !is.is_ref() && (*staged || matches!(event, Event::Move { to: ResourceTy::Value(r), .. } if !r.is_fn())) {
+                            data.title.push_str(&format!("&lt;br&gt;{} can't be used until it is assigned again", styled_name_html(&is.name())));
+                        }
+                    }
+                }
+                ApproxNote::PatternReference { holder } if holder == hash => {
+                    if let Event::MutableBorrow { of_ref_var: true, from, is, .. } | Event::StaticBorrow { of_ref_var: true, from, is, .. } = event {
+                        let kind = if is.is_mutref() { "a mutable" } else { "an immutable" };
+                        data.title.push_str(&format!(". {} is bound to {kind} reference to {}", styled_name_html(&is.name()), styled_name_html(&from.real_name())));
+                    }
+                }
+                ApproxNote::IteratorElement { id } if event.get_id() == *id => {
+                    data.title = match event {
+                        Event::Move { is, .. } | Event::Acquire { from: is, .. } =>
+                            format!("{} moves into the vector consumed by the loop's iterator. The iterator yields its elements by value and drops any it still holds when the loop ends", styled_name_html(&is.name())),
+                        _ => data.title,
+                    };
+                }
+                _ => {}
+            }
+        }
+        if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedTransfer { id, .. } if *id == event.get_id())) {
+            data.title = format!("{} {}", hover_messages::UNREACHED_TRANSFER, data.title);
         }
         // push to individual timelines
         let lend_id = match event {
@@ -6798,10 +6867,17 @@ fn render_generic_arrow(
     if arrow_is_undrawn(external_event, from, to) || arrow_left_out(visualization_data, external_event) {
         return;
     }
-    let title = match visualization_data.field_lenders.get(&external_event.get_id()) {
+    let mut title = match visualization_data.field_lenders.get(&external_event.get_id()) {
         Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end),
         None => hover_messages::arrow_full_title(external_event, from, to),
     };
+
+    if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::VecElement { id, nested: true, .. } if *id == external_event.get_id())) {
+        title.push_str(". The element goes into an inner vector held by the destination");
+    }
+    if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedTransfer { id, .. } if *id == external_event.get_id())) {
+        title = format!("{} {}", hover_messages::UNREACHED_TRANSFER, title);
+    }
 
     // order of points is to -> from
     let mut data = ArrowData {
@@ -7129,7 +7205,9 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
         let styled_fn = styled_name_html(&f.name);
         let last = f.name.rsplit("::").next().unwrap_or(&f.name);
         let named_call = !last.starts_with(|c: char| c.is_uppercase()) && !f.name.ends_with('!');
-        let title = hover_messages::arrow_fn_return_title(matches!(external_event, ExternalEvent::Copy { .. }), named_call, &styled_fn);
+        let title = if f.callable_result && matches!(external_event, ExternalEvent::Move { .. }) {
+            format!("Move of the result of {styled_fn}() to the caller")
+        } else { hover_messages::arrow_fn_return_title(matches!(external_event, ExternalEvent::Copy { .. }), named_call, &styled_fn) };
         let ev = rv_attrs::external_event_name(external_event);
         let rv = Rv::new(rv_attrs::ARROW).event(ev).var(&f.name).to("caller").row(*line_number).attrs();
         let rendered = format!(
@@ -10052,6 +10130,9 @@ fn render_timeline(
                     None => (state.clone(), timeline_segment_title(state, rap, visualization_data, Some(w[0]))),
                 }
             };
+            let title = if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedValue { hash: h } if h == hash)) {
+                format!("{} is never initialized because the closure never returns", styled_name_html(rap.name()))
+            } else { title };
             match pieces.last_mut() {
                 Some(last) if last.1 == w[0] && last.3 == title && std::mem::discriminant(&last.2) == std::mem::discriminant(&st) => last.1 = w[1],
                 _ => pieces.push((w[0], w[1], st, title)),
@@ -10804,6 +10885,23 @@ fn table_lent_state_of(
     let binding_shared = own_loans.iter().any(|l| l.kind == "shared"
         && table.loan(fn_line, col, l.loan).is_some_and(|info| info.whole.contains(col)));
     if rap.is_ref() && !own_loans.is_empty() {
+        // A drawn shared lend of the reference binding itself (match &r).
+        // The partial-privilege style alone can't distinguish it from &*r.
+        if let [loan] = own_loans.as_slice() {
+            if loan.kind == "shared" && of_itself(loan.loan)
+                && matches!(state, State::PartialPrivilege { .. })
+                && table.loan_arm(fn_line, col, loan.loan).is_none()
+                && table.loan(fn_line, col, loan.loan).is_some_and(|l| l.direct_holders.contains(&loan.holder)
+                    && visualization_data.timelines.get(rap.hash()).is_some_and(|timeline| timeline.history.iter().any(|(row, e)|
+                        matches!(e, Event::StaticLend { to, of_ref_var: true, .. } if to.real_name() == loan.holder)
+                        && rv_attrs::line_of(*row, &visualization_data.row_lines) == Some(l.line))))
+            {
+                let holds = hover_messages::ref_line_holds_reference(&styled_name_html(col), rap.is_mutref());
+                let lend = hover_messages::event_dot_static_lend_ref_var(col, &loan.holder);
+                let title = format!("{holds}. {lend}");
+                return Some((State::PartialPrivilege { s }, Some(title)));
+            }
+        }
         // Where the table can't say it per path or 2.x's words don't fit,
         // 2.x's style stands: a loan taken in one arm of a branch on one
         // row; a shared loan of the binding or its struct (`&r`, `match &r`:

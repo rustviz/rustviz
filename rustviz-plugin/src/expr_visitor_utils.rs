@@ -1751,7 +1751,10 @@ pub fn local_callee_result_key(call: &Expr, tcx: &TyCtxt) -> LocalCallee {
   // callee by value.
   let typeck = tcx.typeck(call.hir_id.owner);
   if let Some(method) = typeck.type_dependent_def_id(call.hir_id) {
-    if matches!(tcx.trait_of_assoc(method), Some(t) if Some(t) == tcx.lang_items().fn_once_trait()) {
+    // A concrete closure can return one of its own captures. For an
+    // opaque callable the result comes from the call; its body is unknown.
+    if matches!(typeck.expr_ty(callee).kind(), rustc_middle::ty::Closure(..))
+        && matches!(tcx.trait_of_assoc(method), Some(t) if Some(t) == tcx.lang_items().fn_once_trait()) {
       return LocalCallee::Consumed;
     }
   }
@@ -1804,6 +1807,12 @@ pub fn rc_call_of_expr(call: &Expr, tcx: &TyCtxt) -> Option<RcCall> {
 /// The function RAP for `call`'s result, with `Rc` clone / downgrade
 /// calls marked as such.
 pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt) -> ResourceAccessPoint {
+  let mut rap = rap;
+  if let ResourceAccessPoint::Function(f) = &mut rap {
+    let typeck = tcx.typeck(call.hir_id.owner);
+    f.callable_result = typeck.type_dependent_def_id(call.hir_id)
+      .is_some_and(|method| tcx.trait_of_assoc(method) == tcx.lang_items().fn_once_trait());
+  }
   let rap = match rc_call_of_expr(call, tcx) {
     Some(rc_call) => rap.with_rc_call(rc_call),
     None => rap,
@@ -2266,34 +2275,28 @@ pub fn closure_capture_ends<'tcx>(
 /// wrote: `vec![s, t]` (an array literal inside the expansion) gives
 /// `[s, t]`, `vec![x; n]` (`from_elem(x, n)`) gives `[x]`. `None` for
 /// anything else, including `vec![]`.
-pub fn vec_macro_elems<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>]> {
-  let from_vec = expr.span.macro_backtrace().any(|d| {
-    matches!(d.kind, rustc_span::hygiene::ExpnKind::Macro(_, name) if name.as_str() == "vec")
-  });
-  if !from_vec {
+pub fn vec_macro_elems<'tcx>(tcx: TyCtxt<'tcx>, expr: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>]> {
+  let expansion = expr.span.ctxt().outer_expn();
+  if !crate::facts::is_vec_expansion(tcx, expansion) {
     return None;
   }
-  fn find<'tcx>(e: &'tcx Expr<'tcx>) -> Option<&'tcx [Expr<'tcx>]> {
-    if !e.span.from_expansion() {
+  fn find<'tcx>(tcx: TyCtxt<'tcx>, e: &'tcx Expr<'tcx>, expansion: rustc_span::hygiene::ExpnId) -> Option<&'tcx [Expr<'tcx>]> {
+    if e.span.ctxt().outer_expn() != expansion {
       return None;
     }
     match e.kind {
-      ExprKind::Array(elems) if elems.iter().all(|x| !x.span.from_expansion()) => Some(elems),
+      ExprKind::Array(elems) => Some(elems),
       ExprKind::Call(f, args) => {
-        let is_from_elem = matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
-          if p.segments.last().map_or(false, |s| s.ident.as_str() == "from_elem"));
-        if is_from_elem && !args.is_empty() && !args[0].span.from_expansion() {
-          Some(&args[..1])
-        } else {
-          args.iter().find_map(find)
-        }
+        let from_elem = matches!(f.kind, ExprKind::Path(QPath::Resolved(_, p))
+          if p.res.opt_def_id().is_some_and(|id| tcx.is_diagnostic_item(rustc_span::Symbol::intern("vec_from_elem"), id)));
+        if from_elem { args.get(..1) } else { args.iter().find_map(|arg| find(tcx, arg, expansion)) }
       }
-      ExprKind::Block(b, _) => b.expr.and_then(find),
-      ExprKind::AddrOf(_, _, inner) | ExprKind::Unary(_, inner) | ExprKind::DropTemps(inner) => find(inner),
+      ExprKind::Block(b, _) => b.expr.and_then(|e| find(tcx, e, expansion)),
+      ExprKind::AddrOf(_, _, inner) | ExprKind::Unary(_, inner) | ExprKind::DropTemps(inner) => find(tcx, inner, expansion),
       _ => None,
     }
   }
-  find(expr)
+  find(tcx, expr, expansion)
 }
 
 /// The typing environment for judging types that occur in the body of
