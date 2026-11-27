@@ -9,47 +9,34 @@ use rustc_utils::mir::borrowck_facts;
 use crate::expr_visitor::{ExprVisitor, RapData};
 use crate::RVPluginArgs;
 use crate::utils::{RV1Helper, annotate_enum_variant, annotate_toplevel_fn, annotate_struct_field};
-use crate::svg_generator::data::{ApproxNote, ExternalEvent, ResourceAccessPoint, ShadowNote};
+use crate::svg_generator::data::{ApproxNote, ExternalEvent, ShadowNote};
 
-/// Drain a per-fn visitor's `raps` into a global rap_map.
-///
-/// Variable RAPs (Owner / Struct / MutRef / StaticRef) get a
-/// fully-qualified key `<fn_start_line>::<name>` so two fns with
-/// the same local name don't clobber each other. Function RAPs
-/// keep their per-fn key (`fn_key(name)`) so `annotate_toplevel_fn`'s
-/// lookup works and recursive / cross-fn calls share a single
-/// Function entry.
-fn merge_visitor_raps(
-  global: &mut HashMap<String, RapData>,
-  per_fn: HashMap<String, RapData>,
-  fn_start_line: usize,
-) {
-  #[expect(clippy::iter_over_hash_type, reason = "per_fn's keys are distinct, so each goes to its own global entry")]
-  for (name, data) in per_fn {
-    match data.rap {
-      ResourceAccessPoint::Function(_) => {
-        global.entry(name).or_insert(data);
-      }
-      _ => {
-        let fq_name = format!("{}::{}", fn_start_line, name);
-        global.insert(fq_name, data);
-      }
-    }
-  }
+/// Convert a body's presentation columns to their drawing-wide hashes once.
+/// Function colors are shared across visitors. Variable names and shadow notes
+/// belong to the visitor that allocated the column.
+#[derive(Default)]
+struct DrawingColumns {
+  functions: HashMap<String, RapData>,
+  start_lines: HashMap<u64, crate::facts::table::FunctionStart>,
+  shadow_notes: HashMap<u64, ShadowNote>,
 }
 
-/// Record the header notes of the numbered columns (`s₂`) of the fn
-/// body `owner`, under the same `<fn_start_line>::<name>` keys that
-/// `merge_visitor_raps` gives its RAPs.
-fn collect_shadow_notes(
-  tcx: &TyCtxt,
-  owner: rustc_hir::OwnerId,
-  fn_start_line: usize,
-  out: &mut HashMap<String, ShadowNote>,
-) {
-  #[expect(clippy::disallowed_methods, clippy::iter_over_hash_type, reason = "inserting into another map; order is irrelevant")]
-  for (name, note) in crate::expr_visitor_utils::binding_names(tcx, owner).notes.iter() {
-    out.insert(format!("{}::{}", fn_start_line, name), note.clone());
+impl DrawingColumns {
+  fn add_body(&mut self, tcx: TyCtxt<'_>, owner: rustc_hir::OwnerId, start_line: usize,
+    raps: crate::expr_visitor::BodyRaps) {
+    let names = crate::expr_visitor_utils::binding_names(&tcx, owner);
+    #[expect(clippy::iter_over_hash_type, reason = "each variable has its own hash and each function its own key")]
+    for (key, data) in raps.columns {
+      if data.rap.is_fn() {
+        self.functions.entry(key).or_insert(data);
+      } else {
+        let hash = *data.rap.hash();
+        self.start_lines.insert(hash, crate::facts::table::FunctionStart { body: owner.def_id.to_def_id(), line: start_line });
+        if let Some(note) = names.notes.get(&key) {
+          self.shadow_notes.insert(hash, note.clone());
+        }
+      }
+    }
   }
 }
 
@@ -161,13 +148,12 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // preceding blank line if any — keeps the surrounding spacing
   // tidy when fns at the end of the file are removed).
   let mut hidden_source_lines: HashSet<usize> = HashSet::new();
-  let mut shadow_notes_by_fq: HashMap<String, ShadowNote> = HashMap::new();
   let mut approx_notes: Vec<ApproxNote> = Vec::new();
   let mut a_line_map: BTreeMap<usize, Vec<String>> = BTreeMap::new();
   let mut owner_to_hash: HashMap<String, usize> = HashMap::new();
   let mut row_layout = crate::event_order::RowLayout::default();
   let mut pre_events: Vec<(usize, ExternalEvent)> = Vec::new();
-  let mut rap_map: HashMap<String, RapData> = HashMap::new();
+  let mut columns = DrawingColumns::default();
   for k in a_map.keys() {
     let s = a_map[k].clone();
     a_line_map.insert(*k, vec![s]);
@@ -296,7 +282,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             visitor.visit_body(hir_body);
             visitor.emit_borrow_ends();
             row_layout.append(&mut visitor.row_layout);
-            visitor.print_out_of_scope();
             visitor.mark_temp_emptying_moves(0);
             visitor.collect_approx_notes(hir_body);
             approx_notes.append(&mut visitor.approx_notes);
@@ -306,23 +291,12 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             binding_columns.append(&mut visitor.binding_columns);
             moves_out_first.append(&mut visitor.moves_out_first);
             temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
-            merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
-            collect_shadow_notes(&tcx, impl_item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
+            columns.add_body(tcx, impl_item.owner_id, fn_start_line, visitor.raps);
             pre_events.append(&mut fn_events);
           }
         }
       }
       ItemKind::Fn { sig: fn_sig, body: body_id, ident: _, .. } => {
-        // Each fn body has its own raps map so two fns with the
-        // same variable name (`let x = …` in both `main` and a
-        // helper) don't clobber each other; the shared rap_hashes
-        // counter still gives every RAP a globally unique hash, so
-        // the renderer (keyed on hash) sees them as distinct
-        // timelines. After each visit, merge_visitor_raps drains
-        // the visitor's map into the global one with FQ keys for
-        // variable RAPs and bare names for Function RAPs (so e.g.
-        // `compare_strings` stays single-instance for source
-        // colorization in annotate_toplevel_fn).
         let hir_body = tcx.hir_body(*body_id);
         let def_id = tcx.hir_body_owner_def_id(*body_id);
         let bwf = borrowck_facts::get_body_with_borrowck_facts(tcx, def_id);
@@ -370,7 +344,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         visitor.visit_body(hir_body);
         visitor.emit_borrow_ends();
         row_layout.append(&mut visitor.row_layout);
-        visitor.print_out_of_scope();
         visitor.mark_temp_emptying_moves(0);
         visitor.collect_approx_notes(hir_body);
         approx_notes.append(&mut visitor.approx_notes);
@@ -380,8 +353,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         binding_columns.append(&mut visitor.binding_columns);
         moves_out_first.append(&mut visitor.moves_out_first);
         temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
-        merge_visitor_raps(&mut rap_map, visitor.raps, fn_start_line);
-        collect_shadow_notes(&tcx, item.owner_id, fn_start_line, &mut shadow_notes_by_fq);
+        columns.add_body(tcx, item.owner_id, fn_start_line, visitor.raps);
         pre_events.append(&mut fn_events);
       },
       _ => {}
@@ -399,7 +371,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         let line = tcx.sess.source_map().lookup_char_pos(fn_sig.span.lo()).line;
         let line_str = &a_map[&line];
         if fn_ident.as_str() != "main" {
-          annotate_toplevel_fn(*fn_ident, line_str, &rap_map, &mut a_line_map, &mut rap_hash_num, &tcx);
+          annotate_toplevel_fn(*fn_ident, line_str, &columns.functions, &mut a_line_map, &mut rap_hash_num, &tcx);
         }
       }
       ItemKind::Enum(_ident, _generics, e_def) => {
@@ -409,7 +381,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
           // annotated for them (#907).
           let ctor_name = variant.ident.name.as_str().to_owned();
           let parent_name = tcx.hir_name(tcx.parent_hir_id(variant.hir_id)).as_str().to_owned();
-          annotate_enum_variant(ctor_name.as_str(), parent_name.as_str(), &variant, &rap_map, & mut a_line_map, &tcx);
+          annotate_enum_variant(ctor_name.as_str(), parent_name.as_str(), &variant, &columns.functions, & mut a_line_map, &tcx);
         }
       }
       ItemKind::Impl(imp) => {
@@ -419,7 +391,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             let fn_ident = impl_item.ident;
             let line = tcx.sess.source_map().lookup_char_pos(fn_ident.span.lo()).line;
             let line_str = &a_map[&line];
-            annotate_toplevel_fn(fn_ident, line_str, &rap_map, &mut a_line_map, &mut rap_hash_num, &tcx);
+            annotate_toplevel_fn(fn_ident, line_str, &columns.functions, &mut a_line_map, &mut rap_hash_num, &tcx);
           }
         }
       }
@@ -433,35 +405,11 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // temporary is made, but before it is dropped (#469).
   pre_events.sort_by_key(|k| (k.0, matches!(k.1, ExternalEvent::TemporaryDrop { .. })));
 
-  // Build the rap.hash() → fn_start_line map for the renderer.
-  // Functions are excluded — they don't get columns and span the
-  // whole file, so giving them a single fn_start would mis-locate
-  // their (non-existent) labels.
-  // RAP hashes are unique (#231); sorting first means that if two ever
-  // collided again, the same entry would win on every run.
-  #[expect(clippy::disallowed_methods, reason = "sorted on the next line")]
-  let mut fn_starts: Vec<(u64, usize)> = rap_map
-    .values()
-    .filter(|d| !matches!(d.rap, ResourceAccessPoint::Function(_)))
-    .map(|d| (*d.rap.hash(), d.fn_start_line))
-    .collect();
-  fn_starts.sort();
-  let fn_start_lines: HashMap<u64, usize> = fn_starts.into_iter().collect();
-
-  // Header notes by RAP hash. (Sorted, as above, in case two RAPs ever
-  // shared a hash.)
-  #[expect(clippy::disallowed_methods, reason = "sorted on the next line")]
-  let mut note_pairs: Vec<(u64, String, ShadowNote)> = shadow_notes_by_fq
-    .iter()
-    .filter_map(|(k, n)| rap_map.get(k).map(|d| (*d.rap.hash(), k.clone(), n.clone())))
-    .collect();
-  note_pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-  let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
-
+  let num_raps = columns.functions.len() + columns.start_lines.len() + 1;
   let facts = crate::facts::dump(&crate_facts);
 
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, rap_map.len() + 1, fn_start_lines, shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd, facts, state_table, row_layout) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, num_raps, columns.start_lines, columns.shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd, facts, state_table, row_layout) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

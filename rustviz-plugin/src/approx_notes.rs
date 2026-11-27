@@ -98,7 +98,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// `(hash, name)` of the column of the variable bound at `id`.
   fn column_of_binding(&self, id: rustc_hir::HirId) -> Option<(u64, String)> {
-    let rd = self.raps.get(&binding_name(&self.tcx, id))?;
+    let rd = self.raps.binding(id)?;
     if rd.rap.is_fn() {
       return None;
     }

@@ -101,6 +101,17 @@ pub struct ClosureResultHolder {
     pub argument_loans: BTreeSet<usize>,
 }
 
+/// Within one body, a declaration identifies a user MIR local. Several locals
+/// can intentionally share a visual column in disjoint scopes.
+#[derive(Debug, Default)]
+pub struct BodyBindings {
+    pub locals: BTreeMap<rustc_middle::mir::Local, String>,
+    pub arrays: BTreeMap<rustc_middle::mir::Local, crate::svg_generator::data::ElemsLeft>,
+    pub emptied_boxes: BTreeSet<rustc_middle::mir::Local>,
+    pub declarations: std::collections::HashMap<rustc_hir::HirId, rustc_middle::mir::Local>,
+    pub columns: BTreeMap<String, Vec<rustc_middle::mir::Local>>,
+}
+
 #[derive(Serialize)]
 pub struct BodyFacts {
     /// Places a callee can write through a mutable operand, paired with
@@ -110,6 +121,8 @@ pub struct BodyFacts {
     /// Named holders still carrying each loan when their destructor runs.
     #[serde(skip)]
     pub drop_holders: BTreeMap<usize, BTreeSet<String>>,
+    #[serde(skip)]
+    pub bindings: std::rc::Rc<BodyBindings>,
     /// Loans carried by the operands of this MIR aggregate, in operand order.
     #[serde(skip)]
     pub aggregate_loans: std::collections::HashMap<rustc_span::Span, Vec<AggregateLoan>>,
@@ -201,9 +214,11 @@ pub struct Join {
 }
 
 pub struct BindingSource {
+    /// The array element or subslice containing the moved operand.
+    pub array_element: Option<(rustc_middle::mir::Local, String)>,
     pub location: rustc_middle::mir::Location,
     pub runs: bool,
-    pub declaration: rustc_span::Span,
+    pub declaration: rustc_middle::mir::Local,
     pub site: rustc_span::Span,
     pub into: String,
     pub from: Option<String>,
@@ -225,7 +240,7 @@ impl OtherBindings {
     /// Compare complete sets of simultaneous MIR pattern bindings. A move
     /// of an enclosing place carries its fields; a field move takes only
     /// that field out of the enclosing place.
-    pub fn for_place(sites: &[&BindingSource], declaration: rustc_span::Span, place: &str) -> Self {
+    pub fn for_place(sites: &[&BindingSource], declaration: rustc_middle::mir::Local, place: &str) -> Self {
         let mut result = Self::default();
         let declarations: BTreeSet<_> = sites.iter().map(|s| s.declaration).collect();
         let mut groups = BTreeMap::<_, Vec<_>>::new();
@@ -297,6 +312,8 @@ pub struct VarInfo {
 
 #[derive(Serialize)]
 pub struct ColumnInfo {
+    #[serde(skip)]
+    pub local: rustc_middle::mir::Local,
     pub name: String,
     /// The variable it belongs to.
     pub root: String,
@@ -457,6 +474,10 @@ pub struct Parts {
 /// States of the columns after a row, as the next row sees them.
 #[derive(Serialize, Clone, Default)]
 pub struct State {
+    /// The MIR local for the active place on a presentation column. A boundary
+    /// reached with different sibling bindings has no single local for it.
+    #[serde(skip)]
+    pub locals: BTreeMap<String, Option<rustc_middle::mir::Local>>,
     /// column -> "own" | "moved" | "maybe" | "partly" | "unassigned"
     pub state: BTreeMap<String, &'static str>,
     /// For "partly" columns (and "own" columns some of whose fields may
@@ -622,6 +643,9 @@ pub struct Ev {
     pub location: rustc_middle::mir::Location,
     /// Path of a drop. An unwind drop is positioned at the initiating call
     /// and is conditional on unwinding reaching that cleanup.
+    /// Root MIR local for initialization, move, drop, and scope-end events.
+    #[serde(skip)]
+    pub place_local: Option<rustc_middle::mir::Local>,
     #[serde(skip_serializing_if = "DropRoute::is_not_unwind")]
     pub drop_route: DropRoute,
     /// Successor on which this borrow or hold ends. Two edges can lead to the same display row.
@@ -663,7 +687,7 @@ impl Ev {
     /// Display coordinates can coincide for two different MIR edges.
     pub(super) fn same_occurrence(&self, other: &Self) -> bool {
         self.fact == other.fact && self.order == other.order && self.site == other.site
-            && self.end_successor == other.end_successor
+            && self.place_local == other.place_local && self.end_successor == other.end_successor
     }
 }
 
@@ -675,7 +699,7 @@ mod tests {
     #[test]
     fn dedup_keeps_ends_with_distinct_mir_successors() {
         let first = Ev {
-            location: Location::START, display_location: Location::START, drop_route: DropRoute::Normal, end_successor: Some(BasicBlock::from_usize(1).start_location()),
+            location: Location::START, display_location: Location::START, place_local: None, drop_route: DropRoute::Normal, end_successor: Some(BasicBlock::from_usize(1).start_location()),
             end_places: vec![], caller_slot: None, transfer_paths: vec![],
             col: 8, arm: None, order: (0, 0, 1), site: None,
             fact: Fact::HoldEnd { loan: 0, holder: "other.r".into(), to_line: 4, to_col: 1 },

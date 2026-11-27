@@ -248,7 +248,7 @@ impl RV1Helper {
     p_events: Vec<(usize, ExternalEvent)>,
     a_map: & mut BTreeMap<usize, Vec<String>>,
     num_raps: usize,
-    fn_start_lines: HashMap<u64, usize>,
+    fn_start_lines: HashMap<u64, crate::facts::table::FunctionStart>,
     shadow_notes: HashMap<u64, ShadowNote>,
     binding_columns: Vec<(u64, u64)>,
     moves_out_first: Vec<usize>,

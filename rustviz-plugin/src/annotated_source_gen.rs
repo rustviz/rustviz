@@ -5,7 +5,7 @@
 //! The logic is quite simple, visit each part of a function body and replace each RAP as it appears in the source string
 //! with a new string. (It's a little more complicated but this is the gist)
 
-use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{binding_name, expr_to_rap_name, fn_key, hirid_to_var_name, overloaded_by_value_binop, overloaded_comparison, path_name, span_to_line, static_of_path, unary_op_operand}};
+use crate::{expr_visitor::ExprVisitor, expr_visitor_utils::{binding_name, fn_key, hirid_to_var_name, overloaded_by_value_binop, overloaded_comparison, path_name, span_to_line, static_of_path, unary_op_operand}};
 use rustc_hir::{Expr, ExprKind, QPath, Stmt, StmtKind, LetStmt, Pat, PatKind};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_span::{BytePos, Span};
@@ -209,13 +209,12 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
         }
         _ => (path_name(p, &self.tcx), false)
       };
-      let key = if matches!(p.res, rustc_hir::def::Res::Local(_)) || static_of_path(p).is_some() { name.clone() } else { fn_key(&name) };
-      match self.raps.get(&key) {
-        Some(r) => {
-          self.annotate_src(name.clone(), p.span, is_func, *r.rap.hash());
-        }
-        None => {}
-      }
+      let rap = match p.res {
+        rustc_hir::def::Res::Local(id) => self.raps.binding(id),
+        _ if static_of_path(p).is_some() => self.raps.get(&name),
+        _ => self.raps.get(&fn_key(&name)),
+      };
+      if let Some(rd) = rap { self.annotate_src(name, p.span, is_func, *rd.rap.hash()); }
     }
     ExprKind::Call(fn_expr, fn_args) => {
       match fn_expr.kind {
@@ -263,7 +262,7 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
           // Calling a closure variable (`f(1)`): `f` has a column, and
           // gets its colour like any other use of it (#1189).
           ExprKind::Path(QPath::Resolved(_, p)) if matches!(p.res, rustc_hir::def::Res::Local(_))
-            && self.raps.contains_key(&path_name(p, &self.tcx)) => {
+            && self.raps.path(p, &self.tcx).is_some() => {
             self.annotate_expr(fn_expr);
             for a in fn_args.iter() {
               self.annotate_expr(a);
@@ -344,7 +343,7 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
       // rather than panic — the annotation is purely for source-
       // panel coloring; missing it just leaves the receiver
       // un-styled.
-      if let Some(rcvr_name) = expr_to_rap_name(rcvr, &self.tcx) {
+      if let Some(rcvr_name) = self.raps.place_name(rcvr, &self.tcx) {
         if let Some(rd) = self.raps.get(&rcvr_name) {
           self.annotate_src(rcvr_name.clone(), rcvr.span, false, *rd.rap.hash());
         }
@@ -416,7 +415,7 @@ pub fn annotate_expr(& mut self, expr: &'tcx Expr) {
       // still walked.
       // `p.a` with a `p.a` column: the field name gets that column's
       // colour, so the code matches the column that draws it (#1190).
-      let column = expr_to_rap_name(expr, &self.tcx)
+      let column = self.raps.place_name(expr, &self.tcx)
         .and_then(|n| self.raps.get(&n))
         .map(|rd| *rd.rap.hash());
       if let Some(hash) = column.or_else(|| self.id_map.get(ident.as_str()).map(|h| *h as u64)) {
@@ -499,10 +498,10 @@ fn literal_target(&self, lit: &Expr) -> Option<String> {
   use rustc_hir::Node;
   match self.tcx.parent_hir_node(lit.hir_id) {
     Node::LetStmt(l) => match l.pat.kind {
-      PatKind::Binding(_, hir_id, ..) => Some(binding_name(&self.tcx, hir_id)),
+      PatKind::Binding(_, hir_id, ..) => self.raps.binding(hir_id).map(|rd| rd.rap.name().clone()),
       _ => None,
     },
-    Node::Expr(Expr { kind: ExprKind::Assign(lhs, rhs, _), .. }) if rhs.hir_id == lit.hir_id => expr_to_rap_name(lhs, &self.tcx),
+    Node::Expr(Expr { kind: ExprKind::Assign(lhs, rhs, _), .. }) if rhs.hir_id == lit.hir_id => self.raps.place_name(lhs, &self.tcx),
     _ => None,
   }
 }
@@ -512,7 +511,7 @@ pub fn annotate_local(&mut self, loc: &'tcx LetStmt<'tcx>) {
     rustc_hir::PatKind::Binding(_, hir_id, ident, _) => {
       let lhs_var:String = binding_name(&self.tcx, hir_id);
       // A `let x;` that is never assigned has no RAP (#234).
-      if let Some(rd) = self.raps.get(&lhs_var) {
+      if let Some(rd) = self.raps.binding(hir_id) {
         self.annotate_src(lhs_var.clone(), ident.span, false, *rd.rap.hash());
       }
       match loc.init {
@@ -560,7 +559,7 @@ pub fn annotate_pat(&mut self, pat: &Pat) {
   match pat.kind {
     PatKind::Binding(_, hir_id, ident, sub) => {
       let name = binding_name(&self.tcx, hir_id);
-      match self.raps.get(&name) {
+      match self.raps.binding(hir_id) {
         Some(r) => {
           let hash = *r.rap.hash();
           self.annotate_src(name, ident.span, false, hash);

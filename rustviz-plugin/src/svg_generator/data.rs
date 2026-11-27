@@ -213,7 +213,7 @@ impl ElemsLeft {
     /// Every element of the array, in index order.
     pub fn all(&self) -> Vec<String> {
         let mut all: Vec<String> = self.moved.iter().chain(self.left.iter()).cloned().collect();
-        all.sort_by_key(|n| elem_index(n));
+        all.sort_by_cached_key(|n| n.split('[').skip(1).filter_map(|i| i.strip_suffix(']')?.parse::<u64>().ok()).collect::<Vec<_>>());
         all
     }
 
@@ -230,11 +230,6 @@ impl ElemsLeft {
     }
 }
 
-/// `arr[3]` -> 3.
-fn elem_index(name: &str) -> u64 {
-    name.rsplit('[').next().and_then(|t| t.trim_end_matches(']').parse().ok()).unwrap_or(0)
-}
-
 /// The element names a slice pattern's place stands for: `arr[1]` ->
 /// [`arr[1]`]; `arr[1..3]` -> [`arr[1]`, `arr[2]`].
 pub fn place_elem_names(place: &str) -> Vec<String> {
@@ -249,8 +244,19 @@ pub fn place_elem_names(place: &str) -> Vec<String> {
 }
 
 // when something is not a reference
-#[derive(Clone, Hash, PartialEq, Eq, Debug, Default)]
+// A column has one identity even when a later declaration on it has a
+// different type or different elements left at its scope exit.
+impl PartialEq for Owner {
+    fn eq(&self, other: &Self) -> bool { self.hash == other.hash && self.name == other.name }
+}
+impl Eq for Owner {}
+impl Hash for Owner {
+    fn hash<H: Hasher>(&self, state: &mut H) { self.hash.hash(state); self.name.hash(state); }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct Owner {
+    pub local: Option<rustc_middle::mir::Local>,
     pub name: String,
     pub hash: u64,
     pub is_mut: bool,                     // let a = 42; vs let mut a = 42;
@@ -415,8 +421,17 @@ pub enum RcDrop {
 pub enum RcCall { Clone(RcKind), Downgrade(RcKind) }
 
 // when something is a struct member
-#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+impl PartialEq for Struct {
+    fn eq(&self, other: &Self) -> bool { self.hash == other.hash && self.name == other.name }
+}
+impl Eq for Struct {}
+impl Hash for Struct {
+    fn hash<H: Hasher>(&self, state: &mut H) { self.hash.hash(state); self.name.hash(state); }
+}
+
+#[derive(Clone, Debug)]
 pub struct Struct {
+    pub local: Option<rustc_middle::mir::Local>,
     pub name: String,
     pub hash: u64,
     pub owner: u64,
@@ -838,6 +853,14 @@ pub fn is_param_value_line(evs: &[ExternalEvent]) -> bool {
 }
 
 impl ResourceAccessPoint {
+    pub(crate) fn owner_local(&self) -> Option<rustc_middle::mir::Local> {
+        match self {
+            Self::Owner(o) => o.local,
+            Self::Struct(s) => s.local,
+            _ => None,
+        }
+    }
+
     /// `Some` iff this RAP is an owner whose own type is `Rc` / `Arc` /
     /// `Weak`.
     pub fn rc_kind(&self) -> Option<RcKind> {
@@ -2567,6 +2590,7 @@ pub enum ExternalEvent {
     // Branches are the most interesting event
     // they allow for events to be tree-like
     Branch {
+      body: rustc_hir::def_id::DefId,
       join_span: Option<rustc_span::Span>,
       live_vars: HashSet<ResourceAccessPoint>, // variables who were defined outside of the branch but are live inside it
       /// Holds ending on the MIR edge that skips an if without an else.
@@ -2947,7 +2971,7 @@ pub enum Event {
     // this happens when a owner is returned this line,
     // or if this owner's scope ends at this line. The data must be dropped.
     // `holds`, `early`: the ExternalEvent's.
-    OwnerGoOutOfScope { early: Option<EarlyReturns>, id: usize },
+    OwnerGoOutOfScope { ro: ResourceAccessPoint, early: Option<EarlyReturns>, id: usize },
     // this happens when a vairable that is not an owner goes out of scope.
     // The data is not dropped in this case
     RefGoOutOfScope { early: Option<EarlyReturns>, id: usize },
@@ -4719,6 +4743,8 @@ pub struct VisualizationData {
     /// labels per-fn instead of in one shared row at the top of
     /// the SVG. Populated from plugin.rs's merged rap_map.
     pub fn_start_lines: HashMap<u64, usize>,
+    /// Exact source declaration for each column, independent of header placement.
+    pub fn_source_lines: HashMap<u64, crate::facts::table::FunctionStart>,
 
     /// rap.hash() → what to say in the hover text of a numbered column
     /// header (`s₂`); only columns whose name is numbered have one.
@@ -4785,10 +4811,6 @@ pub struct VisualizationData {
     /// RustViz 3: each column's state on each row, from MIR
     /// (`crate::facts::table`). Struct columns' line text is drawn from it.
     pub state_table: crate::facts::table::StateTable,
-
-    /// Each RAP's fn's first source line (`fn_start_lines` before the
-    /// renderer moves it to visual rows): the state table's key.
-    pub fn_source_lines: HashMap<u64, usize>,
 
     /// The source, by line (1-based line `l` is `source_lines[l - 1]`).
     pub source_lines: Vec<String>,
@@ -6040,7 +6062,7 @@ impl Visualizable for VisualizationData {
         ExternalEvent::GoOutOfScope{ro, early, id} => {
           match ro {
             ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-              vec![(line_num, Event::OwnerGoOutOfScope { early: early.clone(), id: *id })]
+              vec![(line_num, Event::OwnerGoOutOfScope { ro: ro.clone(), early: early.clone(), id: *id })]
             },
             ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
               vec![(line_num, Event::RefGoOutOfScope { early: early.clone(), id: *id })]
@@ -6124,7 +6146,7 @@ impl Visualizable for VisualizationData {
     fn append_branch_event(&self, event: &ExternalEvent, line_number: usize, is: &ResourceTy, b_history: &mut Vec<(usize, Event)>) {
         let rap = is.extract_rap().unwrap();
         match event {
-            ExternalEvent::Branch { join_span, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, skipped_holds, on_exhaustion, id } => {
+            ExternalEvent::Branch { join_span, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, skipped_holds, on_exhaustion, id, .. } => {
                 if live_vars.contains(rap) {
                     let mut new_branches: Vec<BranchData> = Vec::new();
                     for b in branches.iter() {
@@ -6377,7 +6399,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);
             },
-            ExternalEvent::Branch { join_span, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, skipped_holds, on_exhaustion, id } => {
+            ExternalEvent::Branch { join_span, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, skipped_holds, on_exhaustion, id, .. } => {
                 // need to add events with more granularity for Branches
                 for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
@@ -6560,7 +6582,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::GoOutOfScope{ro, early, id} => {
                 match ro {
                     ResourceAccessPoint::Owner(..) | ResourceAccessPoint::Struct(..) => {
-                        maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerGoOutOfScope { early, id }, line_number);
+                        maybe_append_event(self, &ResourceTy::Value(ro.clone()), Event::OwnerGoOutOfScope { ro, early, id }, line_number);
                     },
                     ResourceAccessPoint::MutRef(..) | ResourceAccessPoint::StaticRef(..)=> {
                         maybe_append_event(self, &ResourceTy::Value(ro), Event::RefGoOutOfScope { early, id }, line_number);

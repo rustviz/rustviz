@@ -4,7 +4,7 @@
 //! never an evaluation order.
 use crate::expr_visitor::ExprVisitor;
 use crate::facts::schema::{BodyFacts, DropRoute, Ev, Fact, LoanInfo, Row};
-use crate::svg_generator::data::{ExternalEvent as E, ResourceTy};
+use crate::svg_generator::data::{ExternalEvent as E, ResourceAccessPoint, ResourceTy};
 use rustc_middle::mir::{Body, Location, TerminatorKind};
 use rustc_span::Span;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -69,6 +69,13 @@ impl Order<'_, '_> {
     }
 
     fn matches(&self, ev: &E, f: &Ev) -> bool {
+        let owner = match (ev, &f.fact) {
+            (E::GoOutOfScope { ro, .. } | E::OwnerDropAtReassign { ro, .. }, _) => Some(ro),
+            (E::Bind { to, .. } | E::Copy { to, .. } | E::Move { to, .. }, Fact::Init { .. }) => to.extract_rap(),
+            (E::Move { from, .. }, Fact::Move { .. }) => from.extract_rap(),
+            _ => None,
+        };
+        if owner.and_then(ResourceAccessPoint::owner_local).zip(f.place_local).is_some_and(|(a, b)| a != b) { return false; }
         match (ev, &f.fact) {
             (
                 E::StaticDie { from, to, .. } | E::MutableDie { from, to, .. } | E::RefDie { from, to, .. },
@@ -584,7 +591,14 @@ impl Order<'_, '_> {
             };
             let drop = |e: &E| matches!(e, E::OwnerDropAtReassign { .. });
             let install = |e: &E| matches!(e, E::Bind { .. } | E::Copy { .. } | E::Move { .. });
-            if !(activation(a, x) || activation(b, y) || (drop(a) && install(b)) || (drop(b) && install(a))) {
+            // Reuse of one visual column does not merge the old local's
+            // destructor and the next local's initialization into one effect.
+            let sibling = |e: &E, other: &E| {
+                let E::GoOutOfScope { ro, .. } = e else { return false };
+                columns(other).into_iter().flatten().any(|r| ro.hash() == r.hash()
+                    && ro.owner_local().zip(r.owner_local()).is_some_and(|(a, b)| a != b))
+            };
+            if !(sibling(a, b) || sibling(b, a) || activation(a, x) || activation(b, y) || (drop(a) && install(b)) || (drop(b) && install(a))) {
                 return false;
             }
         }
@@ -1157,7 +1171,8 @@ impl Order<'_, '_> {
                 continue;
             };
             let has_boundary =
-                indices.iter().any(|&i| end(&events[i].1) || matches!(events[i].1, E::OwnerDropAtReassign { .. }));
+                indices.iter().any(|&i| end(&events[i].1) || matches!(events[i].1, E::OwnerDropAtReassign { .. })
+                    || matches!(&events[i].1, E::GoOutOfScope { ro, .. } if self.facts.bindings.columns.get(ro.name()).is_some_and(|ls| ls.len() > 1)));
             if !has_boundary
                 && !normal_facts(row).any(|f| matches!(f.fact, Fact::Repoint { .. }))
                 && !normal_facts(row)
@@ -1500,6 +1515,7 @@ mod tests {
                 transfer_paths: Vec::new(),
                 end_places: Vec::new(),
                 drop_route: DropRoute::Unwind,
+                place_local: None,
                 end_successor: None,
                 col: 1,
                 arm: None,

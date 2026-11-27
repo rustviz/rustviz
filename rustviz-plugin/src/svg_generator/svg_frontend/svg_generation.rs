@@ -1094,18 +1094,18 @@ fn one_row_layout(visualization_data: &mut VisualizationData) -> BTreeSet<usize>
     fn walk(events: &[(usize, ExternalEvent)], table: &crate::facts::table::StateTable,
         out: &mut BTreeSet<usize>, exits: &mut BTreeSet<(usize, usize)>) {
         for (_, e) in events {
-            if let ExternalEvent::Branch { branches, split_point, merge_point, live_vars, id, .. } = e {
+            if let ExternalEvent::Branch { body, branches, split_point, merge_point, live_vars, id, .. } = e {
                 if branch_is_collapsed(*split_point, *merge_point) {
                     #[expect(clippy::disallowed_methods, reason = "collected into a sorted set")]
                     let names: BTreeSet<String> = live_vars.iter().map(|r| r.name().to_owned()).collect();
                     // (This conditional's own arms, by their source spans: not
                     // a sibling conditional's on the same line.)
                     let spans: Vec<_> = branches.iter().map(|b| b.source_span).collect();
-                    if table.arms_disagree(*split_point, &names, &spans) {
+                    if table.arms_disagree(*body, *split_point, &names, &spans) {
                         out.insert(*id);
                     }
                     for (i, arm) in branches.iter().enumerate() {
-                        if arm.diverges && arm.source_span.is_some_and(|span| table.arm_has_exit(*split_point, span)) {
+                        if arm.diverges && arm.source_span.is_some_and(|span| table.arm_has_exit(*body, *split_point, span)) {
                             exits.insert((*id, i));
                         }
                     }

@@ -801,6 +801,12 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         t.starts_with('&') || t.starts_with("ref ") || t.starts_with("ref\t") || t.contains(" ref ")
     }
 
+    fn place_ev(&self, l: Location, local: Local, fact: Fact) -> (usize, Ev) {
+        let mut event = self.ev(l, fact);
+        event.1.place_local = Some(local);
+        event
+    }
+
     fn ev(&self, l: Location, fact: Fact) -> (usize, Ev) {
         let row = self.rows.event_row.get(&l).copied().unwrap_or_else(|| self.row_of(l));
         // An early exit's drop sits where the exit is: its column and arm.
@@ -809,7 +815,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         if matches!(fact, Fact::BorrowEnd { .. }) {
             order.2 = 1;
         }
-        let ev = Ev { location: l, display_location: at, drop_route: DropRoute::Normal, end_successor: None, end_places: vec![], caller_slot: None, transfer_paths: vec![], col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None };
+        let ev = Ev { location: l, display_location: at, place_local: None, drop_route: DropRoute::Normal, end_successor: None, end_places: vec![], caller_slot: None, transfer_paths: vec![], col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None };
         (row, ev)
     }
 }
@@ -1144,7 +1150,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let typing_env = rustc_middle::ty::TypingEnv::post_analysis(tcx, def_id);
     let r = Rows { tcx, body };
     let rows = r.build();
-    let names = Names::new(tcx, body);
+    let mut names = Names::new(tcx, body);
+    for (&local, name) in &names.bindings.locals {
+        let ty = body.local_decls[local].ty;
+        if let Some(parts) = BodyBindings::array_elems_left(tcx, body, local, name, ty) {
+            names.bindings.arrays.insert(local, parts);
+        }
+        if BodyBindings::box_contents_moved_out(body, local, ty) { names.bindings.emptied_boxes.insert(local); }
+    }
     let vec_results = body.basic_blocks.iter_enumerated().filter_map(|(bb, data)| {
         let term = data.terminator();
         let TerminatorKind::Call { func, destination, .. } = &term.kind else { return None };
@@ -1280,7 +1293,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         } else {
             "field"
         };
-        column_info.push(ColumnInfo { name: n.clone(), root, kind, copy, needs_drop, is_box: mp.place.ty(&body.local_decls, tcx).ty.is_box(), array_len: array_len(mp.place), hidden_fields: false });
+        column_info.push(ColumnInfo { local: mp.place.local, name: n.clone(), root, kind, copy, needs_drop, is_box: mp.place.ty(&body.local_decls, tcx).ty.is_box(), array_len: array_len(mp.place), hidden_fields: false });
         columns.push((mpi, mp.place, n));
     }
     // Fields with no move path of their own (nothing moves or assigns them
@@ -1367,7 +1380,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             // name; each keeps its own places.)
             if !column_info.iter().any(|c| c.name == n) {
                 let (copy, needs_drop, _) = ty_info(fty);
-                column_info.push(ColumnInfo { name: n.clone(), root, kind: "field", copy, needs_drop, is_box: fty.is_box(), array_len: array_len(fp), hidden_fields: false });
+                column_info.push(ColumnInfo { local: fp.local, name: n.clone(), root, kind: "field", copy, needs_drop, is_box: fty.is_box(), array_len: array_len(fp), hidden_fields: false });
             }
             synth.push((mpi, fp, n));
             // (Nested structs and tuples; never through a reference or a
@@ -2701,13 +2714,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // ---- per-holder ends ---------------------------------------------------------
     // Where a direct or via-call holder stops holding a loan that goes on.
     if let Some(t) = table {
-        let local_of: BTreeMap<&str, Local> = cx.names.locals.iter().map(|(l, n)| (n.as_str(), *l)).collect();
         // The place a holder's name is (`h.0`, `h.inner.r`): its own field,
         // so `h.0` and `h.1` each have their own end.
-        let place_of = |name: &str| -> Option<Place<'tcx>> {
-            let mut segs = name.split('.');
-            let mut place = Place::from(*local_of.get(segs.next()?)?);
-            for seg in segs {
+        let place_of = |local: Local, fields: &str| -> Option<Place<'tcx>> {
+            let mut place = Place::from(local);
+            for seg in fields.split_terminator('.') {
                 let ty = decl_place_ty(tcx, body, place);
                 let (i, fty) = match ty.kind() {
                     TyKind::Tuple(tys) => {
@@ -2772,11 +2783,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             let bi = BorrowIndex::from_usize(l.loan);
             let mut seen: BTreeSet<&String> = BTreeSet::new();
-            for h in l.direct_holders.iter().chain(l.via_call.iter()) {
-                if !seen.insert(h) {
-                    continue;
-                }
-                let Some(hp) = place_of(h) else { continue };
+            let holders = l.direct_holders.iter().chain(l.via_call.iter()).filter(|h| seen.insert(*h));
+            for (h, hp) in holders.flat_map(|h| {
+                let (root, fields) = h.split_once('.').unwrap_or((h, ""));
+                cx.names.columns.get(root).into_iter().flatten().filter_map(move |local| Some((h, place_of(*local, fields)?)))
+            }) {
                 for (&loc, &row) in &cx.rows.row {
                     if !runs.contains(&loc.block) {
                         continue;
@@ -3175,10 +3186,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         }
                     }
                 }
+                let array_element = source.and_then(|p| {
+                    let root = cx.names.locals.get(&p.local)?;
+                    let label = crate::mir_data::array_operand_name(tcx, body, p, root.clone())?;
+                    Some((p.local, label))
+                });
                 binding_sources.push(BindingSource {
+                    array_element,
                     parents, covers, moves: matches!(rv, Rvalue::Use(Operand::Move(p)) if !ty_info(p.ty(&body.local_decls, tcx).ty).0),
                     location: loc, runs: runs.contains(&loc.block),
-                    declaration: body.local_decls[lhs.local].source_info.span,
+                    declaration: lhs.local,
                     site: st.source_info.span, into: into.clone(), from,
                 });
             }
@@ -3210,7 +3227,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                     && !body.local_decls[p.local].ty.is_box()
                                     && cx.names.locals.contains_key(&p.local);
                                 if !through_ref {
-                                    push(&mut evs, cx.ev(loc, Fact::Move { path, to, in_macro: in_macro.clone() }));
+                                    push(&mut evs, cx.place_ev(loc, p.local, Fact::Move { path, to, in_macro: in_macro.clone() }));
                                 }
                             }
                             // A part of a temporary moved into a variable (`let
@@ -3231,7 +3248,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 if let Ok(text) = tcx.sess.source_map().span_to_snippet(sp) {
                                     let path = cx.names.name_in_temp(body, *p, text.trim().to_string());
                                     let to = cx.dest_name(*lhs, loc, 0);
-                                    push(&mut evs, cx.ev(loc, Fact::Move { path, to, in_macro: in_macro.clone() }));
+                                    push(&mut evs, cx.place_ev(loc, p.local, Fact::Move { path, to, in_macro: in_macro.clone() }));
                                 }
                             }
                             Operand::Copy(p) if cx.is_user(*p) => {
@@ -3307,7 +3324,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 binding_loans.insert(loc, ids);
                             }
                         }
-                        push(&mut evs, cx.ev(loc, Fact::Init { path, from, reassign, maybe_had }));
+                        push(&mut evs, cx.place_ev(loc, lhs.local, Fact::Init { path, from, reassign, maybe_had }));
                     } else if cx.is_user(*lhs) {
                         // A write through a reference or into an element
                         // (`*r = x`, `v[i] = x`): the place gets a new value
@@ -3319,14 +3336,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             _ => "<value>".into(),
                         };
                         let path = cx.name(*lhs).unwrap_or_default();
-                        push(&mut evs, cx.ev(loc, Fact::Init { path, from, reassign: true, maybe_had: false }));
+                        push(&mut evs, cx.place_ev(loc, lhs.local, Fact::Init { path, from, reassign: true, maybe_had: false }));
                     }
                 }
                 StatementKind::StorageDead(l) if cx.names.locals.contains_key(l) => {
                     let (copy, needs_drop, _) = ty_info(body.local_decls[*l].ty);
                     if !needs_drop {
                         let note = if copy { "copy: nothing to drop" } else { "no drop glue" };
-                        push(&mut evs, cx.ev(loc, Fact::ScopeEnd { path: cx.names.locals[l].clone(), note }));
+                        push(&mut evs, cx.place_ev(loc, *l, Fact::ScopeEnd { path: cx.names.locals[l].clone(), note }));
                     }
                 }
                 _ => {}
@@ -3341,7 +3358,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     match &a.node {
                         Operand::Move(p) if cx.is_user(*p) => {
                             let path = cx.name(*p).unwrap_or_default();
-                            push(&mut evs, cx.ev(loc, Fact::Move { path, to: format!("{}()", f), in_macro: in_macro.clone() }));
+                            push(&mut evs, cx.place_ev(loc, p.local, Fact::Move { path, to: format!("{}()", f), in_macro: in_macro.clone() }));
                         }
                         Operand::Copy(p) if cx.is_user(*p) => {
                             let path = cx.name(*p).unwrap_or_default();
@@ -3360,7 +3377,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         }
                         LookupResult::Parent(_) => (false, false),
                     };
-                    push(&mut evs, cx.ev(loc, Fact::Init { path, from: format!("{}()", f), reassign, maybe_had }));
+                    push(&mut evs, cx.place_ev(loc, destination.local, Fact::Init { path, from: format!("{}()", f), reassign, maybe_had }));
                 }
                 // The caller still has a normal return edge for a closure
                 // with a written result type. Keep its borrowck state and
@@ -3434,7 +3451,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 items.insert(0, (path.clone(), how_there));
                             }
                             for (n, h) in items {
-                                let mut ev = cx.ev(loc, Fact::Drop { path: n, how: h, at_reassign: false, early_exit: Some(*r), also_on_exits: Vec::new() });
+                                let mut ev = cx.place_ev(loc, place.local, Fact::Drop { path: n, how: h, at_reassign: false, early_exit: Some(*r), also_on_exits: Vec::new() });
                                 ev.0 = *r;
                                 ev.1.col = cx.rows.col.get(at).copied().unwrap_or(0);
                                 ev.1.arm = cx.rows.arm_of(*at);
@@ -3464,7 +3481,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         }
                         let route = drop_route(loc, &shared);
                         for (n, h, also) in items {
-                            let mut ev = cx.ev(loc, Fact::Drop { path: n, how: h, at_reassign, early_exit, also_on_exits: also });
+                            let mut ev = cx.place_ev(loc, place.local, Fact::Drop { path: n, how: h, at_reassign, early_exit, also_on_exits: also });
                             ev.1.drop_route = route;
                             push(&mut evs, ev);
                         }
@@ -3666,8 +3683,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 storage.get().contains(local)
             })
         });
+        let mut column_locals = BTreeMap::new();
         let mut holder_types = BTreeMap::new();
         let mut record_type = |name: &str, place: Place<'tcx>| {
+            column_locals.entry(name.to_owned()).and_modify(|prev| {
+                if *prev != Some(place.local) { *prev = None; }
+            }).or_insert(Some(place.local));
             if !option_columns.contains(name) { return; }
             let holder_type = option_copy(place)
                 .map(|copy| HolderType::OptionRef { local: place.local.index(), copy })
@@ -3858,6 +3879,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
         for (parent, fp, name) in &synth {
+            if !declared(fp.local) { continue; }
             let Some(pn) = column_name(*parent) else { continue };
             let Some(pw) = st.state.get(&pn).copied() else { continue };
             // A field reached through a reference (`self.a`, `r.a`) is a
@@ -3887,9 +3909,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
             }
             st.state.insert(name.clone(), if pw == "partly" { "own" } else { pw });
-            if declared(fp.local) {
-                record_type(name, *fp);
-            }
+            record_type(name, *fp);
             if let Some(c) = st.cause.get(&pn).copied() {
                 // An untracked field can inherit a possible move of its
                 // parent even when the runtime moves only a sibling.
@@ -3908,6 +3928,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 st.cause.insert(name.clone(), if imaginary { "imaginary" } else { c });
             }
         }
+        // When different locals are active on different paths the column has no single state.
+        st.locals = column_locals;
+        st.state.retain(|name, _| st.locals.get(name) != Some(&None));
         st.holder_types = holder_types.into_iter().filter_map(|(name, ty)| Some((name, ty?))).collect();
         // Loans in scope where the next row starts on the same path: in
         // scope after the exit and still at the successor (a loan whose last
@@ -4660,6 +4683,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }).collect();
     BodyFacts {
         drop_holders,
+        bindings: cx.names.bindings.into(),
         closure_result_loans,
         conditional_ends,
         aggregate_loans,

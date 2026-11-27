@@ -29,7 +29,7 @@ impl Rustviz {
     p_evts: Vec<(usize, ExternalEvent)>,
     ev_map: BTreeMap<usize, Vec<ExternalEvent>>,
     num_raps: usize,
-    fn_start_lines: HashMap<u64, usize>,
+    fn_source_lines: HashMap<u64, crate::facts::table::FunctionStart>,
     shadow_notes: HashMap<u64, ShadowNote>,
     binding_columns: Vec<(u64, u64)>,
     moves_out_first: Vec<usize>,
@@ -44,8 +44,9 @@ impl Rustviz {
     ****************************************** */
     // The state table is in source lines; with hidden lines the code
     // panel's lines aren't the source's, so it isn't used (2.x draws).
+    #[expect(clippy::disallowed_methods, reason = "each source column supplies its own initial header row")]
+    let fn_start_lines = fn_source_lines.iter().map(|(&hash, start)| (hash, start.line)).collect();
     let state_table = if hidden_source_lines.is_empty() { state_table } else { Default::default() };
-    let fn_source_lines = fn_start_lines.clone();
     let source_lines: Vec<String> = src_str.lines().map(str::to_owned).collect();
     let mut vd = VisualizationData {
       timelines: BTreeMap::new(),
@@ -55,6 +56,7 @@ impl Rustviz {
       event_line_map: ev_map,
       num_valid_raps: num_raps,
       fn_start_lines,
+      fn_source_lines,
       shadow_notes,
       binding_columns,
       moves_out_first: moves_out_first.into_iter().collect(),
@@ -67,7 +69,6 @@ impl Rustviz {
       fork_above: HashSet::new(),
       exits_at_split: BTreeSet::new(),
       state_table,
-      fn_source_lines,
       source_lines,
     };
     /* ******************************************
