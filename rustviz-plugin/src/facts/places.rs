@@ -6,10 +6,10 @@
 //! variant's field), `r.f` (a field behind a reference). Variables keep
 //! the 2.x column names (`s`, `s₂`) from `binding_names`.
 
-use crate::expr_visitor_utils::{binding_names, written_name};
-use rustc_middle::mir::{Body, Local, Place, PlaceElem, ProjectionElem, VarDebugInfoContents};
+use crate::expr_visitor_utils::{body_binding_names, binding_name};
+use super::schema::BodyBindings;
+use rustc_middle::mir::{Body, Place, PlaceElem, ProjectionElem, VarDebugInfoContents};
 use rustc_middle::ty::{Ty, TyCtxt, TyKind};
-use std::collections::BTreeMap;
 
 /// How a closure body sees a captured variable.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -25,48 +25,50 @@ pub enum Capture {
 
 pub struct Names<'tcx> {
     /// User variables that are whole locals.
-    pub locals: BTreeMap<Local, String>,
+    pub bindings: BodyBindings,
     /// Variables that live at a projection of a local: a closure's
     /// captures (`(*_1).0`, or `*((*_1).0)` for a capture by reference).
     pub aliases: Vec<(Place<'tcx>, String, Capture)>,
 }
 
+impl std::ops::Deref for Names<'_> {
+    type Target = BodyBindings;
+    fn deref(&self) -> &Self::Target { &self.bindings }
+}
+
 impl<'tcx> Names<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Self {
-        let owner = tcx.local_def_id_to_hir_id(body.source.def_id().expect_local()).owner;
-        let names = binding_names(&tcx, owner);
-        let sm = tcx.sess.source_map();
-        let mut locals: BTreeMap<Local, String> = BTreeMap::new();
+        let owner = body.source.def_id().expect_local();
+        let names = body_binding_names(&tcx, owner);
+        let mut bindings = BodyBindings::default();
         let mut aliases = Vec::new();
         for vdi in body.var_debug_info.iter() {
             let VarDebugInfoContents::Place(place) = vdi.value else { continue };
             let span = vdi.source_info.span;
-            let ident = vdi.name.as_str();
             if !place.projection.is_empty() {
                 // A closure's captured variable: its debug info names the
                 // place in the closure's environment.
                 if place.local.as_usize() == 1 && is_closure_env(tcx, body) {
-                    let cap = capture_kind(tcx, body, place);
-                    let name = names
-                        .by_span
-                        .iter()
-                        .find(|(sp, n)| span.contains(*sp) && written_name(n) == ident)
-                        .map_or_else(|| ident.to_owned(), |(_, n)| n.clone());
-                    aliases.push((place, name, cap));
+                    let field = place.projection.iter().find_map(|p| match p {
+                        ProjectionElem::Field(f, _) => Some(f.index()), _ => None,
+                    });
+                    let Some(cap) = field.and_then(|f| tcx.closure_captures(owner).get(f)) else { continue };
+                    // Projected captures have their own debug label. For a whole
+                    // variable keep the outer binding's shadow suffix.
+                    let label = if cap.place.projections.is_empty() {
+                        binding_name(&tcx, cap.get_root_variable())
+                    } else { vdi.name.to_string() };
+                    aliases.push((place, label, capture_kind(cap.info.capture_kind)));
                 }
                 continue;
             }
             // A match guard sees its bindings through a reference of its
             // own (`RefForGuard`), named like the binding: not a column.
-            if matches!(
-                body.local_decls[place.local].local_info(),
-                rustc_middle::mir::LocalInfo::User(rustc_middle::mir::BindingForm::RefForGuard(_))
-            ) {
+            if !body.local_decls[place.local].is_user_variable() || body.local_decls[place.local].is_ref_for_guard() {
                 continue;
             }
             // Only bindings the user wrote: not `val` of a `?`, `iter` of
-            // a `for`, `args` of `format_args!` (MIR's own), whose span
-            // text isn't the name.
+            // a `for`, `args` of `format_args!` (MIR's own).
             if span.from_expansion() && span.desugaring_kind().is_none()
                 || span.desugaring_kind().is_some_and(|k| !matches!(k, rustc_span::DesugaringKind::ForLoop))
             {
@@ -81,41 +83,24 @@ impl<'tcx> Names<'tcx> {
             {
                 continue;
             }
-            let written = sm.span_to_snippet(span).unwrap_or_default();
-            let w = written.trim_start_matches("ref ").trim_start_matches("mut ").trim();
-            let w = w.strip_prefix("r#").unwrap_or(w);
-            if w != ident && !(w == "self" || w.ends_with("self")) {
-                continue;
-            }
-            let name = names
-                .by_span
-                .iter()
-                .find(|(sp, n)| span.contains(*sp) && written_name(n) == ident)
-                .map_or_else(|| ident.to_owned(), |(_, n)| n.clone());
-            locals.entry(place.local).or_insert(name);
-        }
-        // Two locals named alike (the 2.x name table numbers shadowing
-        // in fn bodies, not in closure bodies): number them by position.
-        // A captured variable (an alias) comes first: `let x = x;` in a
-        // `move` closure makes the local `x₂`.
-        let mut by_name: BTreeMap<String, Vec<(rustc_span::BytePos, Local)>> = BTreeMap::new();
-        for (l, n) in &locals {
-            by_name.entry(n.clone()).or_default().push((body.local_decls[*l].source_info.span.lo(), *l));
-        }
-        for (n, mut ls) in by_name {
-            let captured = aliases.iter().any(|(_, a, _): &(Place<'tcx>, String, Capture)| *a == n);
-            if (ls.len() < 2 && !captured) || !is_closure_env(tcx, body) {
-                continue;
-            }
-            ls.sort();
-            let skip = if captured { 0 } else { 1 };
-            for (k, (_, l)) in ls.into_iter().enumerate().skip(skip) {
-                locals.insert(l, crate::expr_visitor_utils::numbered_name(written_name(&n), k + 1 + (1 - skip)));
-            }
+            let Some(root) = body.local_decls[place.local].source_info.scope.lint_root(&body.source_scopes) else { continue };
+            // For a simple formal argument MIR records the parameter's node.
+            let pat = match tcx.hir_node(root) {
+                rustc_hir::Node::Pat(p) => p,
+                rustc_hir::Node::Param(p) => p.pat,
+                _ => continue,
+            };
+            let rustc_hir::PatKind::Binding(_, id, ..) = pat.kind else { continue };
+            let Some(label) = names.by_hir.get(&id) else { continue };
+            bindings.declarations.insert(id, place.local);
+            bindings.locals.insert(place.local, label.clone());
         }
         // Longest alias first, so the most specific one names a place.
         aliases.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.projection.len()));
-        Names { locals, aliases }
+        for (local, name) in bindings.locals.iter() {
+            bindings.columns.entry(name.clone()).or_default().push(*local);
+        }
+        Names { bindings, aliases }
     }
 
     /// The variable a place starts at, and how many projections that
@@ -249,17 +234,13 @@ fn is_closure_env<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
 /// How the closure captured the variable at `place` (an environment
 /// field, perhaps dereferenced): rustc's own capture analysis (the field's
 /// type can't tell a unique immutable borrow from a mutable one).
-fn capture_kind<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Capture {
-    let field = place.projection.iter().find_map(|e| match e {
-        ProjectionElem::Field(f, _) => Some(f.index()),
-        _ => None,
-    });
-    let caps = tcx.closure_captures(body.source.def_id().expect_local());
-    match field.and_then(|f| caps.get(f)).map(|c| c.info.capture_kind) {
-        Some(rustc_middle::ty::UpvarCapture::ByRef(rustc_middle::ty::BorrowKind::Immutable)) => Capture::ByRef,
-        Some(rustc_middle::ty::UpvarCapture::ByRef(rustc_middle::ty::BorrowKind::Mutable)) => Capture::ByMutRef,
-        Some(rustc_middle::ty::UpvarCapture::ByRef(rustc_middle::ty::BorrowKind::UniqueImmutable)) => Capture::ByUniqueRef,
-        _ => Capture::ByValue,
+fn capture_kind(kind: rustc_middle::ty::UpvarCapture) -> Capture {
+    use rustc_middle::ty::{BorrowKind, UpvarCapture};
+    match kind {
+        UpvarCapture::ByRef(BorrowKind::Immutable) => Capture::ByRef,
+        UpvarCapture::ByRef(BorrowKind::Mutable) => Capture::ByMutRef,
+        UpvarCapture::ByRef(BorrowKind::UniqueImmutable) => Capture::ByUniqueRef,
+        UpvarCapture::ByValue | UpvarCapture::ByUse => Capture::ByValue,
     }
 }
 

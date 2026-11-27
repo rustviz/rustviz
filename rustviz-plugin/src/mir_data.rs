@@ -7,9 +7,9 @@
 //! you figure out when a copy occurs? You can't use the assignment operator - since a single HIR instr can be compiled down into
 //! multiple MIR instructions.
 
-use crate::{expr_visitor::*, expr_visitor_utils::{binding_names, span_end_line, span_to_line, written_name}};
+use crate::{expr_visitor::*, expr_visitor_utils::{span_end_line, span_to_line}};
 use log::info;
-use rustc_middle::mir::{BorrowKind, Location, Local, Operand, Place, PlaceElem, ProjectionElem, Rvalue, StatementKind, TerminatorKind, VarDebugInfoContents};
+use rustc_middle::mir::{BorrowKind, Location, Local, Operand, Place, PlaceElem, ProjectionElem, Rvalue, StatementKind, TerminatorKind};
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::ty::{GenericArgKind, RegionVid, Ty, TyKind};
 use rustc_hir::intravisit;
@@ -28,6 +28,7 @@ type Origin = <RustcFacts as FactTypes>::Origin;
 /// drawn live (#796): on the write's path the loan is already dead.
 #[derive(Clone, Debug)]
 pub struct DeadLoanWrite {
+    pub location: Location,
     /// RAP name of the reference that held the loan.
     pub borrower: String,
     /// Where `borrower` is given a new reference on the write's path,
@@ -116,30 +117,81 @@ impl<'tcx> Visitor<'tcx> for BoxContentsMoves {
     }
 }
 
-/// The elements of the array `local` (of length `len`) that are moved
-/// out one by one (`move _1[0 of 2]`, `move _1[1..2]`), and whether the
-/// whole array is moved or assigned somewhere (then the elements' fate
-/// isn't one fixed set).
-struct ArrayElemMoves { local: Local, len: u64, moved: BTreeSet<u64>, whole: bool, assigns: usize, at: Vec<(Location, u64)> }
+/// A constant projection of an array operand. A subslice may be the last step.
+struct ArrayStep {
+    indices: std::ops::Range<u64>,
+    len: u64,
+    slice: bool,
+}
 
-impl<'tcx> Visitor<'tcx> for ArrayElemMoves {
+fn array_steps<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &rustc_middle::mir::Body<'tcx>, p: Place<'tcx>) -> Option<Vec<ArrayStep>> {
+    let mut steps = Vec::new();
+    for (base, elem) in p.iter_projections() {
+        // Moving the sole field of an enum variant takes the resource in
+        // that array element (e.g. [Some(s), _]), as the element tooltip says.
+        if let [ProjectionElem::Downcast(_, variant), ProjectionElem::Field(field, _)] = &p.projection[base.projection.len()..] {
+            if base.ty(&body.local_decls, tcx).ty.ty_adt_def().is_some_and(|d|
+                d.is_enum() && d.variant(*variant).fields.len() == 1 && field.index() == 0) { break; }
+        }
+        let TyKind::Array(_, n) = base.ty(&body.local_decls, tcx).ty.kind() else { return None };
+        let len = n.try_to_target_usize(tcx)?;
+        let index = |n, from_end| if from_end { len.checked_sub(n) } else { Some(n) };
+        let (indices, slice) = match elem {
+            ProjectionElem::ConstantIndex { offset, from_end, .. } => {
+                let i = index(offset, from_end)?;
+                (i..i + 1, false)
+            }
+            ProjectionElem::Subslice { from, to, from_end } if steps.len() + 1 == p.projection.len() =>
+                (from..index(to, from_end)?, true),
+            _ => return None,
+        };
+        steps.push(ArrayStep { indices, len, slice });
+    }
+    (!steps.is_empty()).then_some(steps)
+}
+
+pub(crate) fn array_operand_name<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &rustc_middle::mir::Body<'tcx>, p: Place<'tcx>, mut name: String) -> Option<String> {
+    use std::fmt::Write;
+    for step in array_steps(tcx, body, p)? {
+        if step.slice { write!(name, "[{}..{}]", step.indices.start, step.indices.end).ok()?; }
+        else { write!(name, "[{}]", step.indices.start).ok()?; }
+    }
+    Some(name)
+}
+
+struct ArrayElemMoves<'a, 'tcx> {
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    body: &'a rustc_middle::mir::Body<'tcx>,
+    local: Local,
+    /// Length of each array whose immediate elements a move distinguishes.
+    lengths: BTreeMap<Vec<u64>, u64>,
+    moved: BTreeSet<Vec<u64>>,
+    whole: bool,
+    assigns: usize,
+    at: Vec<(Location, Vec<u64>)>,
+}
+
+impl<'tcx> Visitor<'tcx> for ArrayElemMoves<'_, 'tcx> {
     fn visit_operand(&mut self, op: &Operand<'tcx>, loc: Location) {
-        if let Operand::Move(place) = op {
-            if place.local == self.local {
-                match place.projection.first() {
-                    None => self.whole = true,
-                    Some(ProjectionElem::ConstantIndex { offset, from_end, .. }) => {
-                        let i = if *from_end { self.len.saturating_sub(*offset) } else { *offset };
-                        self.moved.insert(i);
-                        self.at.push((loc, i));
+        if let Operand::Move(p) = op {
+            if p.local != self.local { return; }
+            if let Some(steps) = array_steps(self.tcx, self.body, *p) {
+                let mut prefix = Vec::new();
+                for (depth, step) in steps.iter().enumerate() {
+                    self.lengths.insert(prefix.clone(), step.len);
+                    if depth + 1 == steps.len() {
+                        for i in step.indices.clone() {
+                            let mut path = prefix.clone();
+                            path.push(i);
+                            self.moved.insert(path.clone());
+                            self.at.push((loc, path));
+                        }
+                    } else {
+                        prefix.push(step.indices.start);
                     }
-                    Some(ProjectionElem::Subslice { from, to, from_end }) => {
-                        let end = if *from_end { self.len.saturating_sub(*to) } else { *to };
-                        self.moved.extend(*from..end);
-                        self.at.extend((*from..end).map(|i| (loc, i)));
-                    }
-                    _ => {}
                 }
+            } else {
+                self.whole = true;
             }
         }
         self.super_operand(op, loc);
@@ -197,7 +249,9 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         v.visit_body(body);
         v.reborrowed && !v.other
     }
+}
 
+impl crate::facts::BodyBindings {
     /// For `name`, an array `[T; N]` whose `T` needs drop, from which
     /// patterns move some elements out but leave others (`let [a, _] =
     /// arr;`, `[first, ..] =>`): which elements are moved and which are
@@ -207,61 +261,66 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// of all of it). Several patterns that together move every element
     /// (`let [a, _] = arr; let [_, b] = arr;`, #1302) leave nothing in
     /// it: `ElemsLeft::last` names the elements whose move empties it.
-    pub fn array_elems_left(&self, name: &str, ty: Ty<'tcx>) -> Option<crate::svg_generator::data::ElemsLeft> {
-        let TyKind::Array(elem, len) = ty.kind() else { return None };
-        let len = len.try_to_target_usize(self.tcx)?;
-        if !crate::expr_visitor_utils::needs_drop_in(self.tcx, *elem, rustc_middle::ty::TypingEnv::fully_monomorphized()) {
+    pub(crate) fn array_elems_left<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, body: &rustc_middle::mir::Body<'tcx>, local: Local, name: &str, ty: Ty<'tcx>) -> Option<crate::svg_generator::data::ElemsLeft> {
+        let TyKind::Array(elem, _) = ty.kind() else { return None };
+        if !crate::expr_visitor_utils::needs_drop_in(tcx, *elem, rustc_middle::ty::TypingEnv::fully_monomorphized()) {
             return None;
         }
-        let names = self.mir_local_names(self.bwf);
-        #[expect(clippy::disallowed_methods, reason = "a name is bound to one local; min() makes order irrelevant")]
-        let local = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).min()?;
-        let mut v = ArrayElemMoves { local, len, moved: BTreeSet::new(), whole: false, assigns: 0, at: Vec::new() };
-        v.visit_body(&self.bwf.body);
+        let mut v = ArrayElemMoves { tcx, body, local, lengths: BTreeMap::new(), moved: BTreeSet::new(), whole: false, assigns: 0, at: Vec::new() };
+        v.visit_body(body);
         if v.whole || v.assigns > 1 || v.moved.is_empty() {
             return None;
         }
-        let elem_name = |i: u64| format!("{}[{}]", name, i);
-        let mut last = Vec::new();
-        if v.moved.len() as u64 >= len {
-            // Every element is moved, by patterns on more than one line
-            // (else it is one pattern taking all of it). The array is
-            // empty once the last of them has run: the moves on the last
-            // line, if every other move comes before them on every path
-            // to them (in a `match`'s arms, no move empties it).
-            let body = &self.bwf.body;
-            let line_of = |l: Location| span_to_line(&self.location_to_span(l, self.bwf), &self.tcx);
-            let lines: BTreeSet<usize> = v.at.iter().map(|(l, _)| line_of(*l)).collect();
-            let last_line = *lines.last()?;
-            if lines.len() < 2 {
-                return None;
+        let label = |path: &Vec<u64>| path.iter().fold(name.to_owned(), |s, i| format!("{s}[{i}]"));
+        let mut left = BTreeSet::new();
+        for (prefix, len) in &v.lengths {
+            // A different path moves this entire inner array.
+            if v.moved.contains(prefix) { return None; }
+            for i in 0..*len {
+                let mut path = prefix.clone();
+                path.push(i);
+                if !v.moved.contains(&path) && !v.lengths.contains_key(&path) { left.insert(path); }
             }
+        }
+        let mut last = Vec::new();
+        if left.is_empty() {
+            // The final pattern empties the array only when all other moves dominate it.
+            // Several bindings in one pattern share the enclosing HIR pattern node.
+            let pattern = |loc: Location| {
+                let StatementKind::Assign(asg) = &body.basic_blocks[loc.block].statements.get(loc.statement_index)?.kind else { return None };
+                let id = body.local_decls[asg.0.local].source_info.scope.lint_root(&body.source_scopes)?;
+                Some(tcx.hir_parent_iter(id).take_while(|(_, n)| matches!(n, rustc_hir::Node::Pat(_) | rustc_hir::Node::PatField(_)))
+                    .last().map_or(id, |(p, _)| p))
+            };
             let doms = body.basic_blocks.dominators();
-            let (tail, rest): (Vec<_>, Vec<_>) = v.at.iter().partition(|(l, _)| line_of(*l) == last_line);
-            if rest.iter().all(|(r, _)| tail.iter().all(|(t, _)| r.dominates(*t, doms))) {
-                last = tail.iter().map(|(_, i)| *i).collect::<BTreeSet<u64>>().into_iter().map(elem_name).collect();
+            let mut groups = BTreeMap::<_, Vec<_>>::new();
+            for (loc, index) in &v.at { groups.entry(pattern(*loc)?.local_id.as_u32()).or_default().push((*loc, index)); }
+            if groups.len() == 1 { return None; }
+            for (id, tail) in &groups {
+                if groups.iter().filter(|(k, _)| *k != id).flat_map(|(_, moves)| moves)
+                    .all(|(r, _)| tail.iter().all(|(t, _)| r.dominates(*t, doms))) {
+                    last = tail.iter().map(|(_, i)| *i).collect::<BTreeSet<_>>().into_iter().map(label).collect();
+                    break;
+                }
             }
         }
         Some(crate::svg_generator::data::ElemsLeft {
-            moved: v.moved.iter().map(|&i| elem_name(i)).collect(),
-            left: (0..len).filter(|i| !v.moved.contains(i)).map(elem_name).collect(),
-            last,
+            moved: v.moved.iter().map(label).collect(), left: left.iter().map(label).collect(), last,
         })
     }
 
     /// Is `name`, a `Box<T>`, emptied by a move of its whole contents
     /// somewhere in this body (`take(*b)`)? Its heap allocation is
     /// still freed at scope end (#609).
-    pub fn box_contents_moved_out(&self, name: &str, ty: Ty<'tcx>) -> bool {
+    pub(crate) fn box_contents_moved_out<'tcx>(body: &rustc_middle::mir::Body<'tcx>, local: Local, ty: Ty<'tcx>) -> bool {
         if !ty.is_box() { return false; }
-        let names = self.mir_local_names(self.bwf);
-        #[expect(clippy::disallowed_methods, reason = "a name is bound to one local; min() makes order irrelevant")]
-        let Some(local) = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).min() else { return false };
         let mut v = BoxContentsMoves { local, found: false };
-        v.visit_body(&self.bwf.body);
+        v.visit_body(body);
         v.found
     }
+}
 
+impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// For a `Box<T>` variable `name` whose `T` has field columns and
     /// from which a field is moved out somewhere in this body
     /// (`take(b.name)`): `T`. Rust allows that move out of a `Box`
@@ -270,9 +329,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if !ty.is_box() { return None; }
         let inner = ty.boxed_ty()?;
         if !self.has_member_columns(inner) { return None; }
-        let names = self.mir_local_names(self.bwf);
-        #[expect(clippy::disallowed_methods, reason = "a name is bound to one local; min() makes order irrelevant")]
-        let local = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).min()?;
+        let local = self.raps.local(name)?;
         let mut v = BoxFieldMoves { local, found: false };
         v.visit_body(&self.bwf.body);
         v.found.then_some(inner)
@@ -327,48 +384,6 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut loops = Loops(Vec::new());
         intravisit::Visitor::visit_expr(&mut loops, self.tcx.hir_body_owned_by(body.source.def_id().as_local()?).value);
         ends.into_iter().filter(|(sp, _)| loops.0.contains(sp)).map(|(_, end)| end).max()
-    }
-
-    fn src_name_of_local(&self, l: Option<Local>, l_map: &HashMap<Local, String>) -> Option<String> {
-        match l {
-            Some(loc) => {
-                match l_map.get(&loc) {
-                    Some(name) => Some(name.clone()),
-                    None => None
-                }
-            }
-            None => None
-        }
-    }
-
-
-    /// Name of each user variable's MIR local, as used for its RAP
-    /// (`s₂` for a second `let s`, see `binding_name`). rustc_utils'
-    /// `debug_info_name_map` is keyed by the source name, so it kept
-    /// only one of two shadowing `s`es; here each local is matched to
-    /// its binding through the binding's span.
-    fn mir_local_names(&self, body_with_facts: &BodyWithBorrowckFacts) -> HashMap<Local, String> {
-        let body = &body_with_facts.body;
-        let owner = self.tcx.local_def_id_to_hir_id(body.source.def_id().expect_local()).owner;
-        let names = binding_names(&self.tcx, owner);
-        let mut res: HashMap<Local, String> = HashMap::new();
-        for vdi in body.var_debug_info.iter() {
-            let VarDebugInfoContents::Place(place) = vdi.value else { continue };
-            let span = vdi.source_info.span;
-            let ident = vdi.name.as_str();
-            let name = names.by_span.iter()
-                .find(|(sp, n)| span.contains(*sp)
-                    && written_name(n) == ident)
-                .map_or_else(|| ident.to_owned(), |(_, n)| n.clone());
-            // If two names share a Local (closure captures all live in
-            // `_1`), the same one wins on every run (#211): the greatest,
-            // as before.
-            match res.get(&place.local) {
-                Some(prev) if *prev >= name => {}
-                _ => { res.insert(place.local, name); }
-            }
-        }
-        res
     }
 
     /// The last line at which each loan is in scope for rustc's NLL
@@ -528,13 +543,16 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// drawn borrowed across the write; this says why rustc accepts it.
     /// None when no such loan, or no reference variable holding it, is
     /// found.
-    pub fn dead_loan_at_write(&self, lender: &str, line: usize) -> Option<DeadLoanWrite> {
+    pub fn dead_loan_at_write(&self, x: Local, site: Span, line: usize) -> Option<DeadLoanWrite> {
         let bwf = self.bwf;
         let body = &bwf.body;
-        let names = self.mir_local_names(bwf);
-        let x = body.local_decls.indices().find(|l| names.get(l).is_some_and(|n| n == lender))?;
+        let names = &self.raps.bindings.locals;
+        let at_site = |loc| {
+            let span = self.location_to_span(loc, bwf);
+            site.contains(span) || span.contains(site)
+        };
         let no_deref = |p: &Place<'tcx>| !p.projection.iter().any(|e| matches!(e, ProjectionElem::Deref));
-        // The writes at `line`.
+        // Candidate writes to this local within the emitting expression.
         let mut writes: Vec<(Location, Place<'tcx>)> = Vec::new();
         for (block, data) in body.basic_blocks.iter_enumerated() {
             for (statement_index, st) in data.statements.iter().enumerate() {
@@ -546,13 +564,13 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     _ if lhs.local == x => *lhs,
                     _ => continue,
                 };
-                if no_deref(&place) && self.location_to_line(loc, bwf) == line {
+                if no_deref(&place) && at_site(loc) {
                     writes.push((loc, place));
                 }
             }
             let loc = Location { block, statement_index: data.statements.len() };
             if let TerminatorKind::Call { destination, .. } = &data.terminator().kind {
-                if destination.local == x && no_deref(destination) && self.location_to_line(loc, bwf) == line {
+                if destination.local == x && no_deref(destination) && at_site(loc) {
                     writes.push((loc, *destination));
                 }
             }
@@ -718,7 +736,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 (true, _, false, 1) => Some((*later.first()?, false)),
                 _ => continue,
             };
-            return Some(DeadLoanWrite { borrower: borrower.clone(), repoint });
+            return Some(DeadLoanWrite { location: writes[0].0, borrower: borrower.clone(), repoint });
         }
         None
     }
@@ -741,7 +759,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let p_output = Output::compute(&body_with_facts.input_facts.as_ref().unwrap(), Algorithm::Naive, true);
 
         // compute local to name map
-        let loc_to_source_name = self.mir_local_names(body_with_facts);
+        let loc_to_source_name = &self.raps.bindings.locals;
         
         
         // compute the loan regions
@@ -791,8 +809,8 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 // path prefix terminated by `.`.
                 let b_place = Some(b_data.borrowed_place().local);
                 let a_place = Some(b_data.assigned_place().local);
-                let b_name = self.src_name_of_local(b_place, &loc_to_source_name);
-                let a_name = self.src_name_of_local(a_place, &loc_to_source_name);
+                let b_name = b_place.and_then(|l| loc_to_source_name.get(&l).cloned());
+                let a_name = a_place.and_then(|l| loc_to_source_name.get(&l).cloned());
 
                 // (A loan that is never live, like the `&s` MIR takes of a
                 // `ref s` binding for a guard that doesn't use `s`, ends
@@ -890,7 +908,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if sites.is_empty() {
             return Vec::new();
         }
-        let names = self.mir_local_names(bwf);
+        let names = &self.raps.bindings.locals;
         // Ordered by local, so the result doesn't depend on hash order.
         let mut origins: std::collections::BTreeMap<Local, Vec<Origin>> = std::collections::BTreeMap::new();
         for (local, origin) in facts.use_of_var_derefs_origin.iter().chain(facts.drop_of_var_derefs_origin.iter()) {
@@ -1006,7 +1024,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if loans.is_empty() {
             return out;
         }
-        let names = self.mir_local_names(bwf);
+        let names = &self.raps.bindings.locals;
         let mut of_origin: BTreeMap<Origin, Vec<Local>> = BTreeMap::new();
         for (local, origin) in facts.use_of_var_derefs_origin.iter().chain(facts.drop_of_var_derefs_origin.iter()) {
             if names.contains_key(local) {
@@ -1201,7 +1219,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// the old value that the assignment starts with (MIR gives it the
     /// left-hand side's span), or, failing that, the write itself.
     /// `None` when no such place in the MIR is found.
-    pub fn ownership_before_assign(&self, name: &str, lhs: Span, assign: Span) -> Option<Ownership> {
+    pub fn ownership_before_assign(&self, name: &str, lhs_expr: &'tcx rustc_hir::Expr<'tcx>, assign: Span) -> Option<Ownership> {
         use rustc_middle::mir::StatementKind;
         use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
         use rustc_mir_dataflow::move_paths::MoveData;
@@ -1209,8 +1227,12 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
         let paths = self.move_path_names(&move_data);
         let root = name.split('.').next().unwrap_or(name);
+        let (base, false) = self.place_root(lhs_expr)? else { return None };
+        let id = crate::expr_visitor_utils::local_of_path(base)?;
+        let local = *self.raps.bindings.declarations.get(&id)?;
+        let lhs = lhs_expr.span;
+        let paths: Vec<_> = paths.into_iter().filter(|(mpi, _)| move_data.move_paths[*mpi].place.local == local).collect();
         let mpi = paths.iter().find(|(_, n)| n == name).or_else(|| paths.iter().find(|(_, n)| n == root))?.0;
-        let local = move_data.move_paths[mpi].place.local;
         let blocks = || body.basic_blocks.iter_enumerated();
         let dropped = blocks().find_map(|(bb, data)| {
             let t = data.terminator.as_ref()?;
@@ -1273,7 +1295,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// field of one (`p.name`, `t.0`), each with the name of its column.
     fn move_path_names(&self, move_data: &rustc_mir_dataflow::move_paths::MoveData<'tcx>) -> Vec<(rustc_mir_dataflow::move_paths::MovePathIndex, String)> {
         let body = &self.bwf.body;
-        let names = self.mir_local_names(self.bwf);
+        let names = &self.raps.bindings.locals;
         let mut out = Vec::new();
         for (mpi, path) in move_data.move_paths.iter_enumerated() {
             let Some(mut name) = names.get(&path.place.local).cloned() else { continue };
@@ -1334,18 +1356,15 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
 
     /// The last line in `lines` (first, last) on which the variable
-    /// `name` (its RAP name, see `mir_local_names`) is live, from
+    /// `name` (its RAP column) is live, from
     /// Polonius' liveness: its last use, or the end of a loop it's used
     /// in.
-    pub fn last_live_line(&self, name: &str, lines: (usize, usize)) -> Option<usize> {
+    pub(crate) fn local_last_live_line(&self, local: Local, lines: (usize, usize)) -> Option<usize> {
         let bwf = self.bwf;
         let p_output = Output::compute(bwf.input_facts.as_ref().unwrap(), Algorithm::Naive, true);
-        let names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
-        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
         #[expect(clippy::disallowed_methods, reason = "only takes the greatest line")]
         let last = p_output.var_live_on_entry.iter()
-            .filter(|(_, vars)| vars.iter().any(|v| locals.contains(v)))
+            .filter(|(_, vars)| vars.contains(&local))
             .map(|(p, _)| self.location_to_line(self.point_to_location(*p, bwf), bwf))
             .filter(|l| lines.0 <= *l && *l <= lines.1)
             .max();
@@ -1365,7 +1384,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// `None` when this body has no MIR local named `name` (a binding
     /// inside a closure), or a field in `fields` isn't found.
     pub fn loans_held_by(&self, name: &str, fields: &[&str]) -> Option<BTreeMap<String, bool>> {
-        self.loans_held_in(name, fields, None)
+        self.loans_held_in(self.raps.local(name), fields, None)
     }
 
     /// `loans_held_by`, for only the loans issued inside `within` (a
@@ -1377,13 +1396,13 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// shared loan of x in a mutable one (#1122, #1131).
     /// (`name.f.g` when `fields` is `["f", "g"]`, as in `loans_held_by`.)
     pub fn loans_held_from(&self, name: &str, fields: &[&str], within: Span) -> Option<BTreeMap<String, bool>> {
-        self.loans_held_in(name, fields, Some(within))
+        self.loans_held_in(self.raps.local(name), fields, Some(within))
     }
 
-    fn loans_held_in(&self, name: &str, fields: &[&str], within: Option<Span>) -> Option<BTreeMap<String, bool>> {
+    pub(crate) fn loans_held_in(&self, local: Option<Local>, fields: &[&str], within: Option<Span>) -> Option<BTreeMap<String, bool>> {
         let bwf = self.bwf;
-        let names = self.mir_local_names(bwf);
-        let held = self.loans_in_type_of(name, fields)?;
+        let names = &self.raps.bindings.locals;
+        let held = self.loans_in_type_of(local?, fields)?;
         let mut out: BTreeMap<String, bool> = BTreeMap::new();
         for loan in held {
             let b = &bwf.borrow_set[loan];
@@ -1393,7 +1412,7 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                     continue;
                 }
             }
-            if let Some(n) = self.src_name_of_local(Some(b.borrowed_place().local), &names) {
+            if let Some(n) = names.get(&b.borrowed_place().local).cloned() {
                 *out.entry(n).or_insert(false) |= b.kind().mutability().is_mut();
             }
         }
@@ -1413,29 +1432,21 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let mut parts = name.split('.');
         let root = parts.next()?;
         let fields: Vec<&str> = parts.collect();
-        Some(self.loans_in_type_of(root, &fields)?.into_iter().map(|l| l.index()).collect())
+        Some(self.loans_in_type_of(self.raps.local(root)?, &fields)?.into_iter().map(|l| l.index()).collect())
     }
 
-    fn loans_in_type_of(&self, name: &str, fields: &[&str]) -> Option<BTreeSet<Loan>> {
+    fn loans_in_type_of(&self, local: Local, fields: &[&str]) -> Option<BTreeSet<Loan>> {
         let bwf = self.bwf;
         let body = &bwf.body;
-        let names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
-        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
-        if locals.is_empty() {
-            return None;
-        }
         let mut regions: BTreeSet<RegionVid> = BTreeSet::new();
-        for local in locals {
-            let mut ty = body.local_decls[local].ty;
-            for f in fields {
-                ty = self.field_ty_named(ty, f)?;
-            }
-            for arg in ty.walk() {
-                if let GenericArgKind::Lifetime(r) = arg.kind() {
-                    if r.is_var() {
-                        regions.insert(r.as_var());
-                    }
+        let mut ty = body.local_decls[local].ty;
+        for f in fields {
+            ty = self.field_ty_named(ty, f)?;
+        }
+        for arg in ty.walk() {
+            if let GenericArgKind::Lifetime(r) = arg.kind() {
+                if r.is_var() {
+                    regions.insert(r.as_var());
                 }
             }
         }
@@ -1470,21 +1481,14 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     pub fn loans_split_by(&self, name: &str, fields: &[&str]) -> Option<(BTreeMap<String, bool>, BTreeSet<String>)> {
         let bwf = self.bwf;
         let body = &bwf.body;
-        let names = self.mir_local_names(bwf);
-        #[expect(clippy::disallowed_methods, reason = "only collects the locals named `name`; order doesn't matter")]
-        let locals: Vec<Local> = names.iter().filter(|(_, n)| n.as_str() == name).map(|(l, _)| *l).collect();
-        if locals.is_empty() {
-            return None;
-        }
+        let local = self.raps.local(name)?;
         let mut own: BTreeSet<RegionVid> = BTreeSet::new();
         let mut through: BTreeSet<RegionVid> = BTreeSet::new();
-        for local in locals {
-            let mut ty = body.local_decls[local].ty;
-            for f in fields {
-                ty = self.field_ty_named(ty, f)?;
-            }
-            self.split_regions(ty, false, &mut own, &mut through, 0);
+        let mut ty = body.local_decls[local].ty;
+        for f in fields {
+            ty = self.field_ty_named(ty, f)?;
         }
+        self.split_regions(ty, false, &mut own, &mut through, 0);
         let facts = bwf.input_facts.as_ref()?;
         let p_output = Output::compute(facts, Algorithm::Naive, true);
         let mut own_loans: BTreeSet<Loan> = BTreeSet::new();
@@ -1501,7 +1505,8 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
             }
         }
-        let name_of = |loan: Loan| self.src_name_of_local(Some(bwf.borrow_set[loan].borrowed_place().local), &names);
+        let names = &self.raps.bindings.locals;
+        let name_of = |loan: Loan| names.get(&bwf.borrow_set[loan].borrowed_place().local).cloned();
         let mut out_own: BTreeMap<String, bool> = BTreeMap::new();
         for loan in own_loans.difference(&through_loans) {
             if let Some(n) = name_of(*loan) {
@@ -1646,12 +1651,10 @@ impl <'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
 
     /// Whether this body has a MIR local for the variable `name` (its
-    /// RAP name, see `mir_local_names`): a borrow of it is one of
+    /// RAP column): a borrow of it is one of
     /// rustc's loans here.
     pub fn is_body_local(&self, name: &str) -> bool {
-        #[expect(clippy::disallowed_methods, reason = "only asks whether any local has the name")]
-        let found = self.mir_local_names(self.bwf).values().any(|n| n == name);
-        found
+        self.raps.bindings.columns.contains_key(name)
     }
 
     /// The type of field `f` (a name, or a tuple index) of a struct or

@@ -8,7 +8,7 @@ use rustc_middle::ty::adjustment::{Adjust, AutoBorrow, AutoBorrowMutability, Der
 use rustc_span::Span;
 use rustc_hir::{Expr, ExprKind, Path, def::Res, Pat, PatKind, QPath, HirId, StmtKind, Stmt, Block, UnOp};
 
-use crate::expr_visitor::{RapData, RefData};
+use crate::expr_visitor::{BodyRaps, RefData};
 
 /// True iff the path `raw` ends in the whole function `String::from`, not in
 /// a longer name that merely starts with it (`String::from_utf8_lossy`,
@@ -107,21 +107,22 @@ pub struct BindingNames {
   /// Name of each binding, by the binding pattern's `HirId` (what a
   /// path's `Res::Local` points to).
   pub by_hir: HashMap<HirId, String>,
-  /// Identifier span of each binding with its name, in source order;
-  /// used to name MIR locals (see `mir_local_names`).
-  pub by_span: Vec<(Span, String)>,
   /// For each numbered column name (`s₂`, `s₃`, …): what to say about it
   /// in the column header's hover text (see `ShadowNote`).
   pub notes: HashMap<String, ShadowNote>,
 }
 
 thread_local! {
-  static BINDING_NAMES: std::cell::RefCell<HashMap<rustc_hir::OwnerId, std::rc::Rc<BindingNames>>> =
+  static BINDING_NAMES: std::cell::RefCell<HashMap<rustc_hir::def_id::LocalDefId, std::rc::Rc<BindingNames>>> =
     std::cell::RefCell::new(HashMap::new());
 }
 
 /// The (cached) binding-name table of the fn body that `owner` owns.
 pub fn binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> std::rc::Rc<BindingNames> {
+  body_binding_names(tcx, owner.def_id)
+}
+
+pub(crate) fn body_binding_names(tcx: &TyCtxt, owner: rustc_hir::def_id::LocalDefId) -> std::rc::Rc<BindingNames> {
   if let Some(t) = BINDING_NAMES.with(|c| c.borrow().get(&owner).cloned()) {
     return t;
   }
@@ -197,7 +198,7 @@ fn binding_scope(tcx: &TyCtxt, pat: HirId, body_span: Span) -> Option<(u32, u32)
   None
 }
 
-fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingNames {
+fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::def_id::LocalDefId) -> BindingNames {
   use rustc_hir::intravisit::{self, Visitor};
 
   struct Binding {
@@ -249,8 +250,8 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
   }
 
   let mut names = BindingNames::default();
-  let Some(body) = tcx.hir_maybe_body_owned_by(owner.def_id) else { return names };
-  let typeck = tcx.has_typeck_results(owner.def_id).then(|| tcx.typeck(owner.def_id));
+  let Some(body) = tcx.hir_maybe_body_owned_by(owner) else { return names };
+  let typeck = tcx.has_typeck_results(owner).then(|| tcx.typeck(owner));
   let mut c = Collector { tcx, typeck, body_span: body.value.span, out: Vec::new() };
   c.visit_body(body);
   c.out.sort_by_key(|b| (b.span.lo(), b.span.hi()));
@@ -290,6 +291,18 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
       && c.out[j].span.hi().0 <= at && at < c.out[j].scope.0)
   }).collect();
   let mut kinds_seen: HashMap<(&str, usize), Vec<(&Option<ColumnKind>, Option<usize>)>> = HashMap::new();
+  // The captured binding precedes the closure's own shadows. Number all
+  // locals once, in the same presentation table used for their HIR paths.
+  let mut captured = HashMap::new();
+  if tcx.is_closure_like(owner.to_def_id()) {
+    for cap in tcx.closure_captures(owner) {
+      if cap.place.projections.is_empty() {
+        let name = binding_name(tcx, cap.get_root_variable());
+        let (base, depth) = split_numbered_name(&name).unwrap_or((&name, 1));
+        captured.insert(base.to_owned(), depth);
+      }
+    }
+  }
   let mut col_names: Vec<String> = Vec::with_capacity(n);
   for i in 0..n {
     let ident = c.out[i].ident.as_str();
@@ -300,7 +313,7 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
       None => { seen.push(key); seen.len() - 1 }
     };
     let marked = format!("{}{}", ident, SCOPE_MARK.to_string().repeat(k));
-    col_names.push(numbered_name(&marked, depth[i] + 1));
+    col_names.push(numbered_name(&marked, captured.get(ident).copied().unwrap_or(0) + depth[i] + 1));
   }
   // Second pass: names and header notes.
   let line_of = |i: usize| tcx.sess.source_map().lookup_char_pos(c.out[i].span.lo()).line;
@@ -321,7 +334,6 @@ fn collect_binding_names(tcx: &TyCtxt, owner: rustc_hir::OwnerId) -> BindingName
         note.apart_from.sort();
       }
     }
-    names.by_span.push((c.out[i].span, name.clone()));
     names.by_hir.insert(c.out[i].hir_id, name);
   }
   names
@@ -376,7 +388,7 @@ impl ColumnKind {
 /// pattern `hir_id`. Falls back to the identifier for a binding outside
 /// the table (e.g. one inside a closure body).
 pub fn binding_name(tcx: &TyCtxt, hir_id: HirId) -> String {
-  binding_names(tcx, hir_id.owner).by_hir.get(&hir_id).cloned()
+  body_binding_names(tcx, tcx.hir_enclosing_body_owner(hir_id)).by_hir.get(&hir_id).cloned()
     .unwrap_or_else(|| tcx.hir_name(hir_id).as_str().to_owned())
 }
 
@@ -512,20 +524,24 @@ pub fn index_base<'a, 'tcx>(expr: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
 /// callers map to "skip this event" / "Anonymous resource" rather
 /// than crashing the plugin.
 pub fn expr_to_rap_name(expr: &Expr, tcx: &TyCtxt) -> Option<String> {
+  map_place_name(expr, &|p| Some(path_name(p, tcx)))
+}
+
+pub(crate) fn map_place_name(expr: &Expr, root: &impl Fn(&Path) -> Option<String>) -> Option<String> {
   match expr.kind {
-    ExprKind::Path(QPath::Resolved(_, p)) => Some(path_name(p, tcx)),
+    ExprKind::Path(QPath::Resolved(_, p)) => root(p),
     ExprKind::Field(inner, ident) => {
-      let base = expr_to_rap_name(inner, tcx)?;
+      let base = map_place_name(inner, root)?;
       Some(format!("{}.{}", base, ident.as_str()))
     }
     ExprKind::AddrOf(_, _, inner)
     | ExprKind::Unary(_, inner)
-    | ExprKind::DropTemps(inner) => expr_to_rap_name(inner, tcx),
+    | ExprKind::DropTemps(inner) => map_place_name(inner, root),
     // `v[..]` / `s[i]`: attribute the slice/element to the receiver's
     // RAP, the same way we treat `&v` directly. RustViz doesn't render
     // a separate column per index/slice, so collapsing onto the
     // receiver matches how fields share their parent's column.
-    ExprKind::Index(recv, _, _) => expr_to_rap_name(recv, tcx),
+    ExprKind::Index(recv, _, _) => map_place_name(recv, root),
     _ => None,
   }
 }
@@ -738,12 +754,12 @@ pub fn num_derefs(expr: &Expr) -> usize{
 pub fn collect_pat_bindings(
   pat: &Pat,
   tcx: &TyCtxt,
-  raps: &HashMap<String, RapData>,
+  raps: &BodyRaps,
   out: &mut HashSet<ResourceAccessPoint>,
 ) {
   match pat.kind {
     PatKind::Binding(_, hir_id, _, sub_pat) => {
-      if let Some(rd) = raps.get(&binding_name(tcx, hir_id)) {
+      if let Some(rd) = raps.binding(hir_id) {
         out.insert(rd.rap.to_owned());
         // A struct's field columns (`p.x`) are declared with it and go
         // out of scope with it (#730).
@@ -813,7 +829,7 @@ pub fn collect_pat_bindings(
 /// match arm's body expression). They're declared there like a `let`
 /// binding, but dropped by their own TemporaryDrop event, not by a
 /// GoOutOfScope at the end of the branch (see `needs_scope_end`).
-pub fn unbound_temps_of(owner: rustc_hir::HirId, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+pub fn unbound_temps_of(owner: rustc_hir::HirId, raps: &BodyRaps) -> HashSet<ResourceAccessPoint> {
   #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
   raps.values().filter(|rd| rd.temp_owner == Some(owner)).map(|rd| rd.rap.to_owned()).collect()
 }
@@ -832,9 +848,9 @@ pub fn needs_scope_end(r: &ResourceAccessPoint) -> bool {
 /// so its RAP was registered before `expr` and `raps_declared_since`
 /// can't see it as declared in it (`else if let` bindings, #501; a
 /// branch's `let`s, #927).
-pub fn bindings_within<'v>(expr: &'v Expr<'v>, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+pub fn bindings_within<'v>(expr: &'v Expr<'v>, tcx: &TyCtxt, raps: &BodyRaps) -> HashSet<ResourceAccessPoint> {
   use rustc_hir::intravisit::{self, Visitor};
-  struct Find<'a, 't> { tcx: &'a TyCtxt<'t>, raps: &'a HashMap<String, RapData>, out: HashSet<ResourceAccessPoint> }
+  struct Find<'a, 't> { tcx: &'a TyCtxt<'t>, raps: &'a BodyRaps, out: HashSet<ResourceAccessPoint> }
   impl<'v> Visitor<'v> for Find<'_, '_> {
     fn visit_pat(&mut self, p: &'v Pat<'v>) {
       // A desugaring's own bindings (`for`'s `iter`, `?`'s
@@ -851,7 +867,7 @@ pub fn bindings_within<'v>(expr: &'v Expr<'v>, tcx: &TyCtxt, raps: &HashMap<Stri
   f.out
 }
 
-pub fn get_decl_of_block(block: &Block, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint>{
+pub fn get_decl_of_block(block: &Block, tcx: &TyCtxt, raps: &BodyRaps) -> HashSet<ResourceAccessPoint>{
   let mut res:HashSet<ResourceAccessPoint> = unbound_temps_of(block.hir_id, raps);
   for stmt in block.stmts.iter() {
     res.extend(get_decl_of_stmt(&stmt, tcx, raps));
@@ -859,14 +875,14 @@ pub fn get_decl_of_block(block: &Block, tcx: &TyCtxt, raps: &HashMap<String, Rap
   res
 }
 // we only care about fetching the declarations in the current block, which is why these functions are not mutually recursive
-pub fn get_decl_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+pub fn get_decl_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> HashSet<ResourceAccessPoint> {
   match expr.kind {
     ExprKind::Block(b, _) => get_decl_of_block(b, tcx, raps),
     _ => unbound_temps_of(expr.hir_id, raps) // maybe should handle match expressions as well? 
   }
 }
 
-pub fn get_decl_of_stmt(stmt: &Stmt, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+pub fn get_decl_of_stmt(stmt: &Stmt, tcx: &TyCtxt, raps: &BodyRaps) -> HashSet<ResourceAccessPoint> {
   let mut res = HashSet::new();
   // Synthetic stmts from macro/desugar expansion (the `let args = …`
   // emitted by `println!`, the inner Match arms of `?`, etc.) aren't
@@ -882,7 +898,7 @@ pub fn get_decl_of_stmt(stmt: &Stmt, tcx: &TyCtxt, raps: &HashMap<String, RapDat
   res
 }
 
-pub fn get_live_of_stmt(stmt: &Stmt, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+pub fn get_live_of_stmt(stmt: &Stmt, tcx: &TyCtxt, raps: &BodyRaps) -> HashSet<ResourceAccessPoint> {
   if stmt.span.from_expansion() { return HashSet::new(); }
   match stmt.kind {
     StmtKind::Let(ref local) => {
@@ -903,7 +919,7 @@ pub fn get_live_of_stmt(stmt: &Stmt, tcx: &TyCtxt, raps: &HashMap<String, RapDat
 // Get all the live variables in the expression
 // where live refers to the variables defined OUTSIDE of the expression
 // and used inside it. This is distinct from those declared inside it
-pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> HashSet<ResourceAccessPoint> {
+pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> HashSet<ResourceAccessPoint> {
   match expr.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
       match p.res {
@@ -915,7 +931,7 @@ pub fn get_live_of_expr(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDat
           // Same fallback as the Path arm in get_rap: an unknown
           // name (macro-synthetic local, `self` in an impl method,
           // etc.) becomes an empty live set rather than a crash.
-          match raps.get(&path_key(p, tcx)) {
+          match raps.path(p, tcx) {
             Some(rd) => HashSet::from([rd.rap.to_owned()]),
             None => HashSet::new(),
           }
@@ -1668,7 +1684,7 @@ pub fn is_auto_borrowed(e: &Expr, typeck: &TypeckResults) -> bool {
 pub fn builtin_binop_copied_operands<'tcx>(
   expr: &'tcx Expr<'tcx>,
   tcx: &TyCtxt<'tcx>,
-  raps: &HashMap<String, RapData>,
+  raps: &BodyRaps,
 ) -> Option<(&'static str, Vec<&'tcx Expr<'tcx>>)> {
   let ExprKind::Binary(op, lhs, rhs) = expr.kind else { return None };
   if op.node.is_lazy() || tcx.typeck(expr.hir_id.owner).is_method_call(expr) {
@@ -1684,7 +1700,7 @@ pub fn builtin_binop_copied_operands<'tcx>(
 /// that names a column (a local, a struct field, or `*r`). Literals,
 /// calls, nested operators and indexing (`v[i]` copies an element, not
 /// `v`) have no column of their own.
-pub fn operand_names_column(e: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> bool {
+pub fn operand_names_column(e: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> bool {
   !e.span.from_expansion()
     && match e.kind {
       ExprKind::Path(_) | ExprKind::Field(..) => true,
@@ -1705,7 +1721,7 @@ pub fn operand_names_column(e: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapDa
 pub fn unary_op_operand<'tcx>(
   expr: &'tcx Expr<'tcx>,
   tcx: &TyCtxt<'tcx>,
-  raps: &HashMap<String, RapData>,
+  raps: &BodyRaps,
 ) -> Option<(&'static str, &'tcx Expr<'tcx>)> {
   let ExprKind::Unary(op @ (UnOp::Neg | UnOp::Not), operand) = expr.kind else { return None };
   if tcx.typeck(expr.hir_id.owner).is_method_call(expr) || operand_names_column(operand, tcx, raps) {
@@ -1867,10 +1883,9 @@ pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt) -> Res
   rap
 }
 
-pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> ResourceTy {
+pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> ResourceTy {
   match expr.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
-      let name = path_key(p, tcx);
       // Fall back to Anonymous when the path resolves to a name we
       // didn't register as a RAP. The most common cause is a path
       // expression inside a macro expansion that references a
@@ -1878,7 +1893,7 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
       // an `args` binding that visit_local declines to register).
       // Anonymous is the existing return for "unknown resource";
       // downstream code already handles it.
-      match raps.get(&name) {
+      match raps.path(p, tcx) {
         Some(rd) => ResourceTy::Value(rd.rap.to_owned()),
         None => ResourceTy::Anonymous,
       }
@@ -1916,7 +1931,7 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
         LocalCallee::Consumed if call_result_is_copy(expr, tcx) =>
           hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
         // The variable itself (`f₂` for a shadowing `let f`).
-        LocalCallee::Consumed => expr_to_rap_name(fn_expr, tcx),
+        LocalCallee::Consumed => raps.place_name(fn_expr, tcx),
         LocalCallee::NotLocal => hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
       };
       key.and_then(|n| raps.get(&n).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
@@ -1953,8 +1968,8 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Re
 /// fields have their own `base.field` RAP. Union fields don't: a union
 /// is rendered as one opaque owner column (#131), so reading or
 /// borrowing `u._a` is attributed to `u` itself.
-pub fn field_rap(inner: &Expr, field: &str, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Option<ResourceAccessPoint> {
-  let base = expr_to_rap_name(inner, tcx)?;
+pub fn field_rap(inner: &Expr, field: &str, tcx: &TyCtxt, raps: &BodyRaps) -> Option<ResourceAccessPoint> {
+  let base = raps.place_name(inner, tcx)?;
   if let Some(rd) = raps.get(&format!("{}.{}", base, field)) {
     return Some(rd.rap.to_owned());
   }
@@ -1976,7 +1991,7 @@ pub fn field_call_root<'a, 'tcx>(expr: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>>
 
 // Almost the same as get_rap but we don't care about any anonymous owners
 // which is why we return a RAP instead of a ResourceTy
-pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> Option<ResourceAccessPoint> {
+pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> Option<ResourceAccessPoint> {
   match expr.kind {
     ExprKind::Call(..) | ExprKind::Binary(..) | ExprKind::Lit(_) | ExprKind::MethodCall(..) => None,
     ExprKind::Path(QPath::Resolved(_,p)) => {
@@ -1984,7 +1999,7 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
       // most commonly a synthetic local from a macro expansion, or a
       // LangItem qualifier reached via desugaring. Return None rather
       // than crash; callers map None to "skip this event".
-      raps.get(&path_key(p, tcx)).map(|rd| rd.rap.to_owned())
+      raps.path(p, tcx).map(|rd| rd.rap.to_owned())
     }
     ExprKind::AddrOf(_, _, expr) | ExprKind::Unary(_, expr) => fetch_rap(expr, tcx, raps),
     // `v[..]` / `s[i]`: the resource is the receiver. See `expr_to_rap_name`.
@@ -2010,7 +2025,7 @@ pub fn fetch_rap(expr: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>) -> 
 // used to find the lender from the rhs of a let expr
 // ex: let a = &y; (y is the lender)
 // it gets a little interesting when rhs involves a * operator
-pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, borrow_map: &HashMap<String, RefData>) -> ResourceTy {
+pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &BodyRaps, borrow_map: &HashMap<String, RefData>) -> ResourceTy {
   match rhs.kind {
     ExprKind::Path(QPath::Resolved(_,p)) => {
       // A `static` has a column (#690): `&COUNT` borrows it. A static
@@ -2022,7 +2037,7 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
         if tcx.type_of(def_id).instantiate_identity().skip_normalization().is_ref() {
           return ResourceTy::Anonymous;
         }
-        return raps.get(&path_key(p, tcx)).map_or(ResourceTy::Anonymous, |rd| ResourceTy::Value(rd.rap.to_owned()));
+        return raps.path(p, tcx).map_or(ResourceTy::Anonymous, |rd| ResourceTy::Value(rd.rap.to_owned()));
       }
       // const items aren't registered as RAPs — they're compile-time
       // values baked into the binary. Treating them as `Anonymous`
@@ -2040,12 +2055,11 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
       ) {
         return ResourceTy::Anonymous;
       }
-      let name = path_key(p, tcx);
-      if borrow_map.contains_key(&name) {
-        borrow_map.get(&name).unwrap().to_owned().lender
-      }
-      else{
-        ResourceTy::Value(raps.get(&name).unwrap().rap.to_owned())
+      let Some(rd) = raps.path(p, tcx) else { return ResourceTy::Anonymous };
+      if let Some(loan) = raps.path_loan(rd, borrow_map) {
+        loan.lender.clone()
+      } else {
+        ResourceTy::Value(rd.rap.clone())
       }
     }
     // For method-call chains that return a reference, the lender is
@@ -2064,7 +2078,7 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &HashMap<String, RapData>, bo
       // `&GREETING` borrows the static itself, whatever its type.
       if let ExprKind::Path(QPath::Resolved(_, p)) = expr.kind {
         if static_of_path(p).is_some() {
-          if let Some(rd) = raps.get(&path_key(p, tcx)) {
+          if let Some(rd) = raps.path(p, tcx) {
             return ResourceTy::Value(rd.rap.to_owned());
           }
         }

@@ -8,7 +8,7 @@
 
 use log::warn;
 use rustc_middle::{
-  mir::Body,
+  mir::{Body, Local},
   ty::*,
 };
 use rustc_hir::{Expr, ExprKind, QPath, PatKind, Mutability, UnOp, def::*, Pat};
@@ -137,7 +137,6 @@ fn retired_key(name: &str, i: usize) -> String {
   format!("{name}\u{E001}{i}")
 }
 
-/// Whether `a` and `b` are the same loan of the same reference.
 /// Adds the lenders `rd` borrows (those with a column) to `out`, once.
 fn add_lenders(out: &mut Vec<ResourceTy>, rd: &RefData) {
   for l in rd.all_lenders() {
@@ -147,8 +146,9 @@ fn add_lenders(out: &mut Vec<ResourceTy>, rd: &RefData) {
   }
 }
 
+/// Whether `a` and `b` describe the same loan of the same reference.
 fn same_loan(a: &RefData, b: &RefData) -> bool {
-  a.lender == b.lender && a.assigned_at == b.assigned_at && a.loan_line == b.loan_line
+  a.local == b.local && a.lender == b.lender && a.assigned_at == b.assigned_at && a.loan_line == b.loan_line
     && a.borrow_span == b.borrow_span && a.co_lenders == b.co_lenders
 }
 
@@ -191,6 +191,8 @@ pub struct StoredBorrow {
 
 #[derive(Debug, Clone)]
 pub struct RefData {
+  /// The holder declaration, retained when this slot leaves the active column.
+  pub local: Option<Local>,
   pub lender: ResourceTy, // who this reference borrowed from
   pub assigned_at: usize, // gen point
   pub lifetime: usize, // kill point
@@ -270,16 +272,91 @@ impl RefData {
   }
 }
 
+/// A column is a presentation choice. Resolve a use to its declaration and
+/// MIR local before selecting the column that represents it.
+#[derive(Default)]
+pub struct BodyRaps {
+  pub columns: HashMap<String, RapData>,
+  /// Explicitly registered parameters, including the wrapper of an async fn.
+  pub parameters: HashMap<rustc_hir::HirId, String>,
+  /// Declaration registered for the column at this point in the HIR walk.
+  active: HashMap<String, Local>,
+  /// RAPs of completed sibling declarations, including their own drop wording.
+  earlier: HashMap<Local, (RapData, Option<RefData>)>,
+  /// Root local of the current struct declaration for each shared field group.
+  struct_locals: HashMap<u64, Local>,
+  pub bindings: std::rc::Rc<crate::facts::BodyBindings>,
+}
+
+impl BodyRaps {
+  pub fn binding(&self, id: rustc_hir::HirId) -> Option<&RapData> {
+    if let Some(local) = self.bindings.declarations.get(&id) {
+      let rd = self.columns.get(self.bindings.locals.get(local)?)?;
+      return if rd.local == Some(*local) { Some(rd) } else { self.earlier.get(local).map(|(rd, _)| rd) };
+    }
+    self.columns.get(self.parameters.get(&id)?)
+  }
+
+  pub(crate) fn path_loan<'a>(&'a self, rd: &RapData, loans: &'a HashMap<String, RefData>) -> Option<&'a RefData> {
+    let loan = match rd.local.and_then(|local| self.earlier.get(&local)) {
+      Some((_, loan)) => loan.as_ref(),
+      None => loans.get(rd.rap.name()),
+    };
+    loan.filter(|slot| slot.local == rd.local)
+  }
+
+  pub(crate) fn declare(&mut self, id: rustc_hir::HirId, tcx: &TyCtxt<'_>) -> String {
+    let label = binding_name(tcx, id);
+    if let Some(&local) = self.bindings.declarations.get(&id) {
+      self.active.insert(label.clone(), local);
+    } else {
+      self.active.remove(&label);
+    }
+    label
+  }
+
+  pub(crate) fn local(&self, column: &str) -> Option<Local> {
+    self.active.get(column).copied()
+  }
+
+  pub fn pattern_local(&self, column: &str, pat: &Pat<'_>) -> Option<Local> {
+    // Rust permits each identifier once in a pattern. Or-alternatives share its canonical HirId.
+    let mut found = None;
+    pat.each_binding(|_, id, _, _| {
+      if let Some(&l) = self.bindings.declarations.get(&id).filter(|l| self.bindings.locals[*l] == column) { found = Some(l); }
+    });
+    found
+  }
+
+  pub fn place_name(&self, expr: &Expr<'_>, tcx: &TyCtxt<'_>) -> Option<String> {
+    map_place_name(expr, &|p| match p.res {
+      Res::Local(id) => Some(self.binding(id)?.rap.name().clone()),
+      _ => Some(path_name(p, tcx)),
+    })
+  }
+
+  pub fn path(&self, path: &rustc_hir::Path<'_>, tcx: &TyCtxt<'_>) -> Option<&RapData> {
+    match path.res {
+      Res::Local(id) => self.binding(id),
+      _ => self.columns.get(&path_key(path, tcx)),
+    }
+  }
+}
+
+impl std::ops::Deref for BodyRaps {
+  type Target = HashMap<String, RapData>;
+  fn deref(&self) -> &Self::Target { &self.columns }
+}
+
+impl std::ops::DerefMut for BodyRaps {
+  fn deref_mut(&mut self) -> &mut Self::Target { &mut self.columns }
+}
+
 #[derive(Debug, Clone)]
 pub struct RapData {
   pub rap: ResourceAccessPoint,
   pub scope: usize,
   pub is_global: bool,
-  // Line of the fn signature where this RAP was registered. Drives
-  // per-fn label and column placement in the renderer; identical
-  // RAPs across fns get distinct hashes so `BTreeMap<u64, Timeline>`
-  // already disambiguates.
-  pub fn_start_line: usize,
   // `let r = &String::from("a");`: the column name of the temporary r
   // borrows, which lives as long as r's `let` does (#400). Lets the
   // branch / block code that ends r's scope end the temporary's too.
@@ -293,7 +370,9 @@ pub struct RapData {
   // of the later ones declared outside any branch or loop body
   // (registered with is_global = true), each of which also ends the
   // variable (#589), even when the first one was declared in one (#931).
-  pub extra_scopes: Vec<usize>,
+  pub extra_scopes: Vec<(usize, Option<Local>)>,
+  pub first_local: Option<Local>,
+  pub local: Option<Local>,
   // A later variable sharing the column of a first one declared outside
   // any branch or loop body was declared in one (is_global = false): the
   // construct that ends its block ends it (`emit_scope_end`), like a
@@ -341,7 +420,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub event_spans: HashMap<usize, rustc_span::Span>,
   /// Ends drawn for the previous fields of an overwritten whole value.
   pub field_overwrite_ends: BTreeSet<usize>,
-  pub emitting_span: Option<rustc_span::Span>,
+  pub emitting_expr: Option<&'tcx Expr<'tcx>>,
   pub row_layout: crate::event_order::RowLayout,
   pub end_loans: BTreeMap<usize, Vec<usize>>,
   /// Renderer event to the precise loan issued while evaluating an aggregate.
@@ -370,14 +449,12 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // unique hash, so the rendering pipeline (which keys on hash)
   // sees them as distinct. After the visit, plugin.rs can drain
   // this map into any cross-fn structure it needs.
-  pub raps: HashMap<String, RapData>,
+  pub raps: BodyRaps,
 
   // Used to determine the current scope when visiting expressions
   pub current_scope: usize,
 
-  // Line of the current fn's signature; written into each new
-  // RapData so the renderer can group columns + place labels
-  // per-fn. Set once in visit_body.
+  // Source row for the function's parameter events.
   pub current_fn_start: usize,
 
   // The event line map stores events that will
@@ -793,7 +870,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// value's borrow ends and drop, which come first on the dot (#1097).
   pub deferred_holder_borrows: Option<Vec<(String, &'tcx Expr<'tcx>)>>,
   /// (column, line) pairs `note_dead_loan_write` has looked at (#796).
-  pub dead_loan_checked: HashSet<(String, usize)>,
+  pub dead_loan_checked: HashSet<(Local, rustc_middle::mir::Location)>,
 
 
   // Variables moved in a branch that then `break`s out of a loop
@@ -1174,7 +1251,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       effects,
       event_spans: HashMap::new(),
       field_overwrite_ends: BTreeSet::new(),
-      emitting_span: None,
+      emitting_expr: None,
       end_loans: BTreeMap::new(),
       aggregate_issues: BTreeMap::new(),
       closure_result_arrivals: BTreeMap::new(),
@@ -1188,7 +1265,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       current_scope: 0,
       current_fn_start,
       borrow_map: HashMap::new(),
-      raps: HashMap::new(),
+      raps: BodyRaps { bindings: body_facts.map(|b| b.bindings.clone()).unwrap_or_default(), ..Default::default() },
       event_line_map,
       preprocessed_events,
       rap_hashes,
@@ -1695,8 +1772,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // reassignments don't claim to drop the `T` (#283), and as an
   // `Rc` / `Arc` / `Weak` so they say that dropping it only lowers a
   // count (#373). Call right after `add_owner` / `add_struct`, before
-  // any event clones the RAP. A name that was already registered (and
-  // so not re-added by `add_rap`) is left alone.
+  // any event clones the RAP. Siblings sharing a column each get
+  // the flags of their own type.
   pub fn mark_owner_type(&mut self, name: &str, ty: Ty<'tcx>) {
     let rc = self.rc_kind(ty);
     let manually_drop = ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
@@ -1712,14 +1789,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let rc_inside = self.rc_inside_kind(ty);
     // The Rc note wins: no double parenthetical (#542).
     let holds = if rc.is_some() || rc_fields.is_some() || rc_inside.is_some() || manually_drop { None } else { self.holds_phrase(ty) };
-    let box_contents_moved = self.box_contents_moved_out(name, ty);
-    let elems_left = self.array_elems_left(name, ty);
+    let box_contents_moved = self.raps.local(name).is_some_and(|local| self.raps.bindings.emptied_boxes.contains(&local));
+    let elems_left = self.raps.local(name).and_then(|local| self.raps.bindings.arrays.get(&local)).cloned();
     if rc.is_none() && !manually_drop && !maybe_uninit && !union && rc_fields.is_none() && rc_inside.is_none() && holds.is_none() && !box_contents_moved && elems_left.is_none() {
       return;
     }
     let Some(just_added) = (self.rap_hashes as u64).checked_sub(1) else { return };
+    let declared = self.raps.get(name).is_some_and(|rd| rd.rap.owner_local().is_some());
     match self.raps.get_mut(name).map(|rd| &mut rd.rap) {
-      Some(ResourceAccessPoint::Owner(o)) if o.hash == just_added => {
+      Some(ResourceAccessPoint::Owner(o)) if declared || o.hash == just_added => {
         o.is_manually_drop = manually_drop;
         o.is_maybe_uninit = maybe_uninit;
         o.is_union = union;
@@ -1730,7 +1808,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         o.box_contents_moved = box_contents_moved;
         o.elems_left = elems_left;
       }
-      Some(ResourceAccessPoint::Struct(s)) if s.hash == just_added => {
+      Some(ResourceAccessPoint::Struct(s)) if declared || s.hash == just_added => {
         s.is_manually_drop = manually_drop;
         s.is_maybe_uninit = maybe_uninit;
         s.is_union = union;
@@ -1772,7 +1850,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     self.retire_loan(&name, line_num);
-    self.borrow_map.insert(name.clone(), RefData { lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new(), through: Vec::new() });
+    self.borrow_map.insert(name.clone(), RefData { local: self.raps.local(&name), lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new(), through: Vec::new() });
   }
   /// A variable named `name` declared on `line` takes over the column
   /// of an earlier one of that name, which is out of scope by now
@@ -1780,7 +1858,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// loan aside in `retired_loans`, where `emit_borrow_ends` still ends
   /// it, rather than lose it to the new variable's.
   fn retire_loan(&mut self, name: &str, line: usize) {
-    if !self.borrow_map.get(name).is_some_and(|old| old.assigned_at < line) {
+    let next = self.raps.local(name);
+    if !self.borrow_map.get(name).is_some_and(|old| old.assigned_at < line || old.local.zip(next).is_some_and(|(a, b)| a != b)) {
       return;
     }
     let Some(data) = self.borrow_map.remove(name) else { return };
@@ -1862,12 +1941,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.add_rap(ResourceAccessPoint::Function(Function { callable_result: false, name: name, hash: self.rap_hashes as u64, drops_arg: Default::default(), rc_call: None, cast_to: None, inside: None }), self.current_scope, true);
   }
 
+  /// Sibling declarations and their fields share the original header group.
+  pub(crate) fn struct_column_hash(&self, name: &str) -> u64 {
+    self.raps.get(name).map_or(self.rap_hashes as u64, |rd| *rd.rap.hash())
+  }
+
   // Adds a struct RAP
   // To be honest this struct logic is leftover from RV1 and should eventually be reworked
   // It doesn't make much sense that a struct should be represented any different than an owner
   // the reason for this is that in the frontend structs are visualized differently in the timeline header
   pub fn add_struct(&mut self, name: String, owner: u64, mem: bool, mutability: bool, is_copy: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Struct(Struct {
+    self.add_rap(ResourceAccessPoint::Struct(Struct { local: None,
       name: name,
       hash: self.rap_hashes as u64,
       owner: owner,
@@ -1880,16 +1964,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       scope, is_global);
   }
 
-  pub fn add_rap(&mut self, r: ResourceAccessPoint, scope: usize, is_global: bool) {
-    let fn_start_line = self.current_fn_start;
+  pub fn add_rap(&mut self, mut r: ResourceAccessPoint, scope: usize, is_global: bool) {
     // Functions are keyed in their own namespace (see `fn_key`), so a
     // variable and a function with the same name get separate RAPs.
     let key = if r.is_fn() { fn_key(r.name()) } else { r.name().to_string() };
     self.in_scope.push(key.clone());
-    match self.raps.entry(key) {
+    let local = self.raps.local(&key);
+    match &mut r {
+      ResourceAccessPoint::Owner(o) => o.local = local,
+      ResourceAccessPoint::Struct(s) => {
+        s.local = if s.is_member { self.raps.struct_locals.get(&s.owner).copied() } else { local };
+      }
+      _ => {}
+    }
+    if let Some(previous) = self.raps.columns.get(&key).filter(|rd| rd.local != local) {
+      if let Some(old) = previous.local { self.raps.earlier.insert(old, (previous.clone(), self.borrow_map.get(&key).cloned())); }
+    }
+    if let ResourceAccessPoint::Struct(s) = &r {
+      if let Some(local) = local.filter(|_| !s.is_member) {
+        self.raps.struct_locals.insert(s.owner, local);
+      }
+    }
+    match self.raps.columns.entry(key) {
       std::collections::hash_map::Entry::Vacant(v) => {
         self.rap_hashes += 1;
-        v.insert(RapData { rap: r, scope, is_global, fn_start_line, extended_temp: Vec::new(), temp_owner: None, extra_scopes: Vec::new(), local_later: false });
+        v.insert(RapData { rap: r, scope, local, first_local: local, is_global, extended_temp: Vec::new(), temp_owner: None, extra_scopes: Vec::new(), local_later: false });
       }
       // A later variable of the same name in the same fn shares the
       // column of the first (sibling blocks, #308) and ends at its own
@@ -1897,9 +1996,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // branch or loop body (#931).
       std::collections::hash_map::Entry::Occupied(mut o) => {
         let rd = o.get_mut();
-        if rd.fn_start_line == fn_start_line && !r.is_fn() {
-          if is_global && scope != rd.scope && !rd.extra_scopes.contains(&scope) {
-            rd.extra_scopes.push(scope);
+        if !r.is_fn() {
+          if rd.local != local || rd.rap.owner_local() != r.owner_local() {
+            // Each declaration gets its own semantic description on the shared column.
+            let hash = *rd.rap.hash();
+            rd.rap = r;
+            match &mut rd.rap {
+              ResourceAccessPoint::Owner(o) => o.hash = hash,
+              ResourceAccessPoint::Struct(s) => s.hash = hash,
+              ResourceAccessPoint::StaticRef(r) => r.hash = hash,
+              ResourceAccessPoint::MutRef(r) => r.hash = hash,
+              ResourceAccessPoint::Function(_) => unreachable!(),
+            }
+            rd.local = local;
+          }
+          if is_global && (scope != rd.scope || rd.is_global && local != rd.first_local) && !rd.extra_scopes.contains(&(scope, local)) {
+            rd.extra_scopes.push((scope, local));
           } else if !is_global && rd.is_global {
             rd.local_later = true;
           }
@@ -2015,8 +2127,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         return;
       }
     }
-    if let Some(span) = self.emitting_span {
-      self.event_spans.entry(event.get_id()).or_insert(span);
+    if let Some(expr) = self.emitting_expr {
+      self.event_spans.entry(event.get_id()).or_insert(expr.span);
     }
     if self.defer_old_ends {
       self.late_old_ends.push((line_num, event));
@@ -2098,11 +2210,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if r.is_fn() || r.is_ref() || self.bwf.borrow_set.location_map().is_empty() {
       return;
     }
-    if !self.dead_loan_checked.insert((r.name().to_owned(), line)) {
-      return;
-    }
-    let lender = r.name().split('.').next().unwrap_or(r.name()).to_owned();
-    let Some(dead) = self.dead_loan_at_write(&lender, line) else { return };
+    let Some(local) = r.owner_local() else { return };
+    let Some(expr) = self.emitting_expr else { return };
+    // match_rhs emits the assignment while visiting its RHS. An indexed
+    // destination can also write via the mutable receiver evaluated on the LHS.
+    let site = match self.tcx.parent_hir_node(expr.hir_id) {
+      rustc_hir::Node::Expr(parent) if matches!(parent.kind, ExprKind::Assign(_, rhs, _) if rhs.hir_id == expr.hir_id) => parent.span,
+      _ => expr.span,
+    };
+    let Some(dead) = self.dead_loan_at_write(local, site, line) else { return };
+    if !self.dead_loan_checked.insert((local, dead.location)) { return; }
+    let lender = self.raps.bindings.locals[&local].clone();
     // Keep ids unique, as in `propagate_struct_transfer`: most callers
     // bump unique_id after handing us the event, so the note took the
     // write's own id. Placement then treated the note as the write,
@@ -2339,6 +2457,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           loan.assigned_at = line_num;
           loan.lifetime = loan.lifetime.max(line_num);
         }
+        loan.local = self.raps.local(dest.name());
         self.borrow_map.insert(dest.name().clone(), loan);
       }
       let ev_id = *self.unique_id;
@@ -3351,6 +3470,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             _ => None,
           };
           self.borrow_map.insert(name.to_owned(), RefData {
+            local: self.raps.local(&name),
             lender: l,
             assigned_at: line,
             lifetime: line,
@@ -3840,7 +3960,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   #[allow(clippy::too_many_arguments)]
   pub fn add_pass_by_mref_ev_deep(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef, of_ref_var: bool, deep: Option<DeepPlace>) {
     let id = *self.unique_id;
-    let terminal = self.emitting_span.and_then(|span| crate::facts::terminal_argument(self.tcx, self.mir_body, span));
+    let terminal = self.emitting_expr.and_then(|e| crate::facts::terminal_argument(self.tcx, self.mir_body, e.span));
     self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
       manually_takes: false, terminal, from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var, deep,
     });
@@ -5188,7 +5308,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// `hs.last_mut().unwrap().r` (with `true`: the place is reached
   /// through a method call's result). None if the place starts anywhere
   /// else (a function call's result, a temporary).
-  fn place_root(&self, place: &'tcx Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, bool)> {
+  pub(crate) fn place_root(&self, place: &'tcx Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, bool)> {
     let mut cur = place;
     let mut through_call = false;
     loop {
@@ -5296,7 +5416,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     let ExprKind::Path(QPath::Resolved(_, p)) = base.kind else { return None };
     static_of_path(p)?;
-    self.raps.get(&path_key(p, &self.tcx)).map(|rd| rd.rap.to_owned())
+    self.raps.path(p, &self.tcx).map(|rd| rd.rap.to_owned())
   }
 
   /// The column of the variable or static that a field of an element
@@ -5554,7 +5674,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       let ExprKind::Path(QPath::Resolved(_, p)) = base.kind else { return None };
       static_of_path(p)?;
-      let rap = self.raps.get(&path_key(p, &self.tcx)).map(|rd| rd.rap.to_owned())?;
+      let rap = self.raps.path(p, &self.tcx).map(|rd| rd.rap.to_owned())?;
       self.update_rap(&rap, line_num);
       let amp = if mutbl == Mutability::Mut { "&mut " } else { "&" };
       let label = self.place_label(place, rap.name());
@@ -6135,9 +6255,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // add events for arguments in a function call
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
-    let outer = self.emitting_span.replace(arg.span);
+    let outer = self.emitting_expr.replace(arg);
     self.match_arg_at(arg, fn_name);
-    self.emitting_span = outer;
+    self.emitting_expr = outer;
   }
 
   pub(crate) fn match_call_arg(&mut self, arg: &'tcx Expr, fn_name: String, manually_takes: bool) {
@@ -6745,11 +6865,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Whether every variable `e` names has a column already.
   fn locals_registered(&self, e: &'tcx Expr<'tcx>) -> bool {
     use rustc_hir::intravisit::{self, Visitor};
-    struct Check<'b, 'tcx> { tcx: TyCtxt<'tcx>, raps: &'b HashMap<String, RapData>, ok: bool }
+    struct Check<'b, 'tcx> { tcx: TyCtxt<'tcx>, raps: &'b BodyRaps, ok: bool }
     impl<'b, 'tcx> Visitor<'tcx> for Check<'b, 'tcx> {
       fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
         if let ExprKind::Path(QPath::Resolved(None, p)) = e.kind {
-          if matches!(p.res, Res::Local(_)) && !self.raps.contains_key(&path_key(p, &self.tcx)) {
+          if matches!(p.res, Res::Local(_)) && self.raps.path(p, &self.tcx).is_none() {
             self.ok = false;
           }
         }
@@ -6767,12 +6887,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// isn't registered until that branch is visited (#1327).
   fn uses_unregistered_local_in(&self, e: &'tcx Expr<'tcx>, within: rustc_span::Span) -> bool {
     use rustc_hir::intravisit::{self, Visitor};
-    struct Check<'b, 'tcx> { tcx: TyCtxt<'tcx>, raps: &'b HashMap<String, RapData>, within: rustc_span::Span, found: bool }
+    struct Check<'b, 'tcx> { tcx: TyCtxt<'tcx>, raps: &'b BodyRaps, within: rustc_span::Span, found: bool }
     impl<'b, 'tcx> Visitor<'tcx> for Check<'b, 'tcx> {
       fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
         if let ExprKind::Path(QPath::Resolved(None, p)) = e.kind {
           if let Res::Local(hid) = p.res {
-            if self.within.contains(self.tcx.hir_span(hid)) && !self.raps.contains_key(&path_key(p, &self.tcx)) {
+            if self.within.contains(self.tcx.hir_span(hid)) && self.raps.path(p, &self.tcx).is_none() {
               self.found = true;
             }
           }
@@ -7189,7 +7309,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     for n in names {
       // The reborrow's own loan of `*src` ends at the write: its end
       // is its last use.
-      let Some(last) = self.last_live_line(&n, (line, usize::MAX)).filter(|&l| l > line) else { continue };
+      let Some(last) = self.borrow_map[&n].local.and_then(|l| self.local_last_live_line(l, (line, usize::MAX))).filter(|&l| l > line) else { continue };
       let Some(rd) = self.borrow_map.get_mut(&n) else { continue };
       rd.lender = old.lender.clone();
       rd.lender_muts = if old_mut == rd.ref_mutability { Vec::new() } else { vec![(old.lender.clone(), old_mut)] };
@@ -7241,7 +7361,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // A tuple local gets a column per element (`t.0`, `t.1`), drawn
       // like a struct's fields (#189): moving `t.0` out leaves `t.1`
       // owned by `t`, and each element drops on its own.
-      let owner_hash = self.rap_hashes as u64;
+      let owner_hash = self.struct_column_hash(&name);
       let parent_is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
       self.add_struct(name.clone(), owner_hash, false, mutability, parent_is_copy, self.ty_is_plain(ty, expr.hir_id.owner), self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
       self.mark_owner_type(&name, ty);
@@ -7258,7 +7378,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // box (`take(b.name)`, #602): drawn like the plain struct, with a
     // column per field, so the move and what is left to drop show.
     else if let Some(inner) = self.box_with_field_moved_out(&name, ty) {
-      let owner_hash = self.rap_hashes as u64;
+      let owner_hash = self.struct_column_hash(&name);
       self.add_struct(name.clone(), owner_hash, false, mutability, false, false, InteriorMut::No, self.current_scope, !self.inside_branch);
       if let Some(ResourceAccessPoint::Struct(s)) = self.raps.get_mut(&name).map(|rd| &mut rd.rap) {
         s.is_box = true;
@@ -7274,7 +7394,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     else if ty.is_adt() && !is_special {
       match ty.ty_adt_def().unwrap().adt_kind() {
         AdtKind::Struct => {
-          let owner_hash = self.rap_hashes as u64;
+          let owner_hash = self.struct_column_hash(&name);
           let parent_is_copy = self.ty_is_copy(ty, expr.hir_id.owner);
           self.add_struct(name.clone(), owner_hash, false, mutability, parent_is_copy, self.ty_is_plain(ty, expr.hir_id.owner), self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope,!self.inside_branch);
           self.mark_owner_type(&name, ty);
@@ -7522,7 +7642,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if holder {
         self.mark_holder(&fname);
         let line = expr_to_line(&init, &self.tcx);
+        let local = self.raps.local(&fname);
         self.borrow_map.insert(fname, RefData {
+          local,
           lender,
           assigned_at: line,
           lifetime: line,
@@ -7583,7 +7705,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.mark_holder(&name);
     let lender = lenders.remove(0);
     let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+    let local = self.raps.local(&name);
     self.borrow_map.insert(name, RefData {
+      local,
       lender,
       assigned_at: line,
       lifetime: line,
@@ -7852,6 +7976,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => None,
     };
     self.borrow_map.insert(name.clone(), RefData {
+      local: self.raps.local(&name),
       lender,
       assigned_at: line,
       lifetime: line,
@@ -8355,7 +8480,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       None => {
         let aliasing = get_aliasing_data(&lenders[0], &self.borrow_map);
+        let local = self.raps.local(&name);
         self.borrow_map.insert(name, RefData {
+          local,
           lender: lenders[0].clone(),
           assigned_at: line,
           lifetime: line,
@@ -8464,7 +8591,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         // the refactor: borrow stored in this field outlives the
         // statement, so stretch the loan to the enclosing scope so
         // the ref-line trapezoid actually has a non-degenerate range.
+        let local = self.raps.local(&field_name);
         self.borrow_map.insert(field_name, RefData {
+          local,
           lender: ref_lender.clone(),
           assigned_at: site.assigned_at,
           lifetime: site.scope,
@@ -8646,11 +8775,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if !matches!(e, Evt::Move) {
       return from.clone();
     }
+    let Some(local) = r.owner_local().or_else(|| self.raps.local(r.name())) else { return from.clone() };
     let mut hirid = None;
     pat.each_binding(|_, id, _, _| {
-      if hirid.is_none() && binding_name(&self.tcx, id) == *r.name() {
-        hirid = Some(id);
-      }
+      if self.raps.bindings.declarations.get(&id) == Some(&local) { hirid = Some(id); }
     });
     hirid.and_then(|id| self.slice_elem_source(id, from)).unwrap_or_else(|| from.clone())
   }
@@ -8662,46 +8790,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// bound inside an element's pattern (`[Some(a), _]`) takes from that
   /// element. None for anything else.
   pub fn slice_elem_source(&self, hirid: rustc_hir::HirId, from: &ResourceTy) -> Option<ResourceTy> {
-    use rustc_hir::Node;
-    let ResourceTy::Value(arr) = from else { return None };
-    let elems = arr.elems_left()?;
-    let typeck = self.tcx.typeck(hirid.owner);
-    if matches!(typeck.pat_binding_modes().get(hirid).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..))) {
-      return None;
-    }
-    let len = (elems.moved.len() + elems.left.len()) as u64;
-    let mut child = hirid;
-    let mut place = None;
-    for (_, node) in self.tcx.hir_parent_iter(hirid) {
-      match node {
-        Node::Pat(p) => {
-          if let PatKind::Slice(before, mid, after) = p.kind {
-            // Only the outermost slice pattern matches the array itself.
-            if place.is_some() {
-              return None;
-            }
-            let rustc_middle::ty::TyKind::Array(_, n) = typeck.node_type(p.hir_id).kind() else { return None };
-            if n.try_to_target_usize(self.tcx)? != len {
-              return None;
-            }
-            let after_start = len.checked_sub(after.len() as u64)?;
-            place = if let Some(k) = before.iter().position(|q| q.hir_id == child) {
-              Some(format!("{}[{}]", arr.name(), k))
-            } else if let Some(k) = after.iter().position(|q| q.hir_id == child) {
-              Some(format!("{}[{}]", arr.name(), after_start + k as u64))
-            } else if mid.is_some_and(|q| q.hir_id == child) {
-              Some(format!("{}[{}..{}]", arr.name(), before.len(), after_start))
-            } else {
-              return None;
-            };
-          }
-          child = p.hir_id;
-        }
-        Node::PatField(_) => {}
-        _ => break,
-      }
-    }
-    Some(ResourceTy::Index(arr.clone(), place?, PlaceWrite::Update))
+    let ResourceTy::Value(ResourceAccessPoint::Owner(arr)) = from else { return None };
+    let facts = self.body_facts?;
+    let local = facts.bindings.declarations.get(&hirid)?;
+    let pattern = self.tcx.hir_span(hirid);
+    let mut sites = facts.binding_sources.iter().filter(|s| s.declaration == *local && pattern.contains(s.site) && s.moves);
+    let element = sites.next()?.array_element.as_ref()?;
+    if !sites.all(|s| s.array_element.as_ref() == Some(element)) { return None; }
+    let (source, place) = element;
+    if Some(*source) != arr.local { return None; }
+    arr.elems_left.as_ref()?;
+    Some(ResourceTy::Index(ResourceAccessPoint::Owner(arr.clone()), place.clone(), PlaceWrite::Update))
   }
 
   /// The reference `name` was just bound by copying (or, for `&mut`,
@@ -8763,7 +8862,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             let muta = bool_of_mut(mode.1); // You need to define this function
             let line_num = span_to_line(&ident.span, &self.tcx); // Assuming self.span_to_line exists
             let ty: Ty<'tcx> = ty_results.node_type(id);
-            let name = binding_name(&self.tcx, id);
+            let name = self.raps.declare(id, &self.tcx);
             // copied code - should definetly make a function of this
             if ty.is_ref() {
                 let ref_mutability = bool_of_mut(ty.ref_mutability().unwrap()); // You need to define this function
@@ -8791,7 +8890,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             } else if matches!(ty.kind(), TyKind::Tuple(_)) && self.has_member_columns(ty) {
                 // A tuple binding gets a column per element, like a
                 // struct binding's fields (#189).
-                let owner_hash = self.rap_hashes as u64;
+                let owner_hash = self.struct_column_hash(&name);
                 let parent_is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
                 self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_is_plain(ty, pat.hir_id.owner), self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
                 self.mark_owner_type(&name, ty);
@@ -8816,7 +8915,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                 // struct box with a negative width (#192).
                 match ty.ty_adt_def().unwrap().adt_kind() {
                     AdtKind::Struct => {
-                        let owner_hash = self.rap_hashes as u64; // Assuming self.rap_hashes exists
+                        let owner_hash = self.struct_column_hash(&name);
                         let parent_is_copy = self.ty_is_copy(ty, pat.hir_id.owner);
                         self.add_struct(name.clone(), owner_hash, false, muta, parent_is_copy, self.ty_is_plain(ty, pat.hir_id.owner), self.ty_has_interior_mut(ty, pat.hir_id.owner), scope, false);
                         self.mark_owner_type(&name, ty);
@@ -9128,7 +9227,7 @@ pub fn register_iflet_let_bindings(
         let row = self.pattern_loans.get(binding_rap.hash()).map_or(let_line, |loan| loan.line);
         self.add_external_event(row, event);
         *self.unique_id += 1;
-        borrows.extend(self.pattern_ref_copy_borrow(&binding_rap, &evt_kind, scrutinee));
+        borrows.extend(self.pattern_ref_copy_borrow(&binding_rap, &evt_kind, scrutinee, Some(let_expr.pat)));
 
         // A struct binding's field columns (`x.name`, `x.n`) are
         // declared here too: they go out of scope with `x`, and in a
@@ -9193,9 +9292,14 @@ pub fn pattern_ref_copy_borrow(
   binding: &ResourceAccessPoint,
   evt: &Evt,
   scrutinee: &'tcx Expr<'tcx>,
+  pattern: Option<&Pat<'_>>,
 ) -> Vec<ExternalEvent> {
+  let local = match pattern {
+    Some(pat) => self.raps.pattern_local(binding.name(), pat),
+    None => self.raps.local(binding.name()),
+  };
   if matches!(evt, Evt::SBorrow | Evt::MBorrow) {
-    return self.pattern_call_ref_borrows(binding, scrutinee);
+    return self.pattern_call_ref_borrows(binding, scrutinee, local);
   }
   if !matches!(evt, Evt::Copy | Evt::Move) {
     return Vec::new();
@@ -9206,7 +9310,7 @@ pub fn pattern_ref_copy_borrow(
   }
   let moved = matches!(evt, Evt::Move);
   if binding.is_ref() {
-    return self.pattern_ref_borrows(binding, binding.name(), &[], moved, false, false, scrutinee);
+    return self.pattern_ref_borrows(binding, binding.name(), local, &[], moved, false, false, scrutinee);
   }
   if !matches!(binding, ResourceAccessPoint::Struct(Struct { is_member: false, .. })) {
     return Vec::new();
@@ -9219,7 +9323,7 @@ pub fn pattern_ref_copy_borrow(
     }
     let path = member.name()[bound.len() + 1..].to_owned();
     let fields: Vec<&str> = path.split('.').collect();
-    let evs = self.pattern_ref_borrows(&member, &bound, &fields, moved, true, false, scrutinee);
+    let evs = self.pattern_ref_borrows(&member, &bound, local, &fields, moved, true, false, scrutinee);
     if !evs.is_empty() {
       // The arrow says where the field's reference came from, in
       // place of the dot that couldn't name a lender (#352).
@@ -9241,7 +9345,7 @@ pub fn pattern_ref_copy_borrow(
 /// point into any of them, and all of them stay borrowed while s is in
 /// use, as for `let r = pick(&a, &b);` (#1368). With one,
 /// `call_result_lender` names it (#1222).
-fn pattern_call_ref_borrows(&mut self, binding: &ResourceAccessPoint, scrutinee: &'tcx Expr<'tcx>) -> Vec<ExternalEvent> {
+fn pattern_call_ref_borrows(&mut self, binding: &ResourceAccessPoint, scrutinee: &'tcx Expr<'tcx>, local: Option<Local>) -> Vec<ExternalEvent> {
   let mut call = scrutinee;
   while let ExprKind::DropTemps(inner) = call.kind {
     call = inner;
@@ -9250,7 +9354,7 @@ fn pattern_call_ref_borrows(&mut self, binding: &ResourceAccessPoint, scrutinee:
     || !self.tcx.typeck(call.hir_id.owner).expr_ty(call).is_ref() || self.call_lenders(call).len() < 2 {
     return Vec::new();
   }
-  self.pattern_ref_borrows(binding, binding.name(), &[], false, false, true, call)
+  self.pattern_ref_borrows(binding, binding.name(), local, &[], false, false, true, call)
 }
 
 /// `pattern_ref_copy_borrow` for one reference: the binding itself
@@ -9263,6 +9367,7 @@ fn pattern_ref_borrows(
   &mut self,
   reference: &ResourceAccessPoint,
   bound: &str,
+  local: Option<Local>,
   fields: &[&str],
   moved: bool,
   in_field: bool,
@@ -9303,7 +9408,7 @@ fn pattern_ref_borrows(
   // (`fn(&mut Vec<i32>) -> Option<&i32>`) keeps v mutably borrowed
   // while x is live (#1122).
   let is_mut = reference.is_mutref();
-  let held = self.loans_held_by(bound, fields);
+  let held = self.loans_held_in(local, fields, None);
   let kind_of = |l: &ResourceTy| match (l, &held) {
     (ResourceTy::Value(r), Some(held)) if !r.is_ref() =>
       held.get(r.name().split('.').next().unwrap_or_default()).copied().unwrap_or(is_mut),
@@ -10613,10 +10718,10 @@ pub(crate) fn pat_leaves_drop(&self, pat: &'tcx Pat<'tcx>, typeck: &'tcx rustc_m
 
 // This function does the work of adding an event for let stmts
 pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
-    let outer = self.emitting_span.replace(rhs.span);
+    let outer = self.emitting_expr.replace(rhs);
     self.match_rhs_at(lhs.clone(), rhs, evt);
     self.draw_closure_result_borrows(&lhs, rhs);
-    self.emitting_span = outer;
+    self.emitting_expr = outer;
   }
 
   /// The call's usual initialization runs before the arrows for the
@@ -10701,10 +10806,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // Earlier elements may already have moved into MIR temporaries. The
       // assignment itself never happens if an element returns or diverges.
       let Some(row) = self.body_facts.and_then(|b| b.constructed_vecs.get(&rhs.span.ctxt().outer_expn())) else { return };
-      if let Some((b, rap)) = self.body_facts.zip(lhs.extract_rap()).filter(|(b, rap)|
-        b.vars.iter().any(|v| v.name == *rap.name() && v.local > self.mir_body.arg_count && v.capture.is_none())) {
+      if let Some((b, rap, local)) = self.body_facts.zip(lhs.extract_rap()).and_then(|(b, rap)| {
+        let local = rap.owner_local()?;
+        b.vars.iter().any(|v| v.local == local.index() && v.local > self.mir_body.arg_count && v.capture.is_none()).then_some((b, rap, local))
+      }) {
         let mut inits = b.rows.iter().flat_map(|r| &r.facts)
-          .filter(|e| matches!(&e.fact, crate::facts::Fact::Init { path, .. } if path == rap.name())).peekable();
+          .filter(|e| e.place_local == Some(local) && matches!(&e.fact, crate::facts::Fact::Init { .. })).peekable();
         if inits.peek().is_some() && inits.all(|e| b.skipped_closure_returns.contains_key(&e.location.block)) {
           self.approx_notes.push(ApproxNote::UnreachedValue { hash: *rap.hash() });
         }
@@ -11208,7 +11315,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
                   }
                   _ => self.match_rhs(lhs, operand, evt.clone()),
                 }
-                for b in self.pattern_ref_copy_borrow(&rap, &evt, operand) {
+                for b in self.pattern_ref_copy_borrow(&rap, &evt, operand, None) {
                   self.add_external_event(line, b);
                 }
                 return;
@@ -11413,7 +11520,7 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   // we get this far. If this fires, some other desugaring is
   // leaking a synthetic local — worth a look, hence the warn.
   let rhs_key = if matches!(p.res, Res::Local(_)) || static_of_path(p).is_some() { rhs_name.clone() } else { fn_key(&rhs_name) };
-  match self.raps.get(&rhs_key) {
+  match if let Res::Local(id) = p.res { self.raps.binding(id) } else { self.raps.get(&rhs_key) } {
     Some(rd) => {
       let rhs_rap = rd.rap.to_owned();
       self.update_rap(&rhs_rap, line_num);
@@ -12114,7 +12221,7 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
     if copied {
       if let (ResourceTy::Value(c), ResourceTy::Value(r)) = (&lhs, &from) {
         if r.is_ref() && self.borrow_map.contains_key(r.name()) {
-          if let Some(last) = self.last_live_line(c.name(), (line_num, usize::MAX)) {
+          if let Some(last) = c.owner_local().and_then(|l| self.local_last_live_line(l, (line_num, usize::MAX))) {
             let floor = self.borrow_floor.entry(r.name().to_owned()).or_insert(last);
             *floor = (*floor).max(last);
           }
@@ -12145,7 +12252,7 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
       // (Reborrowing through a shared reference, `*r` with `r: &T`, is
       // no loan rustc tracks: the closure's own last use says it.)
       let holds_until = kill_line.or_else(|| match (&lhs, through_ref) {
-        (ResourceTy::Value(c), true) => self.last_live_line(c.name(), (line_num, usize::MAX)),
+        (ResourceTy::Value(c), true) => c.owner_local().and_then(|l| self.local_last_live_line(l, (line_num, usize::MAX))),
         _ => None,
       });
       if let (Some(die_line), Some(name)) = (holds_until, from.extract_rap().filter(|r| r.is_ref()).map(|r| r.name().to_owned())) {
@@ -12200,7 +12307,7 @@ pub fn print_out_of_scope(&mut self){
     let (all_exit, exit_from) = (self.all_paths_exit, self.all_paths_exit_from);
     let left_at = |scope: usize| all_exit && scope >= exit_from
       && !rap.rap.never_drops() && !rap.rap.is_ref();
-    let left_already = left_at(rap.scope) && rap.extra_scopes.iter().all(|s| left_at(*s));
+    let left_already = left_at(rap.scope) && rap.extra_scopes.iter().all(|(s, _)| left_at(*s));
     // An unbound temporary is dropped by its own `TemporaryDrop`, which
     // may sit in a branch (a let chain's later part, #604): no scope end.
     // A first variable declared in a branch or loop body was ended
@@ -12222,13 +12329,17 @@ pub fn print_out_of_scope(&mut self){
           None => {}
         }
       }
+      let owner = |local| self.raps.earlier.get(&local).map(|(rd, _)| rd.rap.clone());
+      let first = rap.first_local.and_then(&owner).unwrap_or_else(|| rap.rap.clone());
+      let later: Vec<_> = rap.extra_scopes.iter().filter(|(s, _)| !left_at(*s))
+        .map(|(s, local)| (*s, local.and_then(&owner).unwrap_or_else(|| rap.rap.clone()))).collect();
       if rap.is_global && !duplicate && !left_at(rap.scope) {
-        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), id: *self.unique_id, early: None });
+        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: first, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
       // The later variables that share this column (#589).
-      for &scope in rap.extra_scopes.iter().filter(|s| !left_at(**s)) {
-        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), id: *self.unique_id, early: None });
+      for (scope, ro) in later {
+        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro, id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
     }
@@ -12407,7 +12518,7 @@ pub fn print_out_of_scope(&mut self){
         // (Not for a lender with a column of its own the facts give k no
         // loan of, `r2` after `std::mem::swap(&mut r1, &mut r2)`: the
         // walk's line.)
-        let own_column = matches!(l, ResourceTy::Value(x) if self.raps.get(x.name().as_str()).is_some_and(|r| r.fn_start_line == self.current_fn_start && !r.rap.is_fn()));
+        let own_column = matches!(l, ResourceTy::Value(x) if self.raps.get(x.name().as_str()).is_some_and(|r| !r.rap.is_fn()));
         if i == 0 && mine.is_empty() && own_column && !loans.is_empty() {
           // (Its arrow gives back k's loans that went through the lender, so
           // copies made before it end on their own, `let m = s; let o =
@@ -12482,7 +12593,7 @@ pub fn print_out_of_scope(&mut self){
           _ if all_static && matches!(l, ResourceTy::Anonymous)
             && self.raps.get(&slot.key).is_some_and(|r| r.rap.is_ref())
             && mine.iter().all(|id| info(id).is_some_and(|f| !f.direct_holders.contains(&slot.key))) => {
-            let last = self.last_live_line(&slot.key, (slot.rd.assigned_at, slot.rows.1));
+            let last = slot.rd.local.and_then(|l| self.local_last_live_line(l, (slot.rd.assigned_at, slot.rows.1)));
             (End::Arrow(last.unwrap_or(slot.rd.assigned_at)), None)
           }
           (_, _, Some(_)) if all_static => (End::Own(e.last_held.unwrap_or(slot.rd.lifetime)), None),
@@ -12984,6 +13095,7 @@ pub fn print_out_of_scope(&mut self){
     self.place_let_else_ends();
     self.place_exit_ends();
     mark_exhaustion_paths(self.preprocessed_events, &self.exit_scopes);
+    self.print_out_of_scope();
     if let Some(facts) = facts {
       crate::event_order::order_body(self, facts);
     }

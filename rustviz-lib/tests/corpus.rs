@@ -43135,3 +43135,192 @@ fn mixed_stored_loans_end_mutable_first_1884() {
     let svg = run_with_local_backend("mixed_stored_loans_exit_1884").timeline_panel_string();
     assert!(!svg.contains("data-rv-invalid"), "a column went invalid");
 }
+
+/// Run each identity pin through the regular corpus renderer and with a
+/// selected module file. Both entry points must use the same body and locals.
+fn check_identity_fixture(fixture: &str, file: bool, check: impl Fn(&str)) {
+    if !file {
+        check(&run_with_local_backend(fixture).timeline_panel_string());
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir(&src).unwrap();
+    fs::write(dir.path().join("Cargo.toml"),
+        "[package]\nname = \"user-code\"\nversion = \"0.1.0\"\nedition = \"2024\"\n").unwrap();
+    fs::copy(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rust-toolchain.toml"),
+        dir.path().join("rust-toolchain.toml")).unwrap();
+    fs::write(src.join("lib.rs"), "mod selected;").unwrap();
+    fs::write(src.join("selected.rs"), read_corpus(fixture)).unwrap();
+    let out = Command::new("cargo").args(["rv-plugin", "--file", "src/selected.rs"])
+        .current_dir(dir.path()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    check(json["timeline_panel"].as_str().unwrap());
+}
+
+fn same_line_bodies(svg: &str) {
+    // left::take moves all of p. In right::take rustc rejects &p after
+    // the move of p.0 (E0382), but accepts the read of p.1.
+    check_review_tip(svg, "p@L2:dot:init_ref_param+move", &["moved into drop", "No resource is dropped"], &[]);
+    check_review_tip(svg, "p@L3-", &["p.0 was moved out", "can't be used as a whole", "its other fields still can"],
+        &["p is the owner of the resource"]);
+}
+
+fn sibling_patterns(svg: &str) {
+    // Both inner arrays shadow the Copy parameter and share a visual
+    // column. Each partial move leaves exactly the other elements to drop.
+    assert_eq!(rv_elements(svg, "hdr:a₂").len(), 1);
+    check_review_tip(svg, "a@L1-", &["holds a copyable value"], &["moved"]);
+    check_review_tip(svg, "a₂@L4-", &["a₂[0] was moved out", "a₂[1] is still in it"], &["a₂[2]"]);
+    check_review_tip(svg, "a₂@L6:dot:", &["only a₂[1] is dropped"], &["a₂[2]"]);
+    check_review_tip(svg, "a₂@L9-", &["a₂[1] was moved out", "a₂[0] and a₂[2] are still in it"], &["a₂[0] was moved out"]);
+    check_review_tip(svg, "a₂@L11:dot:", &["only a₂[0] and a₂[2] are dropped"], &["only a₂[1] is dropped"]);
+}
+
+#[test]
+fn body_identity_in_corpus() { check_identity_fixture("body_identity", false, same_line_bodies); }
+#[test]
+fn body_identity_in_selected_file() { check_identity_fixture("body_identity", true, same_line_bodies); }
+#[test]
+fn binding_identity_in_corpus() { check_identity_fixture("pattern_binding_identity", false, sibling_patterns); }
+#[test]
+fn binding_identity_in_selected_file() { check_identity_fixture("pattern_binding_identity", true, sibling_patterns); }
+
+#[test]
+fn sibling_scope_drops_in_one_line_blocks() {
+    let arrays = run_with_local_backend("rv3_issues/1812_same_name_blocks_arrays").timeline_panel_string();
+    check_review_tip(&arrays, "a@L2:dot:", &["only a[1] is dropped"], &[]);
+    check_review_tip(&arrays, "a@L3:dot:", &["including every String it holds"], &["moved out earlier"]);
+    let boxes = run_with_local_backend("rv3_issues/1813_same_name_blocks_boxes").timeline_panel_string();
+    check_review_tip(&boxes, "b@L2:dot:", &["Its contents were moved out earlier", "heap allocation"], &["No resource is dropped"]);
+    check_review_tip(&boxes, "b@L3:dot:", &["including the String it holds"], &["contents were moved out"]);
+}
+
+#[test]
+fn sibling_reference_segments_end_at_their_own_last_use() {
+    let svg = run_with_local_backend("assign_branch_vec_holder_1477").timeline_panel_string();
+    check_review_tip(&svg, "r@L14-15:line:", &["holds an immutable reference"], &[]);
+    assert!(rv_elements(&svg, "r@L15-16:line:").is_empty());
+    check_review_tip(&svg, "r@L16:dot:", &["goes out of scope"], &[]);
+}
+
+#[test]
+fn closure_parameter_does_not_highlight_the_enclosing_binding() {
+    let svg = run_with_local_backend("shadow_matrix_closures").code_panel_string();
+    assert!(svg.contains("|s: &amp;str| s.len()"));
+}
+
+#[test]
+fn p4_nested_array_move() {
+    let svg = run_with_local_backend("p4_array_moves").timeline_panel_string();
+    check_review_tip(&svg, "a@L2:dot:", &["a[0][0]'s resource is moved"], &["a[0]'s resource is moved"]);
+    check_review_tip(&svg, "a@L4:dot:", &["only a[0][1] and a[1] are dropped"], &["only a[1] is dropped"]);
+}
+
+#[test]
+fn p4_array_binding_later_reassigned() {
+    let svg = run_with_local_backend("p4_array_moves").timeline_panel_string();
+    check_review_tip(&svg, "a@L7:dot:", &["a[0]'s resource is moved"], &["a's resource is moved"]);
+    check_review_tip(&svg, "a@L11:dot:", &["only a[1] is dropped"], &["No resource is dropped"]);
+}
+
+#[test]
+fn p4_shared_array_column_has_one_arm_history() {
+    let svg = run_with_local_backend("p4_array_branch").timeline_panel_string();
+    assert_eq!(rv_elements(&svg, "a@L6:dot:move").len(), 1);
+    assert_eq!(rv_elements(&svg, "a@L6-7:branch_line:full_privilege/side1").len(), 1);
+}
+
+#[test]
+fn p4_box_field_drops_follow_the_binding() {
+    let svg = run_with_local_backend("p4_box_fields").timeline_panel_string();
+    for (dot, kept, gone) in [("b@L6:dot:", "tag", "name"), ("b@L10:dot:", "name", "tag")] {
+        check_review_tip(&svg, dot, &[&format!("only b.{kept} is dropped"), "heap allocation, if it has one, is freed"],
+            &[&format!("only b.{gone} is dropped"), "including the P it holds"]);
+    }
+}
+
+#[test]
+fn p4_box_payload_join() {
+    let svg = run_with_local_backend("p4_box_join").timeline_panel_string();
+    check_review_tip(&svg, "b@L6:dot:", &["b's contents may have been moved out"], &["b was moved in at least one branch"]);
+}
+
+#[test]
+fn p4_emptied_box_reassignment() {
+    let svg = run_with_local_backend("p4_box_join").timeline_panel_string();
+    check_review_tip(&svg, "b@L20:dot:", &["only its heap allocation, if it has one, is freed here"],
+        &["including the String it holds", "No resource is dropped"]);
+}
+
+#[test]
+fn p4_same_row_box_drops() {
+    let svg = run_with_local_backend("p4_one_row_boxes").timeline_panel_string();
+    for row in [2, 6] {
+        let tips = rv_elements(&svg, &format!("b@L{row}:dot:")).into_iter().map(|(_, tip, ..)| tip).collect::<Vec<_>>().join(" ");
+        let (_, after_first) = tips.split_once("b goes out of scope. Its contents were moved out earlier").expect(&tips);
+        let (_, second) = after_first.split_once("b acquires ownership of a resource").expect(&tips);
+        assert!(second.contains("b goes out of scope. Its resource is dropped (including the Vec<u8> it holds)"), "{tips}");
+        assert!(!tips.contains("Its resource is dropped (including the String it holds)") && !tips.contains("No resource is dropped"), "{tips}");
+    }
+}
+
+#[test]
+fn p4_sibling_result_lenders() {
+    let tips = timeline_tooltips(&run_with_local_backend("p4_result_loans").timeline_panel_string());
+    for (lender, dest) in [("c", "x"), ("d", "y")] {
+        assert_eq!(tips.iter().filter(|t| t.starts_with(&format!("Immutable borrow from {lender} to {dest}:"))).count(), 2);
+    }
+    assert!(!tips.iter().any(|t| t.starts_with("Immutable borrow from d to x") || t.starts_with("Immutable borrow from c to y")));
+}
+
+#[test]
+fn p4_sibling_result_keeps_mutable_loan() {
+    let tips = timeline_tooltips(&run_with_local_backend("p4_result_loans").timeline_panel_string());
+    for lender in ["a", "b"] {
+        assert!(tips.iter().any(|t| t.starts_with(&format!("Mutable borrow from {lender} to r:"))));
+        assert!(!tips.iter().any(|t| t.starts_with(&format!("Immutable borrow from {lender} to r:"))));
+    }
+}
+
+#[test]
+fn p4_sibling_write_explains_repoint() {
+    let svg = run_with_local_backend("p4_write_loan").timeline_panel_string();
+    check_review_tip(&svg, "x@L7:dot:", &["z's borrow of x is already over here"], &["z's borrow of y is already over here"]);
+}
+
+fn p4_var_types(body: &str) -> Vec<(String, String)> {
+    let rv = run_with_local_backend("p4_declarations");
+    let vars = &fact_body(rv.facts().unwrap(), body)["vars"];
+    vars.as_array().unwrap().iter().map(|v| (v["name"].as_str().unwrap().to_owned(), v["ty"].as_str().unwrap().to_owned())).collect()
+}
+
+#[test]
+fn p4_macro_reuses_pattern_span() {
+    let vars = p4_var_types("expansions");
+    assert_eq!(vars, [("value".into(), "std::string::String".into()), ("value₂".into(), "usize".into())]);
+}
+
+#[test]
+fn p4_closure_numbers_each_shadow_once() {
+    let vars = p4_var_types("captures::{closure#0}");
+    for (name, ty) in [("x", "std::string::String"), ("x₂", "std::string::String"), ("x₃", "usize")] {
+        assert!(vars.iter().any(|(n, t)| n == name && t == ty), "{vars:?}");
+    }
+}
+
+#[test]
+fn p4_second_box_describes_its_own_type() {
+    let svg = run_with_local_backend("p4_box_types").timeline_panel_string();
+    check_review_tip(&svg, "b@L3:dot:", &["including the Vec<u8> it holds"], &["including the String it holds", "contents were moved out"]);
+}
+
+#[test]
+fn p4_deferred_rhs_uses_its_own_sibling_declaration() {
+    let tips = timeline_tooltips(&run_with_local_backend("p4_result_loans").timeline_panel_string());
+    for lender in ["first", "second"] {
+        assert!(tips.iter().any(|t| t.starts_with(&format!("Return immutably borrowed resource from selected to {lender}"))));
+        assert!(!tips.iter().any(|t| t.starts_with(&format!("Return immutably borrowed resource from r to {lender}"))));
+    }
+}

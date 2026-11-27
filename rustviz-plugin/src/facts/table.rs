@@ -2,15 +2,24 @@
 //! column's state on each row, instead of replaying events.
 //!
 //! Built from the fact layer's [`CrateFacts`] in the plugin (no JSON round
-//! trip). A body is found by its first line (the fn signature's line, the
-//! same `fn_start_line` the 2.x RAP keys use), a column by its 2.x name
-//! (`s`, `s₂`, `p.a`). A row with no state of its own takes the nearest
+//! trip). A RAP belongs to its compiler body. Its presentation column can
+//! represent a different local at each boundary. A row with no state of its own takes the nearest
 //! row above it on the same path (design Q3): the caller bounds the search
 //! by the first row of the leg it draws, since rows above a leg's start
 //! may belong to another arm.
 
+use rustc_hir::def_id::DefId;
+use rustc_data_structures::fx::FxIndexMap;
 use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, Lent, Parts, State};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// A function declaration as drawn in the source panel. Two declarations
+/// can start on the same line. Only the compiler body selects semantic facts.
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionStart {
+    pub body: DefId,
+    pub line: usize,
+}
 
 /// A column's value on a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,12 +65,13 @@ pub enum Why {
     Assigned { reassign: bool, maybe_had: bool },
     /// Its old value dropped ("drops", "drops_if_init", "drops_rest",
     /// "nothing_to_drop"), on this row's path or an early exit's.
-    Dropped { how: &'static str, early_exit: Option<usize>, at_reassign: bool, route: DropRoute },
+    Dropped { local: Option<rustc_middle::mir::Local>, how: &'static str, early_exit: Option<usize>, at_reassign: bool, route: DropRoute },
 }
 
 /// One column on one row (or one arm of a row).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
+    local: Option<rustc_middle::mir::Local>,
     pub init: Init,
     /// The loans in scope that restrict it here.
     pub lent: Vec<Lent>,
@@ -158,7 +168,8 @@ struct BodyTable {
     joins: BTreeMap<rustc_span::Span, Cells>,
     /// Column names, in the facts' order.
     columns: Vec<String>,
-    array_lengths: BTreeMap<String, usize>,
+    moved_places: BTreeMap<rustc_middle::mir::Local, BTreeSet<String>>,
+    array_lengths: BTreeMap<(rustc_middle::mir::Local, String), usize>,
     boxes: BTreeSet<String>,
     uniform_option_refs: BTreeMap<String, bool>,
     /// Each loan's borrowed place (`s`, `p.a`, `*b`, `v[_]`).
@@ -183,10 +194,7 @@ pub struct StateTable {
     /// For consecutive stores on one source row, event ID to group and
     /// execution rank. Alternative lenders of one store share its rank.
     pub store_order: BTreeMap<usize, (usize, usize)>,
-    /// fn bodies by first source line (several fns may start on one line);
-    /// closure bodies are not drawn as columns of their own and are left
-    /// out.
-    bodies: BTreeMap<usize, Vec<BodyTable>>,
+    bodies: FxIndexMap<DefId, BodyTable>,
     imaginary_arms: BTreeMap<super::ImaginaryEdgeId, ImaginaryArm>,
 }
 
@@ -202,10 +210,8 @@ pub struct ImaginaryArm {
 
 impl StateTable {
     pub fn from_facts(facts: &CrateFacts) -> StateTable {
-        let mut bodies: BTreeMap<usize, Vec<BodyTable>> = BTreeMap::new();
-        for b in facts.bodies.iter().filter(|b| b.kind == "fn") {
-            bodies.entry(b.first_line).or_default().push(body_table(b));
-        }
+        let bodies = facts.bodies.iter().filter(|b| b.kind == "fn")
+            .map(|b| (b.def_id, body_table(b))).collect();
         let imaginary_arms = facts.bodies.iter().flat_map(|b| &b.imaginary_edges)
             .map(|e| (e.id, ImaginaryArm {
                 entry: cells_of(&e.entry),
@@ -218,34 +224,29 @@ impl StateTable {
         StateTable { bodies, imaginary_arms, ..Default::default() }
     }
 
-    /// The body starting on `fn_line` that has `column`.
-    fn body(&self, fn_line: usize, column: &str) -> Option<&BodyTable> {
-        self.bodies.get(&fn_line)?.iter().find(|b| b.columns.iter().any(|c| c == column))
-    }
-
-    /// The state of `column` of the fn starting on `fn_line` after `row`,
+    /// The state of `column` of the MIR body `function` after `row`,
     /// carried from the nearest row at or above it that has a state of
     /// its own, but not above `floor` (the first row of the leg being
     /// drawn; `0` for no bound). None where the column is out of scope
     /// (the nearest state doesn't have it) or nothing is known.
-    pub fn cell(&self, fn_line: usize, column: &str, row: usize, floor: usize) -> Option<Cell> {
-        self.cell_on(fn_line, column, row, floor, None)
+    pub fn cell(&self, function: FunctionStart, column: &str, row: usize, floor: usize) -> Option<Cell> {
+        self.cell_on(function, column, row, floor, None)
     }
 
-    pub fn has_part_loans(&self, fn_line: usize, column: &str) -> bool {
-        self.body(fn_line, column).is_some_and(|b| b.part_lenders.contains(column))
+    pub fn has_part_loans(&self, function: FunctionStart, column: &str) -> bool {
+        self.bodies.get(&function.body).is_some_and(|b| b.part_lenders.contains(column))
     }
 
     /// The source row reached by the snapshot's single forward MIR edge.
-    pub fn continues_to_row(&self, fn_line: usize, column: &str, row: usize) -> Option<usize> {
-        self.body(fn_line, column)?.rows.get(&row)?.continues_to
+    pub fn continues_to_row(&self, function: FunctionStart, row: usize) -> Option<usize> {
+        self.bodies.get(&function.body)?.rows.get(&row)?.continues_to
     }
 
     /// A loan boundary on the drawn path. Carry across an empty row only
     /// along the MIR edge that actually connects the surrounding rows.
-    pub fn loan_cell(&self, fn_line: usize, column: &str, row: usize, floor: usize) -> Option<Cell> {
-        let c = self.cell(fn_line, column, row, floor)?;
-        let body = self.body(fn_line, column)?;
+    pub fn loan_cell(&self, function: FunctionStart, column: &str, row: usize, floor: usize) -> Option<Cell> {
+        let c = self.cell(function, column, row, floor)?;
+        let body = self.bodies.get(&function.body)?;
         (c.from_row == row || body.rows[&c.from_row].continues_to.is_some_and(|n| row < n)).then_some(c)
     }
 
@@ -253,34 +254,34 @@ impl StateTable {
     /// order is not source order. On a shared row, require exactly one
     /// MIR arm inside the supplied span. Never use the joined snapshot
     /// for a leg that cannot be identified.
-    pub fn arm_loan_cell(&self, fn_line: usize, column: &str, row: usize, span: ArmSpan) -> Option<(Cell, Option<usize>)> {
+    pub fn arm_loan_cell(&self, function: FunctionStart, column: &str, row: usize, span: ArmSpan) -> Option<(Cell, Option<usize>)> {
         if row < span.start.0 || row > span.end.0 {
             return None;
         }
-        let body = self.body(fn_line, column)?;
+        let body = self.bodies.get(&function.body)?;
         if let Some(rc) = body.rows.get(&row).filter(|rc| !rc.arms.is_empty()) {
             let mut matches = rc.arms.iter().enumerate().filter(|(_, (a, _))|
                 a.col_lo != 0 && span.start <= (row, a.col_lo) && (row, a.col_hi) <= span.end);
             let (arm, _) = matches.next()?;
             if matches.next().is_some() { return None; }
-            return Some((self.cell_in_arm(fn_line, column, row, arm)?, Some(arm)));
+            return Some((self.cell_in_arm(function, column, row, arm)?, Some(arm)));
         }
         // An interior row belongs to this arm alone. A boundary row can
         // include its condition, a sibling arm, or code after the join.
         if span.start.0 < row && row < span.end.0 {
-            return Some((self.loan_cell(fn_line, column, row, span.start.0 + 1)?, None));
+            return Some((self.loan_cell(function, column, row, span.start.0 + 1)?, None));
         }
         None
     }
 
     /// `cell` on one arm of a row with several (`arms`): its own state and
     /// events.
-    pub fn cell_in_arm(&self, fn_line: usize, column: &str, row: usize, arm: usize) -> Option<Cell> {
-        self.cell_on(fn_line, column, row, row, Some(arm))
+    pub fn cell_in_arm(&self, function: FunctionStart, column: &str, row: usize, arm: usize) -> Option<Cell> {
+        self.cell_on(function, column, row, row, Some(arm))
     }
 
-    fn cell_on(&self, fn_line: usize, column: &str, row: usize, floor: usize, arm: Option<usize>) -> Option<Cell> {
-        let body = self.body(fn_line, column)?;
+    fn cell_on(&self, function: FunctionStart, column: &str, row: usize, floor: usize, arm: Option<usize>) -> Option<Cell> {
+        let body = self.bodies.get(&function.body)?;
         if row < body.first_line || row > body.last_line || floor > row {
             return None;
         }
@@ -311,12 +312,12 @@ impl StateTable {
     /// The state between source rows. Read the incoming edges of the
     /// next MIR row, including all predecessors at a join. Empty source
     /// rows between those edges carry the same state.
-    pub fn segment_cell(&self, fn_line: usize, column: &str, row: usize) -> Option<Cell> {
-        let b = self.body(fn_line, column)?;
+    pub fn segment_cell(&self, function: FunctionStart, column: &str, row: usize) -> Option<Cell> {
+        let b = self.bodies.get(&function.body)?;
         if !(b.first_line..b.last_line).contains(&row) { return None; }
         if let Some(rc) = b.rows.get(&row) {
             if rc.snapshot && !rc.block_end && !rc.jumps {
-                let mut own = self.cell(fn_line, column, row, row)?;
+                let mut own = self.cell(function, column, row, row)?;
                 // The row's state joins all its exits; the line below it is
                 // on the ones that come into the next row (`if let Some(x)
                 // = b && x.len() > 1 {`: x is bound in the block below,
@@ -326,7 +327,7 @@ impl StateTable {
                     let next = b.rows.range(row + 1..).find(|(_, c)| c.before.is_some()).and_then(|(_, c)| c.before.as_ref()?.get(column));
                     // (Its init, as at a block's end below; loans are this
                     // row's, read where its own path leaves it.)
-                    if let Some(n) = next.filter(|n| n.init == Init::Own) {
+                    if let Some(n) = next.filter(|n| n.local == own.local && n.init == Init::Own) {
                         own.init = n.init;
                         own.parts = n.parts.clone();
                         own.unnamed_maybe = n.unnamed_maybe;
@@ -344,7 +345,7 @@ impl StateTable {
         let jumps = b.rows.get(&row).is_some_and(|rc| rc.jumps);
         let (&next, boundary) = b.rows.range(row + 1..).find(|(_, c)| c.before.is_some())?;
         let mut cell = boundary.before.as_ref()?.get(column)?.clone();
-        if let Some(here) = self.cell(fn_line, column, row, row).filter(|_| !jumps) {
+        if let Some(here) = self.cell(function, column, row, row).filter(|here| !jumps && here.local == cell.local) {
             // Paths on which a block-local was never in scope can meet at
             // its StorageDead. Inside its scope the binding has its own state.
             let definitely_dropped = boundary.why.get(column).is_some_and(|events| events.iter().any(|(_, why)|
@@ -370,14 +371,14 @@ impl StateTable {
         Some(cell)
     }
 
-    pub fn join_cell(&self, function: usize, column: &str, span: rustc_span::Span) -> Option<&Cell> {
-        self.body(function, column)?.joins.get(&span)?.get(column)
+    pub fn join_cell(&self, function: FunctionStart, column: &str, span: rustc_span::Span) -> Option<&Cell> {
+        self.bodies.get(&function.body)?.joins.get(&span)?.get(column)
     }
 
     /// On a shared row, the only write is in one arm and a real sibling
     /// can leave the place moved. This also covers a short-circuit RHS.
-    pub fn skips_reassignment(&self, function: usize, column: &str, row: usize) -> bool {
-        let Some(rc) = self.body(function, column).and_then(|b| b.rows.get(&row)) else { return false };
+    pub fn skips_reassignment(&self, function: FunctionStart, column: &str, row: usize) -> bool {
+        let Some(rc) = self.bodies.get(&function.body).and_then(|b| b.rows.get(&row)) else { return false };
         let Some(why) = rc.why.get(column) else { return false };
         let mut writes = why.iter().filter(|(_, w)| matches!(w, Why::Assigned { .. }));
         let Some((Some(arm), Why::Assigned { reassign: true, .. })) = writes.next() else { return false };
@@ -390,13 +391,18 @@ impl StateTable {
 
     /// A normal scope-end drop (the column can already be out of storage
     /// in the row's after-cell). Several sites must agree.
-    pub fn scope_drop(&self, function: usize, column: &str, row: usize) -> Option<&'static str> {
-        let events = self.body(function, column)?.rows.get(&row)?.why.get(column)?;
-        if events.iter().any(|(_, w)| matches!(w, Why::Dropped { how: "drops_if_init", early_exit: None, at_reassign: false, route: DropRoute::Shared })) {
+    pub fn scope_drop(&self, function: FunctionStart, column: &str, row: usize) -> Option<&'static str> {
+        self.local_scope_drop(function, column, row, None)
+    }
+
+    pub fn local_scope_drop(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>) -> Option<&'static str> {
+        let events = self.bodies.get(&function.body)?.rows.get(&row)?.why.get(column)?.iter()
+            .filter(|(_, why)| local.is_none() || matches!(why, Why::Dropped { local: l, .. } if *l == local));
+        if events.clone().any(|(_, w)| matches!(w, Why::Dropped { how: "drops_if_init", early_exit: None, at_reassign: false, route: DropRoute::Shared, .. })) {
             return None;
         }
-        let mut drops = events.iter().filter_map(|(_, w)| match w {
-            Why::Dropped { how, early_exit: None, at_reassign: false, route: DropRoute::Normal | DropRoute::Shared } => Some(*how),
+        let mut drops = events.filter_map(|(_, w)| match w {
+            Why::Dropped { how, early_exit: None, at_reassign: false, route: DropRoute::Normal | DropRoute::Shared, .. } => Some(*how),
             _ => None,
         });
         let how = drops.next()?;
@@ -405,62 +411,54 @@ impl StateTable {
 
     /// The next MIR boundary is the function's scope exit and actually
     /// drops the remainder of this place (drop elaboration).
-    pub fn drops_rest_at_exit(&self, function: usize, column: &str, row: usize) -> bool {
-        let Some(body) = self.body(function, column) else { return false };
+    pub fn drops_rest_at_exit(&self, function: FunctionStart, column: &str, row: usize) -> bool {
+        let Some(body) = self.bodies.get(&function.body) else { return false };
         let Some((&next, next_row)) = body.rows.range(row + 1..).next() else { return false };
         next == body.last_line && next_row.why.get(column).is_some_and(|events| events.iter().any(|(_, why)|
             matches!(why, Why::Dropped { how: "drops_rest", early_exit: None, at_reassign: false, .. })))
     }
 
-    pub fn loan(&self, fn_line: usize, column: &str, loan: usize) -> Option<&LoanInfo> {
-        self.body(fn_line, column)?.loans.get(&loan)
+    pub fn loan(&self, function: FunctionStart, loan: usize) -> Option<&LoanInfo> {
+        self.bodies.get(&function.body)?.loans.get(&loan)
     }
 
-    pub fn kept_through_drop(&self, function: usize, column: &str, loan: usize, holder: &str) -> bool {
-        self.body(function, column).and_then(|b| b.drop_holders.get(&loan)).is_some_and(|places| places.contains(holder))
+    pub fn kept_through_drop(&self, function: FunctionStart, loan: usize, holder: &str) -> bool {
+        self.bodies.get(&function.body).and_then(|b| b.drop_holders.get(&loan)).is_some_and(|places| places.contains(holder))
     }
 
     /// The source lines of the loans of `lender` (a temporary's `(code)`
     /// name) in the body that has `column`.
-    pub fn lender_lines(&self, fn_line: usize, column: &str, lender: &str) -> Vec<usize> {
-        self.body(fn_line, column).map_or_else(Vec::new, |b| b.loans.values().filter(|l| l.lender == lender).map(|l| l.line).collect())
+    pub fn lender_lines(&self, function: FunctionStart, lender: &str) -> Vec<usize> {
+        self.bodies.get(&function.body).map_or_else(Vec::new, |b| b.loans.values().filter(|l| l.lender == lender).map(|l| l.line).collect())
     }
 
     /// Whether `column` has no value on some row above `row` while in
     /// scope (`let x;`): a binding a pattern gives its value when it comes
     /// into scope (`if let Some(x) = o`) never has.
-    pub fn unassigned_above(&self, fn_line: usize, column: &str, row: usize) -> bool {
-        let Some(b) = self.body(fn_line, column) else { return false };
-        b.rows.range(..row).any(|(_, rc)| rc.cells.get(column).is_some_and(|c| c.init == Init::Unassigned)
-            || rc.arms.iter().any(|(_, cells)| cells.get(column).is_some_and(|c| c.init == Init::Unassigned)))
+    pub fn unassigned_above(&self, function: FunctionStart, column: &str, row: usize, cell: &Cell) -> bool {
+        let Some(b) = self.bodies.get(&function.body) else { return false };
+        let unassigned = |cells: &Cells| cells.get(column).is_some_and(|c| c.local == cell.local && c.init == Init::Unassigned);
+        b.rows.range(..row).any(|(_, rc)| unassigned(&rc.cells) || rc.arms.iter().any(|(_, cells)| unassigned(cells)))
     }
 
     /// Whether the body moves `column`, a place it is in or a place in it
     /// out on some row (a `Move` fact): a column the table says moved (or
     /// maybe moved) with none is out of its scope there, not moved.
-    pub fn has_move(&self, fn_line: usize, column: &str) -> bool {
-        let Some(b) = self.body(fn_line, column) else { return false };
+    pub fn has_move(&self, function: FunctionStart, column: &str, cell: &Cell) -> bool {
+        let Some(b) = self.bodies.get(&function.body) else { return false };
         let me = column.trim_start_matches('*');
         let within = |a: &str, b: &str| a.starts_with(&format!("{b}.")) || a.starts_with(&format!("{b}["));
         let related = |c: &str| {
             let c = c.trim_start_matches('*');
             c == me || within(me, c) || within(c, me)
         };
-        // (A field moved out of a struct, `drop(p.a)`, is recorded on `p`:
-        // it moves `p.b` only if it is `p.b` or contains it.)
-        b.rows.values().any(|r| r.why.iter().any(|(c, ws)| {
-            related(c) && ws.iter().any(|(_, w)| match w {
-                Why::Moved { .. } => true,
-                Why::FieldMoved { field, .. } => related(field),
-                _ => false,
-            })
-        }))
+        cell.local.and_then(|l| b.moved_places.get(&l)).is_some_and(|places| places.iter().any(|p| related(p)))
     }
 
     /// The arms of a one-line branch on `row` of the fn starting on
-    /// `fn_line` (the body that has `column`).
-    pub fn arms(&self, fn_line: usize, column: &str, row: usize) -> Vec<ArmInfo> {
-        self.body(fn_line, column)
+    /// `function` (the body that has `column`).
+    pub fn arms(&self, function: FunctionStart, row: usize) -> Vec<ArmInfo> {
+        self.bodies.get(&function.body)
             .and_then(|b| b.rows.get(&row))
             .map_or(Vec::new(), |r| r.arms.iter().map(|(a, _)| a.clone()).collect())
     }
@@ -558,9 +556,9 @@ impl StateTable {
     /// Loans that die on an arm's way out don't count (after its code they
     /// are over, `arm_loan_ends`; an arm `match_arms` accepts has no
     /// branch of its own, so its code has one way out).
-    pub fn arms_disagree(&self, row: usize, columns: &BTreeSet<String>, spans: &[Option<ArmSpan>]) -> bool {
+    pub fn arms_disagree(&self, function: DefId, row: usize, columns: &BTreeSet<String>, spans: &[Option<ArmSpan>]) -> bool {
         type Key<'a> = (Init, Vec<(&'static str, String, BTreeSet<String>)>, Option<Parts>, BTreeSet<&'a str>);
-        self.bodies.values().flatten().filter(|b| b.first_line <= row && row <= b.last_line).any(|b| {
+        self.bodies.get(&function).is_some_and(|b| {
             // (What it holds: the variables its loans borrow, not a constant
             // or a temporary, which each arm lends anew: `if c { "a" } else
             // { "b" }` holds a string literal either way.)
@@ -597,8 +595,8 @@ impl StateTable {
     /// out to the join): the arm's state, read at its exits, still has
     /// them. (An arm `arm_order` matches has no branch of its own, so its
     /// code has one way out.)
-    pub fn arm_loan_ends(&self, fn_line: usize, column: &str, row: usize, arm: usize) -> Vec<usize> {
-        self.body(fn_line, column)
+    pub fn arm_loan_ends(&self, function: FunctionStart, column: &str, row: usize, arm: usize) -> Vec<usize> {
+        self.bodies.get(&function.body)
             .and_then(|b| b.rows.get(&row))
             .and_then(|r| r.why.get(column))
             .map_or(Vec::new(), |ws| ws.iter().filter_map(|(a, w)| match w {
@@ -608,12 +606,12 @@ impl StateTable {
     }
 
     /// The arms of the one-line conditional on source row `row` (in the
-    /// body of the fn starting on `fn_line` that has `column`) whose arms
+    /// body of the MIR body `function` that has `column`) whose arms
     /// span `spans` (a renderer's, in its order), as indices into the
     /// row's arms (`match_arms`): its arm `i` is the renderer's `i`th.
     /// None on a row where branches nest.
-    pub fn arm_order(&self, fn_line: usize, column: &str, row: usize, spans: &[Option<ArmSpan>]) -> Option<Vec<usize>> {
-        let r = self.body(fn_line, column)?.rows.get(&row)?;
+    pub fn arm_order(&self, function: FunctionStart, row: usize, spans: &[Option<ArmSpan>]) -> Option<Vec<usize>> {
+        let r = self.bodies.get(&function.body)?.rows.get(&row)?;
         Self::match_arms(r, row, spans, true)
     }
 
@@ -621,23 +619,23 @@ impl StateTable {
     /// A switch inside the span belongs to a nested conditional, while
     /// the arm's own switch precedes its code. The siblings' shapes and
     /// the names on the diagram play no part in this lookup.
-    fn arm_in_span(&self, row: usize, span: ArmSpan) -> Option<(&RowCells, usize)> {
-        let mut arms = self.bodies.values().flatten().filter_map(|b| b.rows.get(&row))
-            .flat_map(|r| r.arms.iter().enumerate().filter_map(move |(i, (a, _))| {
+    fn arm_in_span(&self, function: DefId, row: usize, span: ArmSpan) -> Option<(&RowCells, usize)> {
+        let r = self.bodies.get(&function)?.rows.get(&row)?;
+        let mut arms = r.arms.iter().enumerate().filter_map(|(i, (a, _))| {
                 ((row, a.switch_col) < span.start && a.code_spans.iter().any(|&(lo, hi)|
                     span.start <= (row, lo) && (row, hi) <= span.end)).then_some((r, i))
-            }));
+            });
         let first = arms.next()?;
         arms.next().is_none().then_some(first)
     }
 
     /// Whether the matched MIR arm has a reachable exit on this row.
-    pub fn arm_has_exit(&self, row: usize, span: ArmSpan) -> bool {
-        self.arm_in_span(row, span).is_some_and(|(r, i)| r.arms[i].0.has_exit)
+    pub fn arm_has_exit(&self, function: DefId, row: usize, span: ArmSpan) -> bool {
+        self.arm_in_span(function, row, span).is_some_and(|(r, i)| r.arms[i].0.has_exit)
     }
 
-    pub fn continuing_arm_cell(&self, column: &str, row: usize, span: ArmSpan) -> Option<Cell> {
-        let (r, i) = self.arm_in_span(row, span)?;
+    pub fn continuing_arm_cell(&self, function: FunctionStart, column: &str, row: usize, span: ArmSpan) -> Option<Cell> {
+        let (r, i) = self.arm_in_span(function.body, row, span)?;
         let mut cell = r.arms[i].0.continuing.as_ref()?.get(column)?.clone();
         cell.from_row = row;
         Some(cell)
@@ -646,8 +644,8 @@ impl StateTable {
     /// An empty arm can have no MIR span of its own. When the other arm
     /// of a two-arm conditional is matched and has a nested join, the
     /// remaining successor of that switch supplies the empty arm's cell.
-    pub fn empty_sibling_cell(&self, column: &str, row: usize, other: ArmSpan) -> Option<Cell> {
-        let (r, i) = self.arm_in_span(row, other)?;
+    pub fn empty_sibling_cell(&self, function: FunctionStart, column: &str, row: usize, other: ArmSpan) -> Option<Cell> {
+        let (r, i) = self.arm_in_span(function.body, row, other)?;
         let (matched, _) = &r.arms[i];
         matched.continuing.as_ref()?;
         let mut siblings = r.arms.iter().enumerate().filter(|(j, (a, _))| *j != i && a.branch == matched.branch);
@@ -665,15 +663,15 @@ impl StateTable {
     /// moved: the fields moved on every arm, and those moved on some arms
     /// only (p.a or p.b). None where no arm moves a part of it, or an arm
     /// moves all of it, or branches nest.
-    pub fn arms_joined_cell(&self, fn_line: usize, column: &str, row: usize) -> Option<Cell> {
-        let b = self.body(fn_line, column)?;
+    pub fn arms_joined_cell(&self, function: FunctionStart, column: &str, row: usize) -> Option<Cell> {
+        let b = self.bodies.get(&function.body)?;
         let r = b.rows.get(&row).filter(|_| row == b.last_line)?;
         let first = r.arms.first()?;
         if r.arms.iter().any(|(a, _)| a.parent.is_some() || a.branch != first.0.branch) {
             return None;
         }
         let cells: Vec<&Cell> = r.arms.iter().map(|(_, c)| c.get(column)).collect::<Option<_>>()?;
-        if !cells.iter().all(|c| matches!(c.init, Init::Own | Init::Partly)) {
+        if !cells.iter().all(|c| c.local == cells[0].local && matches!(c.init, Init::Own | Init::Partly)) {
             return None;
         }
         let moved = |c: &Cell| -> BTreeSet<String> { c.parts.as_ref().map_or(BTreeSet::new(), |p| p.moved.iter().chain(&p.maybe).cloned().collect()) };
@@ -699,14 +697,14 @@ impl StateTable {
 
     /// Source rows the borrow checker sees but the function body cannot execute.
     pub fn unreachable_rows(&self) -> impl Iterator<Item = ((usize, usize), usize)> + '_ {
-        self.bodies.values().flatten().filter_map(|b| Some((b.function_body_start?, &b.dead_lines)))
+        self.bodies.values().filter_map(|b| Some((b.function_body_start?, &b.dead_lines)))
             .flat_map(|(body, rows)| rows.iter().map(move |&row| (body, row)))
     }
 
     /// The direct field columns of `column` (`p.a`, `p.b` of `p`).
-    pub fn fields_of(&self, fn_line: usize, column: &str) -> Vec<String> {
+    pub fn fields_of(&self, function: FunctionStart, column: &str) -> Vec<String> {
         let prefix = format!("{}.", column);
-        self.body(fn_line, column).map_or(Vec::new(), |b| {
+        self.bodies.get(&function.body).map_or(Vec::new(), |b| {
             b.columns
                 .iter()
                 .filter(|n| n.strip_prefix(&prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('.')))
@@ -715,15 +713,15 @@ impl StateTable {
         })
     }
 
-    pub fn is_box(&self, fn_line: usize, column: &str) -> bool {
-        self.body(fn_line, column).is_some_and(|b| b.boxes.contains(column))
+    pub fn is_box(&self, function: FunctionStart, column: &str) -> bool {
+        self.bodies.get(&function.body).is_some_and(|b| b.boxes.contains(column))
     }
 
     /// The event's column can be absent from either side (a new binding,
     /// or one whose scope ends on the same row). Require agreement across
     /// available snapshots if both sides have a binding.
-    pub fn option_ref_copy(&self, fn_line: usize, column: &str, row: Option<usize>) -> Option<bool> {
-        let body = self.body(fn_line, column)?;
+    pub fn option_ref_copy(&self, function: FunctionStart, column: &str, row: Option<usize>) -> Option<bool> {
+        let body = self.bodies.get(&function.body)?;
         if let Some(&copy) = body.uniform_option_refs.get(column) {
             // A branch leg may have no cell of its own. All bindings
             // represented by this column have the same type classification.
@@ -739,23 +737,23 @@ impl StateTable {
         cells.all(|c| c.holder_type == Some(holder_type)).then_some(copy)
     }
 
-    pub fn array_len(&self, fn_line: usize, column: &str) -> Option<usize> {
-        self.body(fn_line, column)?.array_lengths.get(column).copied()
+    pub fn array_len(&self, function: FunctionStart, column: &str, cell: &Cell) -> Option<usize> {
+        self.bodies.get(&function.body)?.array_lengths.get(&(cell.local?, column.to_owned())).copied()
     }
 
     /// Whether `column`'s field columns are all of its fields (none is
     /// private to another module).
-    pub fn fields_complete(&self, fn_line: usize, column: &str) -> bool {
+    pub fn fields_complete(&self, function: FunctionStart, column: &str) -> bool {
         // (A Box's payload's fields are its: `*b`'s hidden ones too.)
-        self.body(fn_line, column)
+        self.bodies.get(&function.body)
             .is_some_and(|b| !b.hidden_fields.contains(column) && !b.hidden_fields.contains(&format!("*{column}")))
     }
 
     /// The first row below `row` with a state of its own, in the body of
-    /// the fn starting on `fn_line` that has `column` (P1-4b's reference
+    /// this function body (P1-4b's reference
     /// columns).
-    pub fn next_state_row(&self, fn_line: usize, column: &str, row: usize) -> Option<usize> {
-        let body = self.body(fn_line, column)?;
+    pub fn next_state_row(&self, function: FunctionStart, row: usize) -> Option<usize> {
+        let body = self.bodies.get(&function.body)?;
         if row >= body.last_line {
             return None;
         }
@@ -766,8 +764,8 @@ impl StateTable {
     /// (`p`, `p.a`, `*b`): its state before the row is then its state
     /// after it. `values_only`: only events that change what it holds
     /// count (a move, an assignment, a drop), not its loans.
-    pub fn quiet(&self, fn_line: usize, column: &str, row: usize, values_only: bool) -> bool {
-        let Some(body) = self.body(fn_line, column) else { return false };
+    pub fn quiet(&self, function: FunctionStart, column: &str, row: usize, values_only: bool) -> bool {
+        let Some(body) = self.bodies.get(&function.body) else { return false };
         let Some(r) = body.rows.get(&row) else { return true };
         let root = |c: &str| c.trim_start_matches('*').split(['.', '[']).next().unwrap_or_default().to_owned();
         // (Not a place reached through a reference it holds, `*h.r = ..`:
@@ -780,25 +778,25 @@ impl StateTable {
     }
 
     /// The place `loan` borrows, as the facts name it (`x`, `*r`).
-    pub fn loan_lender(&self, fn_line: usize, column: &str, loan: usize) -> Option<&str> {
-        self.loan(fn_line, column, loan).map(|l| l.lender.as_str())
+    pub fn loan_lender(&self, function: FunctionStart, loan: usize) -> Option<&str> {
+        self.loan(function, loan).map(|l| l.lender.as_str())
     }
 
-    pub(crate) fn projected_lender(&self, fn_line: usize, column: &str, name: &str) -> Option<&ProjectedPlace> {
-        self.body(fn_line, column)?.loans.values().find_map(|loan|
+    pub(crate) fn projected_lender(&self, fn_line: FunctionStart, name: &str) -> Option<&ProjectedPlace> {
+        self.bodies.get(&fn_line.body)?.loans.values().find_map(|loan|
             (loan.lender == name).then_some(loan.projected.as_ref()).flatten())
     }
 
     /// The source line `loan` is taken on.
-    pub fn loan_line(&self, fn_line: usize, column: &str, loan: usize) -> Option<usize> {
-        self.loan(fn_line, column, loan).map(|l| l.line)
+    pub fn loan_line(&self, function: FunctionStart, loan: usize) -> Option<usize> {
+        self.loan(function, loan).map(|l| l.line)
     }
 
     /// Whether `loan` (restricting `column`) borrows the column itself, a
     /// place it is in (`p` for `p.a`) or, for a Box, its contents (`*b`),
     /// rather than a part of it (`p.a` for `p`, an element `v[_]`).
-    pub fn lends_whole(&self, fn_line: usize, column: &str, loan: usize) -> bool {
-        let Some(lender) = self.loan_lender(fn_line, column, loan) else { return false };
+    pub fn lends_whole(&self, function: FunctionStart, column: &str, loan: usize) -> bool {
+        let Some(lender) = self.loan_lender(function, loan) else { return false };
         // The facts name a Box payload's fields without the deref (`b.0` for
         // `(*b).0`): a loan of `*b` (or `**b`) covers `b` and them.
         let place = lender.trim_start_matches('*');
@@ -808,8 +806,8 @@ impl StateTable {
     /// The arm of a one-line branch `loan` was taken in (`if c { &mut x }
     /// else { &mut y }`; held on that arm's path only), as (row, branch,
     /// arm), with the number of arms that branch has.
-    pub fn loan_arm(&self, fn_line: usize, column: &str, loan: usize) -> Option<((usize, usize, usize), usize)> {
-        let b = self.body(fn_line, column)?;
+    pub fn loan_arm(&self, function: FunctionStart, loan: usize) -> Option<((usize, usize, usize), usize)> {
+        let b = self.bodies.get(&function.body)?;
         let info = b.loans.get(&loan)?;
         let r = b.rows.get(&info.line)?;
         // The innermost arm with the loan's column in it.
@@ -818,9 +816,9 @@ impl StateTable {
         Some(((info.line, a.branch, a.arm), n))
     }
 
-    /// Whether the table has a fn starting on `fn_line`.
-    pub fn has_fn(&self, fn_line: usize) -> bool {
-        self.bodies.contains_key(&fn_line)
+    /// Whether the table contains this MIR body.
+    pub fn has_fn(&self, function: FunctionStart) -> bool {
+        self.bodies.contains_key(&function.body)
     }
 }
 
@@ -834,6 +832,7 @@ fn cells_of(st: &State) -> Cells {
         cells.insert(
             col.clone(),
             Cell {
+                local: st.locals.get(col).copied().flatten(),
                 init,
                 lent,
                 parts,
@@ -873,9 +872,10 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let containing = |path: &str| -> Vec<String> {
         columns.iter().filter(|c| path.starts_with(&format!("{}.", c))).cloned().collect()
     };
+    let mut moved_places = BTreeMap::<_, BTreeSet<_>>::new();
     let mut rows = BTreeMap::new();
     for r in &b.rows {
-        let mut rc = RowCells { snapshot: !r.after.state.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
+        let mut rc = RowCells { snapshot: !r.after.state.is_empty() || !r.after.locals.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
         for a in &r.arms {
             let info = ArmInfo { runs: a.runs, branch: a.branch, arm: a.arm, parent: a.parent, col_lo: a.col_lo, col_hi: a.col_hi, has_exit: a.has_exit,
                 switch_col: a.switch_col, code_spans: a.code_spans.clone(), continuing: a.continuing.as_ref().map(cells_of) };
@@ -886,6 +886,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
             let mut add = |col: &str, w: Why| rc.why.entry(col.to_owned()).or_default().push((arm, w));
             match &ev.fact {
                 Fact::Move { path, to, .. } => {
+                    if let Some(local) = ev.place_local { moved_places.entry(local).or_default().insert(path.clone()); }
                     add(path, Why::Moved { to: to.clone() });
                     for c in containing(path) {
                         add(&c, Why::FieldMoved { field: path.clone(), to: to.clone() });
@@ -893,7 +894,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
                 }
                 Fact::Init { path, reassign, maybe_had, .. } => add(path, Why::Assigned { reassign: *reassign, maybe_had: *maybe_had }),
                 Fact::Drop { path, how, early_exit, at_reassign, .. } if ev.drop_route != DropRoute::Unwind => add(path, Why::Dropped {
-                    how, early_exit: *early_exit, at_reassign: *at_reassign, route: ev.drop_route,
+                    local: ev.place_local, how, early_exit: *early_exit, at_reassign: *at_reassign, route: ev.drop_route,
                 }),
                 Fact::Borrow { loan, .. } => {
                     for c in loan_cols.get(loan).into_iter().flat_map(|v| v.iter()) {
@@ -910,12 +911,12 @@ fn body_table(b: &BodyFacts) -> BodyTable {
         }
         rows.insert(r.line, rc);
     }
-    let array_lengths = b.columns.iter().filter_map(|c| Some((c.name.clone(), c.array_len?))).collect();
+    let array_lengths = b.columns.iter().filter_map(|c| Some(((c.local, c.name.clone()), c.array_len?))).collect();
     let boxes = b.columns.iter().filter(|c| c.is_box).map(|c| c.name.clone()).collect();
     let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
-    BodyTable { drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    BodyTable { drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]
@@ -935,18 +936,19 @@ mod tests {
     }
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
-        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, display_location: rustc_middle::mir::Location::START, drop_route: DropRoute::Normal, end_successor: None, end_places: vec![], caller_slot: None, transfer_paths: vec![], col: 1, arm, fact, order: (0, 0, 0), site: None }).collect();
+        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, display_location: rustc_middle::mir::Location::START, place_local: None, drop_route: DropRoute::Normal, end_successor: None, end_places: vec![], caller_slot: None, transfer_paths: vec![], col: 1, arm, fact, order: (0, 0, 0), site: None }).collect();
         Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new() }
     }
 
     fn col(name: &str) -> ColumnInfo {
-        ColumnInfo { name: name.into(), root: name.split('.').next().unwrap().into(), kind: "var", copy: false, needs_drop: true, is_box: false, array_len: None, hidden_fields: false }
+        ColumnInfo { local: rustc_middle::mir::Local::from_usize(1), name: name.into(), root: name.split('.').next().unwrap().into(), kind: "var", copy: false, needs_drop: true, is_box: false, array_len: None, hidden_fields: false }
     }
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
             drop_holders: Default::default(),
             closure_result_loans: Default::default(),
+            bindings: Default::default(),
             aggregate_loans: Default::default(),
             issued_operand_loans: Default::default(),
             returned_operand_loans: Default::default(),
@@ -955,7 +957,7 @@ mod tests {
             inline_holder_ends: vec![],
             evaluated_spans: Vec::new(),
             constructed_vecs: Default::default(),
-            def_id: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(),
+            def_id: def(1),
             take_calls: BTreeSet::new(),
             skipped_closure_returns: Default::default(),
             func: func.into(),
@@ -1024,77 +1026,84 @@ mod tests {
         ])
     }
 
+    fn def(index: usize) -> DefId {
+        DefId { krate: rustc_hir::def_id::LOCAL_CRATE, index: rustc_hir::def_id::DefIndex::from_usize(index) }
+    }
+
+    fn start(index: usize) -> FunctionStart { FunctionStart { body: def(index), line: 1 } }
+
     fn table() -> StateTable {
-        let other = body("g", 1, &["y"], vec![row(2, &[("y", "own")], &[], Vec::new())]);
+        let mut other = body("g", 1, &["s"], vec![row(2, &[("s", "moved")], &[], Vec::new())]);
+        other.def_id = def(2);
         StateTable::from_facts(&CrateFacts { version: 2, bodies: vec![main_body(), other], errors: Vec::new() })
     }
 
     #[test]
     fn a_row_with_state_reads_its_own() {
-        let c = table().cell(1, "s", 3, 0).unwrap();
+        let c = table().cell(start(1), "s", 3, 0).unwrap();
         assert_eq!((c.init, c.lent.len(), c.from_row), (Init::Own, 1, 3));
         assert_eq!(c.why, vec![Why::Lent { loan: 0 }]);
     }
 
     #[test]
     fn a_row_without_state_carries_the_row_above() {
-        let c = table().cell(1, "s", 4, 0).unwrap();
+        let c = table().cell(start(1), "s", 4, 0).unwrap();
         assert_eq!((c.init, c.from_row, c.lent.len()), (Init::Own, 3, 1));
         assert!(c.why.is_empty(), "the carried row's events are not this row's");
     }
 
     #[test]
     fn the_floor_bounds_the_carry_and_an_inverted_floor_is_none() {
-        assert_eq!(table().cell(1, "s", 4, 4), None);
-        assert_eq!(table().cell(1, "s", 4, 5), None);
+        assert_eq!(table().cell(start(1), "s", 4, 4), None);
+        assert_eq!(table().cell(start(1), "s", 4, 5), None);
     }
 
     #[test]
     fn a_dropped_column_is_not_revived() {
         // Row 10 has a state without s: s is out of scope, not row 8's.
-        assert_eq!(table().cell(1, "s", 10, 0), None);
-        assert_eq!(table().cell(1, "s", 11, 0), None);
+        assert_eq!(table().cell(start(1), "s", 10, 0), None);
+        assert_eq!(table().cell(start(1), "s", 11, 0), None);
     }
 
     #[test]
     fn arms_have_their_own_state_and_events() {
         let t = table();
-        assert_eq!(t.arms(1, "s", 8).len(), 2);
-        let a0 = t.cell_in_arm(1, "s", 8, 0).unwrap();
-        let a1 = t.cell_in_arm(1, "s", 8, 1).unwrap();
+        assert_eq!(t.arms(start(1), 8).len(), 2);
+        let a0 = t.cell_in_arm(start(1), "s", 8, 0).unwrap();
+        let a1 = t.cell_in_arm(start(1), "s", 8, 1).unwrap();
         assert_eq!((a0.init, a1.init), (Init::Moved, Init::Own));
         assert_eq!(a0.why, vec![Why::Moved { to: "f()".into() }]);
         assert!(a1.why.is_empty(), "the other arm's move is not this arm's");
-        let row = t.cell(1, "s", 8, 0).unwrap();
+        let row = t.cell(start(1), "s", 8, 0).unwrap();
         assert_eq!((row.init, row.cause), (Init::Maybe, Some("moved")));
     }
 
     #[test]
     fn a_field_move_explains_the_struct() {
-        let c = table().cell(1, "p", 6, 0).unwrap();
+        let c = table().cell(start(1), "p", 6, 0).unwrap();
         assert_eq!(c.init, Init::Partly);
         assert_eq!(c.why, vec![Why::FieldMoved { field: "p.a".into(), to: "x".into() }]);
     }
 
     #[test]
     fn loan_ends_keep_their_edge() {
-        let c = table().cell(1, "s", 5, 0).unwrap();
+        let c = table().cell(start(1), "s", 5, 0).unwrap();
         assert_eq!(c.why, vec![Why::LoanEnded { loan: 0, cause: "no further use".into(), to_line: 6, to_col: 5 }]);
     }
 
     #[test]
     fn two_fns_on_one_line_keep_their_own_columns() {
         let t = table();
-        assert_eq!(t.cell(1, "y", 2, 0).map(|c| c.init), Some(Init::Own));
-        assert_eq!(t.cell(1, "s", 2, 0).map(|c| c.init), Some(Init::Own));
-        assert!(t.has_fn(1) && !t.has_fn(2));
+        assert_eq!(t.cell(start(2), "s", 2, 0).map(|c| c.init), Some(Init::Moved));
+        assert_eq!(t.cell(start(1), "s", 2, 0).map(|c| c.init), Some(Init::Own));
+        assert!(t.has_fn(start(1)) && t.has_fn(start(2)));
     }
 
     #[test]
     fn outside_the_body_or_unknown() {
         let t = table();
-        assert_eq!(t.cell(1, "s", 12, 0), None);
-        assert_eq!(t.cell(1, "t", 3, 0), None);
-        assert_eq!(t.cell(2, "s", 3, 0), None);
+        assert_eq!(t.cell(start(1), "s", 12, 0), None);
+        assert_eq!(t.cell(start(1), "t", 3, 0), None);
+        assert_eq!(t.cell(start(3), "s", 3, 0), None);
     }
 }
