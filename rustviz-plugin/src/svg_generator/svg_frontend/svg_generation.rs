@@ -1823,6 +1823,19 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
             ev.push(event);
         }
     }
+    for (row, event) in &visualization_data.preprocess_external_events {
+        if visualization_data.row_layout.transfer_stack.contains(&event.get_id()) {
+            let arrows = visualization_data.event_line_map.entry(*row).or_default();
+            if !arrows.iter().any(|e| e.get_id() == event.get_id()) {
+                arrows.push(event.clone());
+            }
+        }
+    }
+    for arrows in visualization_data.event_line_map.values_mut() {
+        if arrows.len() > 1 {
+            visualization_data.row_layout.order_transfers(arrows);
+        }
+    }
     let mut skippable_ev: HashSet<usize> = HashSet::new();
     // Arrows of the top level's line map that an arm holds and lists in
     // its own line map, so the arm draws them (a borrow end moved into
@@ -2033,7 +2046,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
             let res = line_ev.map(|evs| evs.iter()
                 .filter(|e| !arm_drawn.contains(&e.get_id()))
                 .cloned().collect::<Vec<_>>());
-            let ordered = res.as_deref().and_then(|ev| ordered_store_rows(ev, &visualization_data.state_table.store_order));
+            let ordered = res.as_deref().and_then(|ev| {
+                if ev.iter().any(|e| visualization_data.row_layout.transfer_stack.contains(&e.get_id())) {
+                    return Some(ev.iter().cloned().map(|e| vec![e]).collect());
+                }
+                ordered_store_rows(ev, &visualization_data.state_table.store_order)
+            });
             let ex = match res {
                 Some(ev) if ordered.is_some() => {
                     let mut row = final_line_num;

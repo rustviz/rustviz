@@ -5796,7 +5796,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         Fact::BorrowEnd { loan, .. } if taken_at(loan).is_some_and(|issue| !ldom(issue, e.location)) => Some(loan),
         _ => None,
     }).collect();
+    let value_flow = super::value_flow::collect(tcx, body, &cx.names, &runs, &cx.rows.event_row);
     BodyFacts {
+        value_flow,
         residual_drops,
         short_call_borrows,
         drop_holders,

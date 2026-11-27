@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 // (basic-block RPO index, statement index, effect phase), as in Ev::order.
 // Releasing the value in a slot precedes the write at the same location.
-type Point = (usize, usize, i8);
+type Point = (usize, usize, i8, usize);
 const BEFORE_STORE: i8 = -1;
 
 fn normal_facts(row: &Row) -> impl Iterator<Item = &Ev> + Clone {
@@ -23,7 +23,7 @@ fn field_store_search_across_rows(row: &Row, straight_line: bool) -> bool {
 }
 
 fn fact_point(f: &Ev) -> Point {
-    (f.order.0, f.order.1, f.order.2 as i8)
+    (f.order.0, f.order.1, f.order.2 as i8, 0)
 }
 
 fn end(e: &E) -> bool {
@@ -40,6 +40,7 @@ struct Order<'a, 'tcx> {
     ends: &'a BTreeMap<usize, Vec<usize>>,
     issues: &'a BTreeMap<usize, usize>,
     closure_arrivals: &'a BTreeMap<usize, Location>,
+    transfers: &'a BTreeMap<usize, crate::facts::value_flow::Site>,
 }
 
 fn place(r: &ResourceTy) -> Option<String> {
@@ -117,9 +118,13 @@ impl Order<'_, '_> {
     }
 
     fn point(&self, ev: &E, row: &Row, straight_line: bool) -> Option<Point> {
+        if let Some(site) = self.transfers.get(&ev.get_id()).filter(|s| s.row == row.line) {
+            let rank = self.body.basic_blocks.reverse_postorder().iter().position(|b| *b == site.at.block)?;
+            return Some(site.order(rank));
+        }
         if let Some(at) = self.closure_arrivals.get(&ev.get_id()) {
             let rank = self.body.basic_blocks.reverse_postorder().iter().position(|b| *b == at.block)?;
-            return Some((rank, at.statement_index, 1));
+            return Some((rank, at.statement_index, 1, 0));
         }
         if let Some(id) = self.issues.get(&ev.get_id()) {
             return row.facts.iter().find(|f| matches!(f.fact, Fact::Borrow { loan, .. } if loan == *id)).map(fact_point);
@@ -131,7 +136,7 @@ impl Order<'_, '_> {
             let tests = self.facts.tests_of(owner);
             let switch = *tests.first().filter(|_| tests.len() == 1)?;
             let rank = blocks.iter().position(|&bb| bb == switch.block)?;
-            return Some((rank, switch.statement_index, 0));
+            return Some((rank, switch.statement_index, 0, 0));
         }
         let is_end = end(ev);
         // A whole-value store also replaces each field. The displayed
@@ -194,7 +199,7 @@ impl Order<'_, '_> {
                         return Some(fact_point(first));
                     }
                 }
-                return Some((store.order.0, store.order.1, BEFORE_STORE));
+                return Some((store.order.0, store.order.1, BEFORE_STORE, 0));
             }
         }
         if matches!(ev, E::StaticBorrow { .. } | E::MutableBorrow { .. }) {
@@ -280,7 +285,7 @@ impl Order<'_, '_> {
                         !new.contains(id) && self.ends.get(&ev.get_id()).is_none_or(|ids| ids.contains(id)) && self.loan(*id).is_some_and(|l| names_lender(lender,l))))
                 });
                 if let Some(store) = stores.next().filter(|_| stores.next().is_none()) {
-                    return Some((store.order.0, store.order.1, BEFORE_STORE));
+                    return Some((store.order.0, store.order.1, BEFORE_STORE, 0));
                 }
                 let via_holder = |f: &Ev| {
                     let Fact::BorrowEnd { loan, holder: via, .. } = &f.fact else {
@@ -361,7 +366,7 @@ impl Order<'_, '_> {
                 let mut deaths = self.facts.rows.iter().flat_map(normal_facts).filter(|f| matches!(&f.fact,
                     Fact::ScopeEnd { path, .. } | Fact::Drop { path, at_reassign: false, .. } if path == self.storage_of(ro.name())));
                 if let Some(death) = deaths.next().map(|f| f.order).filter(|d| deaths.all(|f| f.order == *d)) {
-                    return Some((death.0, death.1, death.2 as i8));
+                    return Some((death.0, death.1, death.2 as i8, 0));
                 }
                 // At a diverging call the walk draws unwind scope exits.
                 // MIR has no StorageDead on a normal return path there.
@@ -372,6 +377,7 @@ impl Order<'_, '_> {
                         b,
                         data.statements.len(),
                         3,
+                        0,
                     ))
                 });
                 let at = exits.next()?;
@@ -444,7 +450,7 @@ impl Order<'_, '_> {
             sites
         };
         let at = sites[0].order;
-        sites.iter().all(|e| e.order == at).then_some((at.0, at.1, at.2 as i8))
+        sites.iter().all(|e| e.order == at).then_some((at.0, at.1, at.2 as i8, 0))
     }
 
     /// The fact source of a reborrow can differ from the displayed
@@ -550,7 +556,7 @@ impl Order<'_, '_> {
             }
         });
         let first = reads.next()?;
-        reads.all(|f| f.order == first.order).then_some((first.order.0, first.order.1, first.order.2 as i8))
+        reads.all(|f| f.order == first.order).then_some((first.order.0, first.order.1, first.order.2 as i8, 0))
     }
 
     fn before(&self, a: &E, b: &E, x: Option<Point>, y: Option<Point>, row: &Row) -> bool {
@@ -745,7 +751,7 @@ impl Order<'_, '_> {
             let Some(row) = self.facts.rows.iter().find(|r| r.line == *line) else {
                 continue;
             };
-            let Some((rank, at, _)) = self.point(branch, row, false) else {
+            let Some((rank, at, _, _)) = self.point(branch, row, false) else {
                 continue;
             };
             let blocks = self.body.basic_blocks.reverse_postorder();
@@ -1142,10 +1148,12 @@ impl Order<'_, '_> {
             let has_boundary =
                 indices.iter().any(|&i| end(&events[i].1) || matches!(events[i].1, E::OwnerDropAtReassign { .. })
                     || matches!(&events[i].1, E::GoOutOfScope { ro, .. } if self.facts.bindings.columns.get(ro.name()).is_some_and(|ls| ls.len() > 1)));
-            if !has_boundary
-                && !normal_facts(row).any(|f| matches!(f.fact, Fact::Repoint { .. }))
-                && !normal_facts(row)
-                    .any(|f| matches!(f.fact,Fact::Borrow{loan,..} if self.activations.contains_key(&loan)))
+            let exact = |e: &E| self.transfers.get(&e.get_id()).is_some_and(|site| site.row == line);
+            let has_repoint = normal_facts(row).any(|f| matches!(f.fact, Fact::Repoint { .. }));
+            let has_activation = normal_facts(row).any(|f| matches!(f.fact, Fact::Borrow{loan,..} if self.activations.contains_key(&loan)));
+            let ordinary_transfers = !has_boundary && !has_repoint && !has_activation
+                && indices.iter().filter(|&&i| exact(&events[i].1)).take(2).count() == 2;
+            if !has_boundary && !ordinary_transfers && !has_repoint && !has_activation
             {
                 continue;
             }
@@ -1193,7 +1201,26 @@ impl Order<'_, '_> {
                     if end(a) && end(b) && points[i].is_some() && points[i] == points[j] && gives_back_to(a, b) {
                         layout.same_dot.entry(ids.1).or_default().push(ids.0);
                     }
-                    if self.before(a, b, points[i], points[j], row) {
+                    let (from, to) = endpoints(a);
+                    let (later_from, later_to) = endpoints(b);
+                    let caller = matches!(to, ResourceTy::Caller) && matches!(later_to, ResourceTy::Caller);
+                    let call_source = |source: &ResourceTy| source.extract_rap().is_some_and(|r| r.is_fn());
+                    let same_local = match (to, later_from) {
+                        (ResourceTy::Value(to), ResourceTy::Value(from)) =>
+                            to.is_copy_owner() && to.owner_local().is_some() && to.owner_local() == from.owner_local(),
+                        _ => false,
+                    };
+                    let exact_order = ordinary_transfers && exact(a) && exact(b) && (related(a, b) || caller)
+                        && points[i].zip(points[j]).is_some_and(|(x, y)| self.earlier(x, y));
+                    if exact_order {
+                        layout.transfer_order.insert(ids);
+                        if (caller && (call_source(from) || call_source(later_from)))
+                            || (same_local && call_source(from) && call_source(later_to))
+                        {
+                            layout.transfer_stack.extend([ids.0, ids.1]);
+                        }
+                    }
+                    if exact_order || self.before(a, b, points[i], points[j], row) {
                         dependencies.insert(ids);
                         layout.dependencies.insert(ids);
                         if end(a) && end(b) {
@@ -1241,13 +1268,14 @@ pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
                     return None;
                 };
                 let rank = visitor.mir_body.basic_blocks.reverse_postorder().iter().position(|b| *b == at.block)?;
-                Some((index, (rank, at.statement_index, 0)))
+                Some((index, (rank, at.statement_index, 0, 0)))
             })
             .collect(),
         tcx: visitor.tcx,
         body: visitor.mir_body,
         facts,
         spans: &visitor.event_spans,
+        transfers: &visitor.transfer_sites,
         field_overwrite_ends: &visitor.field_overwrite_ends,
         ends: &visitor.end_loans,
         issues: &visitor.aggregate_issues,
@@ -1341,6 +1369,10 @@ pub struct RowLayout {
     /// Both column dots and the connecting arrow describe the same aggregate operand.
     pub(crate) pattern_payloads: BTreeMap<usize, (String, &'static str)>,
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
+    pub(crate) returned_call_titles: BTreeMap<usize, String>,
+    pub(crate) argument_results: BTreeSet<usize>,
+    pub(crate) transfer_stack: BTreeSet<usize>,
+    transfer_order: BTreeSet<(usize, usize)>,
     pub(crate) closure_result_holders: BTreeSet<u64>,
     pub(crate) stored_lender_loans: BTreeMap<u64, BTreeSet<usize>>,
     pub(crate) stored_loans: BTreeMap<usize, StoredLoan>,
@@ -1375,6 +1407,10 @@ impl RowLayout {
         self.arm_points.append(&mut other.arm_points);
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.aggregate_titles.append(&mut other.aggregate_titles);
+        self.returned_call_titles.append(&mut other.returned_call_titles);
+        self.argument_results.append(&mut other.argument_results);
+        self.transfer_stack.append(&mut other.transfer_stack);
+        self.transfer_order.append(&mut other.transfer_order);
         self.closure_result_holders.append(&mut other.closure_result_holders);
         self.stored_lender_loans.append(&mut other.stored_lender_loans);
         self.restored.append(&mut other.restored);
@@ -1429,6 +1465,17 @@ impl RowLayout {
                     history[i].1 = event;
                 }
             }
+        }
+    }
+
+    pub(crate) fn order_transfers(&self, events: &mut Vec<E>) {
+        if self.transfer_order.is_empty() {
+            return;
+        }
+        let order = dependency_order(events.len(), |i, j|
+            self.transfer_order.contains(&(events[i].get_id(), events[j].get_id())));
+        if order.iter().copied().ne(0..order.len()) {
+            *events = order.iter().map(|&i| events[i].clone()).collect();
         }
     }
 

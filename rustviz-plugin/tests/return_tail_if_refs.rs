@@ -1,7 +1,7 @@
-// #674: references returned by the branches of a tail `if`. A shared
-// reference is copied to the caller; a `&mut` one is moved, on that
-// path only. Neither owns anything, so nothing is dropped on the
-// paths that didn't return it.
+// #674: each arm of the tail `if` can return a reference. In
+// pick_mut the selected arm reborrows through its mutable input.
+// The borrow goes on in the returned reference on that path.
+// Neither branch drops the value it references.
 fn longer<'a>(x: &'a str, y: &'a str) -> &'a str {
     if x.len() > y.len() { x } else { y }
 }

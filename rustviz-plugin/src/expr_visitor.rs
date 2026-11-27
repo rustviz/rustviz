@@ -17,6 +17,7 @@ use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
 use rustc_borrowck::consumers::BodyWithBorrowckFacts;
 use crate::facts::schema::{BodyFacts, LoanInfo};
+use crate::facts::value_flow::{Call, CallSlots, OperandEffect, Read, Site, Source};
 use crate::ref_flow::holder_branch_bodies;
 
 
@@ -432,6 +433,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub facts: Option<&'a crate::facts::BodyFacts>,
   pub tcx: TyCtxt<'tcx>, // type context
   pub event_spans: HashMap<usize, rustc_span::Span>,
+  pub(crate) transfer_sites: BTreeMap<usize, Site>,
+  argument_slots: BTreeMap<usize, (rustc_middle::mir::Location, usize)>,
   /// Ends drawn for the previous fields of an overwritten whole value.
   pub field_overwrite_ends: BTreeSet<usize>,
   pub emitting_expr: Option<&'tcx Expr<'tcx>>,
@@ -599,7 +602,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // never the receiver: whoever takes the built value (the variable it
   // is bound to, or the call it is passed to) is, so these events are
   // retargeted there (#768).
-  pub ctor_arg_ids: HashMap<rustc_hir::HirId, (usize, usize)>,
+  pub ctor_arg_ids: HashMap<rustc_hir::HirId, (usize, usize, u64)>,
 
   // Ids of the GoOutOfScope events emitted at a `return` inside a
   // branch for the values still owned there (#363). They make their
@@ -1052,6 +1055,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `match_rhs` draws that move into the variable `r?` is bound to;
   // the Move events made meanwhile carry it.
   pub try_move: Option<TryMove>,
+  try_field_moves: BTreeSet<usize>,
+  try_result_titles: BTreeMap<usize, String>,
   // Each such `?` expression whose move is drawn: `Some(id)` if
   // `note_try` drew it as a move into the `?` alone (event `id`), which
   // `match_rhs` replaces with a move to the variable if `r?` is bound
@@ -1263,6 +1268,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       body_facts,
       effects,
       event_spans: HashMap::new(),
+      transfer_sites: BTreeMap::new(),
+      argument_slots: BTreeMap::new(),
       field_overwrite_ends: BTreeSet::new(),
       emitting_expr: None,
       end_loans: BTreeMap::new(),
@@ -1404,6 +1411,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       break_assigns: Vec::new(),
       loop_breaks: Vec::new(),
       try_move: None,
+      try_field_moves: BTreeSet::new(),
+      try_result_titles: BTreeMap::new(),
       try_moves: HashMap::new(),
       tail_values: HashSet::new(),
       tail_plain: HashSet::new(),
@@ -1454,44 +1463,80 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     needs_drop_in(self.tcx, ty, rustc_middle::ty::TypingEnv::fully_monomorphized())
   }
 
-  /// `try_expr` is `r?` (a `MatchSource::TryDesugar` match) with `r` a
-  /// variable, or a field of one, that has a column and isn't `Copy`:
-  /// `Try::branch(r)` takes it by value, so the `?` moves it (#652).
-  /// Its column, which `Try` type it is, and `r`.
-  pub fn try_moved_place(&self, try_expr: &'tcx Expr<'tcx>) -> Option<(ResourceAccessPoint, TryMove, &'tcx Expr<'tcx>)> {
-    fn is_place(e: &Expr) -> bool {
-      match e.kind {
-        ExprKind::Path(QPath::Resolved(None, p)) => matches!(p.res, Res::Local(_)),
-        ExprKind::Field(base, _) => is_place(base),
-        _ => false,
+  /// The value actually consumed by the call to `Try::branch`.
+  pub(crate) fn try_moved_place(&self, try_expr: &Expr<'_>) -> Option<(ResourceTy, TryMove, Site)> {
+    let (read, kind) = self.body_facts?.value_flow.try_input(try_expr.span)?;
+    let OperandEffect::Move(source) = &read.effect else { return None };
+    let operand = try_operand(try_expr).unwrap_or(try_expr);
+    let from = self.transfer_source(source, operand)?;
+    Some((from, *kind, read.site))
+  }
+
+  fn mir_callee(&self, expr: &Expr<'_>) -> Option<rustc_hir::def_id::DefId> {
+    let typeck = self.tcx.typeck(expr.hir_id.owner);
+    typeck.type_dependent_def_id(expr.hir_id).or_else(|| {
+      let ExprKind::Call(f, _) = expr.kind else { return None };
+      match typeck.expr_ty(f).kind() {
+        rustc_middle::ty::FnDef(def, _) => Some(*def),
+        _ => None,
       }
-    }
-    let ExprKind::Match(scrutinee, _, rustc_hir::MatchSource::TryDesugar(_)) = try_expr.kind else { return None };
-    let ExprKind::Call(_, [operand]) = scrutinee.kind else { return None };
-    if !is_place(operand) || operand.span.from_expansion() {
-      return None;
-    }
-    let typeck = self.tcx.typeck(operand.hir_id.owner);
-    if let ExprKind::Field(base, _) = operand.kind {
-      // A union is one opaque column.
-      if typeck.expr_ty(base).is_union() {
+    })
+  }
+
+  pub(crate) fn mir_call(&self, expr: &Expr<'_>) -> Option<Call> {
+    self.body_facts?.value_flow.call(expr.span, self.mir_callee(expr))
+  }
+
+  pub(crate) fn mir_constructor(&self, expr: &Expr<'_>) -> bool {
+    self.body_facts.is_some_and(|b| b.value_flow.constructor(expr.span))
+  }
+
+  /// Resolve the column from the MIR place. When the source spells an
+  /// index explicitly, retain that spelling as a label on the proved
+  /// column, since MIR's dynamic index is only a temporary local.
+  fn transfer_source(&self, source: &Source, expr: &Expr<'_>) -> Option<ResourceTy> {
+    if source.guard {
+      let ExprKind::Path(qpath) = &expr.kind else { return None };
+      let rustc_hir::def::Res::Local(id) = self.tcx.typeck(expr.hir_id.owner).qpath_res(qpath, expr.hir_id) else {
         return None;
+      };
+      return self.raps.binding(id).map(|rd| ResourceTy::Value(rd.rap.clone()));
+    }
+    if source.downcast {
+      return None;
+    }
+    if let Some(span) = source.temporary {
+      let mut base = expr;
+      while let ExprKind::Field(inner, _) = base.kind {
+        base = inner;
       }
-    }
-    let ty = typeck.expr_ty(operand);
-    if self.ty_is_copy(ty, operand.hir_id.owner) {
+      if base.span.with_parent(None) == span {
+        return self.temp_cols.get(&base.hir_id).map(|r| ResourceTy::Value(r.clone()));
+      }
       return None;
     }
-    let ResourceTy::Value(rap) = get_rap(operand, &self.tcx, &self.raps) else { return None };
-    if rap.is_fn() {
-      return None;
+    let written_place = if let ExprKind::AddrOf(_, _, place) = expr.kind { place } else { expr };
+    let rap = |name: &str| self.raps.place(source.local, name).or_else(|| self.raps.get(name)).map(|r| r.rap.clone());
+    if let Some(through) = &source.through {
+      let via = rap(through).or_else(|| rap(&source.column))?;
+      if source.deref {
+        return Some(ResourceTy::Deref(via));
+      }
+      let ty = self.tcx.typeck(expr.hir_id.owner).expr_ty(expr);
+      let label = if source.element { self.place_label(written_place, via.name()) } else { source.label.clone() };
+      return Some(ResourceTy::DerefField(via, label, PlaceWrite::Update, self.field_holds(ty, expr.hir_id.owner)));
     }
-    let kind = match ty.ty_adt_def() {
-      Some(adt) if self.tcx.is_diagnostic_item(rustc_span::sym::Result, adt.did()) => TryMove::Result,
-      Some(adt) if self.tcx.is_diagnostic_item(rustc_span::sym::Option, adt.did()) => TryMove::Option,
-      _ => TryMove::Other,
-    };
-    Some((rap, kind, operand))
+    let r = rap(&source.column)?;
+    if let Some(base) = source.container.as_deref().filter(|_| source.deref).and_then(rap) {
+      Some(ResourceTy::Deref(base))
+    } else if source.element {
+      let label = self.place_label(written_place, r.name());
+      Some(ResourceTy::Index(r, label, Default::default()))
+    } else if let Some(r) = rap(&source.label) {
+      Some(ResourceTy::Value(r))
+    } else {
+      Some(ResourceTy::Index(r, source.label.clone(), Default::default()))
+    }
   }
 
   /// True iff `ty` is not `Copy` but has nothing to drop (no drop glue):
@@ -1952,7 +1997,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds a function RAP
   pub fn add_fn(&mut self, name: String) {
-    self.add_rap(ResourceAccessPoint::Function(Function { callable_result: false, name: name, hash: self.rap_hashes as u64, drops_arg: Default::default(), rc_call: None, cast_to: None, inside: None }), self.current_scope, true);
+    self.add_rap(ResourceAccessPoint::Function(Function { mir_result: false, mir_constructor: false, callable_result: false, name: name, hash: self.rap_hashes as u64, drops_arg: Default::default(), rc_call: None, cast_to: None, inside: None }), self.current_scope, true);
   }
 
   /// Sibling declarations and their fields share the original header group.
@@ -2342,11 +2387,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     };
     // `let x = *b;`, with b a Box drawn as its payload's part columns:
     // the parts go with the payload (#898); x's own parts get it.
+    let try_move = matches!(event, ExternalEvent::Move { via_try: Some(_), .. });
+    let move_source = !try_move || self.try_field_moves.insert(id);
     if let (false, Some(b)) = (is_copy, box_payload_of(from)) {
       if *self.unique_id <= id {
         *self.unique_id = id + 1;
       }
-      self.move_struct_fields_away(line_num, b.name());
+      if move_source {
+        self.move_struct_fields_away(line_num, b.name());
+      }
       if let Some(to_name) = struct_name(to) {
         self.bind_struct_fields(line_num, &to_name);
       }
@@ -2359,6 +2408,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // handing us the event, so start past the event's own id.
     if *self.unique_id <= id {
       *self.unique_id = id + 1;
+    }
+    if try_move {
+      // Try::branch consumes the input. Its output can have entirely
+      // different fields, even when the types happen to be the same.
+      if let Some(name) = from_struct.as_ref().filter(|_| move_source) {
+        self.move_struct_fields_away(line_num, name);
+      }
+      if let Some(name) = &to_struct {
+        self.bind_struct_fields(line_num, name);
+      }
+      return;
     }
     if let (Some(from_name), Some(to_name)) = (&from_struct, &to_struct) {
       self.transfer_ref_fields(line_num, from_name, to_name, is_copy);
@@ -2543,80 +2603,35 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// passed to): a constructor is never an actor (#768). True if any
   /// event was moved.
   pub fn retarget_ctor_arg_events(&mut self, ctor: &'tcx Expr<'tcx>, new_to: ResourceTy) -> bool {
-    let Some(&(lo, hi)) = self.ctor_arg_ids.get(&ctor.hir_id) else { return false };
-    let is_ctor_fn = |t: &ResourceTy| matches!(t,
-      ResourceTy::Value(ResourceAccessPoint::Function(f))
-        if f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())));
-    let mut taken: Vec<(usize, ExternalEvent)> = Vec::new();
-    self.preprocessed_events.retain(|(l, e)| {
-      // A variable's or a call's result's move or copy (a literal has
-      // no source to draw from).
-      let hit = (lo..hi).contains(&e.get_id()) && match e {
-        ExternalEvent::Move { from, to, .. } | ExternalEvent::Copy { from, to, .. } =>
-          is_ctor_fn(to) && from.extract_rap().is_some(),
-        _ => false,
-      };
-      if hit { taken.push((*l, e.clone())); }
-      !hit
-    });
-    // A reference variable put into a value that has a holder: the
-    // holder's borrow is drawn from the lender, so the copy of the
-    // reference itself isn't drawn. Returned to the caller it is. A
-    // `&mut` moved in (`Some(r)`: no reborrow for a generic field) is
-    // drawn too: r can't be used afterwards (#1128).
+    let Some(&(lo, hi, hash)) = self.ctor_arg_ids.get(&ctor.hir_id) else { return false };
+    let mut taken = Vec::new();
+    let returned = matches!(new_to, ResourceTy::Caller);
+    let mut returned_parts = |id| returned && (self.try_result_titles.contains_key(&id)
+      || self.row_layout.returned_call_titles.contains_key(&id));
+    take_ctor_arg_events_in(self.preprocessed_events, &(lo..hi), hash, &mut taken, &mut returned_parts);
     let any = !taken.is_empty();
-    if !matches!(new_to, ResourceTy::Caller) {
-      taken.retain(|(_, e)| match e {
-        ExternalEvent::Move { from, .. } => !from.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref()),
-        ExternalEvent::Copy { from, .. } => !from.extract_rap().is_some_and(|r| r.is_ref()),
-        _ => true,
-      });
-    }
-    for (l, mut e) in taken {
-      match &mut e {
-        // The receiver holds the built value, not a copy of `from`
-        // (`y = Fruit::Apple(z);`, #866).
-        ExternalEvent::Copy { to, into_ctor, .. } => {
+    for (line, mut event) in taken {
+      match &mut event {
+        ExternalEvent::Copy { from, to, into_ctor, .. } => {
+          if !returned && from.extract_rap().is_some_and(|r| r.is_ref()) {
+            continue;
+          }
           *into_ctor = Some(to.name());
           *to = new_to.clone();
         }
-        ExternalEvent::Move { to, .. } => *to = new_to.clone(),
-        _ => {}
-      }
-      self.add_external_event(l, e);
-    }
-    // Those already put in a branch: `q = if c { let r = &a; Some(r) }
-    // else { .. };` pairs the branch's value with q after the branch
-    // was visited and its events were put in it (#1455). They come out
-    // of it, and are redrawn into `new_to` where q's value arrives (q's
-    // column isn't split for that conditional).
-    let mut nested = Vec::new();
-    for (_, e) in self.preprocessed_events.iter_mut() {
-      if let ExternalEvent::Branch { branches, .. } = e {
-        for b in branches.iter_mut() {
-          take_ctor_arg_events_in(&mut b.e_data, lo..hi, &mut nested);
-        }
-      }
-    }
-    let any = any || !nested.is_empty();
-    for (l, mut e) in nested {
-      let keep = matches!(new_to, ResourceTy::Caller) || match &e {
-        ExternalEvent::Move { from, .. } => !from.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref()),
-        ExternalEvent::Copy { from, .. } => !from.extract_rap().is_some_and(|r| r.is_ref()),
-        _ => true,
-      };
-      if !keep {
-        continue;
-      }
-      match &mut e {
-        ExternalEvent::Copy { to, into_ctor, .. } => {
-          *into_ctor = Some(to.name());
+        ExternalEvent::Move { from, to, id, via_try, .. } => {
+          if let Some(kind) = via_try.filter(|_| returned) {
+            let title = self.try_result_titles.get(id).cloned().unwrap_or_else(|| {
+              crate::svg_generator::hover_messages::event_dot_move_into_try(
+                &from.name(), None, kind, from.extract_rap().is_some_and(|r| r.holds_value()))
+            });
+            self.row_layout.aggregate_titles.insert(*id, title);
+          }
           *to = new_to.clone();
         }
-        ExternalEvent::Move { to, .. } => *to = new_to.clone(),
-        _ => {}
+        _ => unreachable!(),
       }
-      self.add_external_event(l, e);
+      self.add_external_event(line, event);
     }
     any
   }
@@ -2632,16 +2647,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// that were drawn into the constructor `callee` while its arguments
   /// were visited: `match_struct_field` draws them into the fields
   /// (#1197). Those into a nested constructor stay for it.
-  pub fn discard_ctor_arg_events(&mut self, ctor: &'tcx Expr<'tcx>, callee: &'tcx Expr<'tcx>) {
-    let Some(&(lo, hi)) = self.ctor_arg_ids.get(&ctor.hir_id) else { return };
-    let Some(key) = hirid_to_var_name(callee.hir_id, &self.tcx).map(|n| fn_key(&n)) else { return };
-    let Some(ctor_rap) = self.raps.get(&key).map(|rd| rd.rap.to_owned()) else { return };
-    self.preprocessed_events.retain(|(_, e)| {
-      !((lo..hi).contains(&e.get_id()) && match e {
-        ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. } => *t == ctor_rap,
-        _ => false,
-      })
-    });
+  pub fn discard_ctor_arg_events(&mut self, ctor: &'tcx Expr<'tcx>) {
+    if let Some(&(lo, hi, hash)) = self.ctor_arg_ids.get(&ctor.hir_id) {
+      take_ctor_arg_events_in(self.preprocessed_events, &(lo..hi), hash, &mut Vec::new(), &mut |_| false);
+    }
   }
 
   pub fn bind_from_anonymous(&mut self, line_num: usize, lhs: ResourceTy) {
@@ -4564,15 +4573,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     drew_any
   }
 
-  /// Is `arg` the argument of a call to `std::mem::drop`?
-  fn is_mem_drop_arg(&self, arg: &Expr<'tcx>) -> bool {
-    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return false };
-    let ExprKind::Call(callee, _) = call.kind else { return false };
-    let ExprKind::Path(ref qpath) = callee.kind else { return false };
-    let res = self.tcx.typeck(callee.hir_id.owner).qpath_res(qpath, callee.hir_id);
-    matches!(res, rustc_hir::def::Res::Def(_, def_id) if self.tcx.is_diagnostic_item(rustc_span::sym::mem_drop, def_id))
-  }
-
   /// A write to a place that has no column of its own (`t.0 = …` on a
   /// tuple, `v.last_mut().unwrap().name = …`): the write goes on the
   /// column of the variable the place is reached from, like an element
@@ -5887,22 +5887,113 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// variable. Other elements (literals, calls) have nothing to draw
   /// beyond `lhs` getting its value. A reference element (`[&s]`)
   /// stores a borrow we don't track, so it's left out.
-  /// A call's result (`make()`, `s.len()`; not a constructor, a macro or
-  /// a reference) that is returned to the caller, alone or as an
-  /// element of a returned literal (#792): handed over as `match_rhs`
-  /// draws a call's result going anywhere else.
-  pub fn is_returned_call_result(&self, e: &'tcx Expr<'tcx>) -> bool {
-    !e.span.from_expansion()
-      && match e.kind {
-        ExprKind::Call(callee, _) => !crate::visitor::is_ctor_path(callee, self.tcx.typeck(e.hir_id.owner))
-          && !self.is_copy_literal_value(e),
-        ExprKind::MethodCall(..) => true,
-        // `s + "!"`: a call to `Add::add` (#1351).
-        ExprKind::Binary(..) | ExprKind::Unary(..) => overloaded_value_op(e, &self.tcx).is_some(),
-        _ => false,
+  pub(crate) fn draw_value_receiver(&mut self, receiver: &'tcx Expr<'tcx>, to: ResourceTy) {
+    let Some(read) = self.body_facts.and_then(|b| b.value_flow.read(receiver.span)) else { return };
+    let (source, event) = match &read.effect {
+      OperandEffect::Copy(source) => (source, Evt::Copy),
+      OperandEffect::Move(source) => (source, Evt::Move),
+      OperandEffect::Borrow { .. } => return,
+    };
+    if let Some(from) = self.transfer_source(source, receiver) {
+      self.add_read_transfer(&read, event, to, from);
+    }
+  }
+
+  fn add_transfer(&mut self, mut site: Site, event: Evt, to: ResourceTy, from: ResourceTy) {
+    site.row = self.line_override.unwrap_or(site.row);
+    self.transfer_sites.insert(*self.unique_id, site);
+    let partial = matches!(event, Evt::Move) && matches!(from, ResourceTy::Index(..));
+    self.add_ev(site.row, event, to, from, partial);
+  }
+
+  fn add_read_transfer(&mut self, read: &Read, event: Evt, to: ResourceTy, from: ResourceTy) {
+    if read.exact {
+      self.add_transfer(read.site, event, to, from);
+    } else {
+      self.add_ev(read.site.row, event, to, from, false);
+    }
+  }
+
+  fn add_call_result(&mut self, call: Call, row: usize, event: Evt, to: ResourceTy, from: ResourceTy) {
+    let outgoing = matches!(to, ResourceTy::Caller) || to.extract_rap().is_some_and(|r| r.is_fn());
+    if let ResourceTy::Value(ResourceAccessPoint::Function(f)) = &from {
+      if let Some(path) = self.body_facts.and_then(|b| b.value_flow.returned_result(call))
+        .filter(|_| matches!(event, Evt::Copy))
+      {
+        let title = crate::svg_generator::hover_messages::returned_call_value(f, path);
+        self.row_layout.returned_call_titles.insert(*self.unique_id, title);
       }
-      && !self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_ref()
-      && !self.tcx.typeck(e.hir_id.owner).node_type(e.hir_id).is_unit()
+    }
+    if let Some(mut site) = call.site.filter(|_| outgoing || matches!(&to, ResourceTy::Value(r) if !r.is_member())) {
+      if !outgoing {
+        site.row = row;
+      }
+      self.add_transfer(site, event, to, from);
+    } else {
+      self.add_ev(row, event, to, from, false);
+    }
+  }
+
+  /// The exact call produced a value on its normal successor.
+  pub fn is_returned_call_result(&self, e: &Expr<'_>) -> bool {
+    !e.span.from_expansion()
+      && self.mir_call(e).is_some_and(|call|
+        call.has_result && !call.try_branch && !call.returns_reference && !call.returns_unit)
+  }
+
+  pub(crate) fn return_operand(&mut self, e: &'tcx Expr<'tcx>) {
+    let Some(read) = self.body_facts.and_then(|b| b.value_flow.returned_read(e.span)) else { return };
+    let (source, event) = match &read.effect {
+      OperandEffect::Copy(source) => (source, Evt::Copy),
+      OperandEffect::Move(source) => (source, Evt::Move),
+      OperandEffect::Borrow { source, mutable, .. } => {
+        let Some(from) = self.transfer_source(source, e) else { return };
+        let Some(rap) = from.extract_rap().cloned() else { return };
+        if !*mutable && source.deref && rap.is_ref() && !rap.is_mutref() && matches!(e.kind, ExprKind::Path(..)) {
+          self.add_read_transfer(&read, Evt::Copy, ResourceTy::Caller, ResourceTy::Value(rap));
+          return;
+        }
+        let ty = self.tcx.typeck(e.hir_id.owner).expr_ty_adjusted(e);
+        let Some(pointee) = ty.builtin_deref(true) else { return };
+        let written_place = match &from {
+          ResourceTy::DerefField(_, label, ..) | ResourceTy::Index(_, label, ..) => label.as_str(),
+          _ => source.label.as_str(),
+        };
+        let written_place = written_place.strip_prefix("&mut ").or_else(|| written_place.strip_prefix('&')).unwrap_or(written_place);
+        let place = format!("&{}{written_place}", if *mutable { "mut " } else { "" });
+        let from = if source.string_data || source.raw_pointer || (source.through.is_none() && !source.static_item) {
+          let title = crate::svg_generator::hover_messages::returned_borrow_of(
+            &place, rap.name(), source.string_data, source.raw_pointer, *mutable);
+          self.row_layout.aggregate_titles.insert(*self.unique_id, title);
+          ResourceTy::DerefField(rap, place, PlaceWrite::Update, self.field_holds(pointee, e.hir_id.owner))
+        } else if source.through.is_some() {
+          let place = source.through_element
+            .and_then(|span| self.tcx.sess.source_map().span_to_snippet(span).ok())
+            .map_or(place.clone(), |through| crate::svg_generator::hover_messages::reborrow_place_through(&place, &through));
+          ResourceTy::DerefField(rap, place, PlaceWrite::Update, self.field_holds(pointee, e.hir_id.owner))
+        } else {
+          ResourceTy::Index(rap, place, Default::default())
+        };
+        self.add_read_transfer(&read, Evt::Copy, ResourceTy::Caller, from);
+        return;
+      }
+    };
+    if source.through_element.is_some() {
+      return;
+    }
+    if let Some(mut from) = self.transfer_source(source, e) {
+      if source.element {
+        if let ResourceTy::DerefField(rap, label, ..) = from {
+          from = ResourceTy::Index(rap, label, Default::default());
+        }
+      } else if source.through.is_some() && source.deref {
+        if let ResourceTy::Deref(r) = from {
+          let ty = self.tcx.typeck(e.hir_id.owner).expr_ty(e);
+          from = ResourceTy::DerefField(r, source.label.clone(), PlaceWrite::Update, self.field_holds(ty, e.hir_id.owner));
+        }
+      }
+      self.add_read_transfer(&read, event, ResourceTy::Caller, from);
+    }
   }
 
   /// `*b` with `b` a `Box` variable (`Box<String>`; not a reference):
@@ -6130,6 +6221,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
     match get_rap(expr, &self.tcx, &self.raps) {
       ResourceTy::Anonymous => self.field_access_through_ref(expr).unwrap_or(ResourceTy::Anonymous),
+      ResourceTy::Value(ResourceAccessPoint::Function(mut f)) => {
+        f.mir_result = self.mir_call(expr).is_some_and(|call| call.has_result);
+        f.mir_constructor = self.mir_constructor(expr);
+        ResourceTy::Value(ResourceAccessPoint::Function(f))
+      }
       rty => rty,
     }
   }
@@ -6284,11 +6380,92 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     locals_in(e, ClosureLocals::Skip).iter().any(|m| scope.contains(self.tcx.hir_span(m.id)))
   }
 
-  // add events for arguments in a function call
+  fn redirect_temporary_operand(&mut self, temp: &ResourceAccessPoint, from: &ResourceTy, to: &ResourceTy, read: &Read) -> bool {
+    let target = ResourceTy::Value(temp.clone());
+    let mut candidates = self.preprocessed_events.iter_mut().filter_map(|(row, e)| {
+      match e {
+        ExternalEvent::Move { from: source, to, id, .. } if *source == *from && *to == target => Some((*row, to, *id)),
+        _ => None,
+      }
+    });
+    let Some((row, dest, id)) = candidates.next().filter(|_| candidates.next().is_none()) else { return false };
+    *dest = to.clone();
+    if let Some(arrow) = self.event_line_map.get_mut(&row).into_iter().flatten().find(|event| event.get_id() == id) {
+      if let ExternalEvent::Move { to: dest, .. } = arrow {
+        *dest = to.clone();
+      }
+    }
+    if read.exact {
+      let mut site = read.site;
+      site.row = row;
+      self.transfer_sites.insert(id, site);
+    }
+    true
+  }
+
+  fn call_slots(&self, mut expr: &'tcx Expr<'tcx>) -> CallSlots {
+    let parent = loop {
+      use rustc_hir::Node;
+      let parent = match self.tcx.parent_hir_node(expr.hir_id) {
+        Node::Expr(parent) => parent,
+        Node::Block(block) if block.expr.is_some_and(|tail| tail.hir_id == expr.hir_id) => {
+          let Node::Expr(parent) = self.tcx.parent_hir_node(block.hir_id) else { return CallSlots::default() };
+          expr = parent;
+          continue;
+        }
+        Node::ExprField(field) if field.expr.hir_id == expr.hir_id => {
+          let Node::Expr(parent) = self.tcx.parent_hir_node(field.hir_id) else { return CallSlots::default() };
+          expr = parent;
+          continue;
+        }
+        Node::Arm(arm) if arm.body.hir_id == expr.hir_id => {
+          let Node::Expr(parent) = self.tcx.parent_hir_node(arm.hir_id) else { return CallSlots::default() };
+          expr = parent;
+          continue;
+        }
+        _ => return CallSlots::default(),
+      };
+      match parent.kind {
+        ExprKind::DropTemps(_) | ExprKind::Cast(..) | ExprKind::Tup(_) | ExprKind::Array(_) => expr = parent,
+        ExprKind::If(_, yes, no) if yes.hir_id == expr.hir_id || no.is_some_and(|no| no.hir_id == expr.hir_id) => expr = parent,
+        ExprKind::Break(destination, _) => {
+          let Some(target) = destination.target_id.ok() else { return CallSlots::default() };
+          let rustc_hir::Node::Expr(target) = self.tcx.hir_node(target) else { return CallSlots::default() };
+          expr = target;
+        }
+        _ => break parent,
+      }
+    };
+    let index = match parent.kind {
+      ExprKind::Call(_, args) => args.iter().position(|arg| arg.hir_id == expr.hir_id),
+      ExprKind::MethodCall(_, receiver, args, _) => std::iter::once(receiver).chain(args)
+        .position(|arg| arg.hir_id == expr.hir_id),
+      ExprKind::Binary(_, left, right) | ExprKind::AssignOp(_, left, right) => [left, right].iter().position(|arg| arg.hir_id == expr.hir_id),
+      ExprKind::Unary(_, operand) if operand.hir_id == expr.hir_id => Some(0),
+      _ => None,
+    };
+    let Some(index) = index else { return CallSlots::default() };
+    let callee = self.mir_callee(parent);
+    let trait_id = callee.and_then(|callee| self.tcx.trait_of_assoc(callee));
+    let lang = self.tcx.lang_items();
+    let callable = trait_id.is_some() && [lang.fn_trait(), lang.fn_mut_trait(), lang.fn_once_trait()].contains(&trait_id);
+    CallSlots {
+      span: Some(parent.span),
+      callee,
+      index,
+      constructor: self.mir_constructor(parent),
+      projected_literal: None,
+      callable,
+    }
+  }
+
   pub fn match_arg(&mut self, arg: &'tcx Expr, fn_name: String) {
-    let outer = self.emitting_expr.replace(arg);
-    self.match_arg_at(arg, fn_name);
-    self.emitting_expr = outer;
+    let slots = self.call_slots(arg);
+    self.match_arg_at(arg, fn_name, false, slots);
+  }
+
+  pub(crate) fn draw_macro_argument(&mut self, arg: &'tcx Expr, name: String) {
+    self.match_arg_at(arg, name, true, CallSlots::default());
   }
 
   pub(crate) fn match_call_arg(&mut self, arg: &'tcx Expr, fn_name: String, manually_takes: bool) {
@@ -6303,7 +6480,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  fn match_arg_at(&mut self, arg: &'tcx Expr, fn_name: String) {
+  fn match_arg_at(&mut self, arg: &'tcx Expr, fn_name: String, in_macro: bool, slots: CallSlots) {
+    let outer = self.emitting_expr.replace(arg);
+    self.match_arg_effects(arg, fn_name, in_macro, slots);
+    self.emitting_expr = outer;
+  }
+
+  fn match_arg_effects(&mut self, arg: &'tcx Expr, fn_name: String, in_macro: bool, slots: CallSlots) {
     // `sum(&arr as &[i32])` passes the borrow `&arr` (#1175).
     let arg = peel_ref_casts(arg, self.tcx.typeck(arg.hir_id.owner));
     // `f('a: { if c { break 'a s; } t })` (#1134): the argument is what
@@ -6311,7 +6494,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if matches!(arg.kind, ExprKind::Block(_, Some(_))) {
       let values = self.labeled_block_values(arg);
       if values.len() > 1 {
-        self.pair_break_alternatives(arg, values, |this, v| this.match_arg(v, fn_name.clone()));
+        self.pair_break_alternatives(arg, values, |this, v| this.match_arg_at(v, fn_name.clone(), in_macro, slots));
         return;
       }
     }
@@ -6332,10 +6515,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let saved_line = end_line.map(|l| self.line_override.replace(l));
       if seen.len() > 1 {
         // Several: only the `break` that ended the loop ran (#561).
-        self.pair_break_alternatives(arg, seen, |this, v| this.match_arg(v, fn_name.clone()));
+        self.pair_break_alternatives(arg, seen, |this, v| this.match_arg_at(v, fn_name.clone(), in_macro, slots));
       } else {
         for (value, _) in seen {
-          self.match_arg(value, fn_name.clone());
+          self.match_arg_at(value, fn_name.clone(), in_macro, slots);
         }
       }
       if let Some(l) = saved_line {
@@ -6358,7 +6541,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             self.ref_part_into_ctor(arg, elem, &fn_name);
             continue;
           }
-          self.match_arg(elem, fn_name.clone());
+          self.match_arg_at(elem, fn_name.clone(), in_macro, slots);
         }
         return;
       }
@@ -6383,7 +6566,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             self.ref_part_into_ctor(arg, field.expr, &fn_name);
             continue;
           }
-          self.match_arg(field.expr, fn_name.clone());
+          self.match_arg_at(field.expr, fn_name.clone(), in_macro, slots);
         }
         if let rustc_hir::StructTailExpr::Base(base) = tail {
           let to = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
@@ -6395,12 +6578,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // `take(Some(&s))`: the constructor isn't an actor. A borrow it
     // wraps is made for the call the value is passed to (#768); the
     // other arguments were moved or copied into the constructor.
-    if let ExprKind::Call(callee, ctor_args) = arg.kind {
+    if let ExprKind::Call(_, ctor_args) = arg.kind {
       let typeck = self.tcx.typeck(arg.hir_id.owner);
-      if !arg.span.from_expansion() && crate::visitor::is_ctor_path(callee, typeck) {
+      if !arg.span.from_expansion() && self.mir_constructor(arg) {
         let mut borrowed = false;
         for a in ctor_args.iter() {
-          let nested = matches!(a.kind, ExprKind::Call(c, _) if crate::visitor::is_ctor_path(c, typeck));
+          let nested = self.mir_constructor(a);
           // `take(Some((x, 1)))` / `take(Some(Part { text: &s }))`: the
           // references in the literal are passed to the call with it
           // (the constructor skipped them, #1340).
@@ -6408,15 +6591,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           if !refs.is_empty() {
             borrowed = true;
             for r in refs {
-              self.match_arg(r, fn_name.clone());
+              self.match_arg_at(r, fn_name.clone(), in_macro, slots);
             }
           }
           if typeck.node_type(a.hir_id).is_ref() {
             borrowed = true;
-            self.match_arg(a, fn_name.clone());
+            self.match_arg_at(a, fn_name.clone(), in_macro, slots);
           } else if nested {
             let before = *self.unique_id;
-            self.match_arg(a, fn_name.clone());
+            self.match_arg_at(a, fn_name.clone(), in_macro, slots);
             borrowed |= *self.unique_id != before;
           }
         }
@@ -6446,7 +6629,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let is_literal = matches!(elem.kind, ExprKind::Struct(..) | ExprKind::Tup(_)) && !elem.span.from_expansion();
         if arg.span.from_expansion() && !self.vec_element_reached(elem, arg.span.ctxt().outer_expn()) { continue; }
         if vec_macro_elems(self.tcx, elem).is_some() {
-          self.match_arg(elem, fn_name.clone());
+          self.match_arg_at(elem, fn_name.clone(), in_macro || arg.span.from_expansion(), slots);
         } else if arg.span.from_expansion() && (matches!(elem.kind, ExprKind::Path(_) | ExprKind::Field(..)) || self.box_contents_of(elem).is_some())
             && !(self.tcx.typeck(elem.hir_id.owner).expr_ty(elem).is_ref()
               && self.body_facts.is_some_and(|b| b.constructed_vecs.contains_key(&arg.span.ctxt().outer_expn()))
@@ -6454,7 +6637,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let to = ResourceTy::Value(self.raps[&fn_key(&fn_name)].rap.clone());
           self.draw_vec_place(elem, Some(&to));
         } else if is_var || is_literal {
-          self.match_arg(elem, fn_name.clone());
+          self.match_arg_at(elem, fn_name.clone(), in_macro || arg.span.from_expansion(), slots);
         }
       }
       return;
@@ -6462,54 +6645,120 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.add_fn(fn_name.clone());
     if let ExprKind::Closure(closure) = arg.kind {
       let to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
-      if self.match_closure_arg(closure, arg, &to_ro, &fn_name) {
+      self.match_closure_arg(closure, arg, &to_ro, &fn_name);
+      return;
+    }
+    if let Some(call) = self.mir_call(arg).filter(|c| c.has_result && !c.returns_reference && !c.returns_unit
+      && self.body_facts.is_some_and(|b| b.value_flow.result_passes_to(*c, slots))) {
+      let to = ResourceTy::Value(self.raps[&fn_key(&fn_name)].rap.clone());
+      if !slots.constructor {
+        self.row_layout.argument_results.insert(*self.unique_id);
+      }
+      self.match_rhs(to, arg, if call.copyable { Evt::Copy } else { Evt::Move });
+      return;
+    }
+    let tycheck_results = self.tcx.typeck(arg.hir_id.owner);
+    let arg_ty = tycheck_results.node_type(arg.hir_id);
+    let mut to_ro = ResourceTy::Value(self.raps[&fn_key(&fn_name)].rap.clone());
+    let value_flow = self.body_facts.map(|b| &b.value_flow);
+    let read = value_flow.and_then(|flow| {
+      if in_macro { flow.read(arg.span) } else { flow.argument_read(arg.span, slots) }
+    });
+    if read.is_none() && !in_macro && slots.projected_literal.is_none() {
+      if let Some(read) = value_flow.and_then(|flow| flow.read(arg.span)) {
+        if let OperandEffect::Move(src) = &read.effect {
+          if let Some(from) = self.transfer_source(src, arg).filter(|from| !matches!(from, ResourceTy::Index(..))) {
+            self.add_read_transfer(&read, Evt::Move, ResourceTy::Anonymous, from);
+            return;
+          }
+        }
+      }
+    }
+    // A projected temporary can hide the places that built it. Visit
+    // those operands for display; MIR selects which reached this slot.
+    if let ExprKind::Field(base, _) = arg.kind {
+      if read.is_none() && matches!(base.kind, ExprKind::Tup(_) | ExprKind::Struct(..)) && slots.span.is_some() {
+        let slots = CallSlots { projected_literal: Some(base.hir_id), ..slots };
+        self.match_arg_at(base, fn_name, in_macro, slots);
         return;
       }
     }
-    let line_num = expr_to_line(&arg, &self.tcx);
-    let tycheck_results = self.tcx.typeck(arg.hir_id.owner);
-    let arg_ty = tycheck_results.node_type(arg.hir_id);
-    let is_copyable = self.ty_is_copy(arg_ty, arg.hir_id.owner);
-    // `take(p.x)` / `look(&p.name)` with p a reference (#266).
-    let from_ro = self.borrow_source(arg);
-    // Extend the lifetime of any reference RAP this arg touches so a
-    // ref passed as a fn argument shows its dotted lifetime line out
-    // to the call site. Critical for macro args like
-    // `println!("{}", p)`: visit_expr bails on macro-expanded
-    // children before reaching the inner Path that would normally
-    // call update_rap, so without this nudge the ref's lifetime
-    // stays pinned to its declaration line and the renderer draws a
-    // degenerate (zero-height) ref-line.
-    if let ResourceTy::Value(rap) | ResourceTy::Deref(rap) | ResourceTy::DerefField(rap, _, _, _) = &from_ro {
+    let projected_loan = self.argument_loan(arg.span).and_then(|loan| {
+      let place = loan.projected.as_ref()?;
+      let local = loan.lender_local?;
+      let rap = self.raps.place(local, &place.base)?.rap.clone();
+      Some((loan.line, ResourceTy::Value(rap), loan.kind == "mut", loan.through.is_some()))
+    });
+    let (line_num, from_ro, arg_mut, of_ref_var, is_reborrow) = match read {
+      Some(read) => match &read.effect {
+        OperandEffect::Copy(src) | OperandEffect::Move(src) => {
+          let Some(from) = self.transfer_source(src, arg) else { return };
+          let line = read.site.row;
+          let moving = matches!(read.effect, OperandEffect::Move(_));
+          // A field without a drawn column still moves in the table.
+          // An enclosing column cannot represent that move.
+          if moving && matches!(from, ResourceTy::Index(..)) {
+            return;
+          }
+          if moving && src.needs_drop && slots.span.and_then(|span|
+            value_flow.and_then(|flow| flow.call(span, slots.callee))).is_some_and(|call| call.drops_arg)
+          {
+            if let ResourceTy::Value(r) = &to_ro {
+              to_ro = ResourceTy::Value(r.with_drops_arg());
+            }
+          }
+          if let Some(r) = from.extract_rap() {
+            self.update_rap(r, line);
+          }
+          if let Some(slot) = value_flow.and_then(|flow| flow.unique_argument(&read, slots)) {
+            self.argument_slots.insert(*self.unique_id, slot);
+          }
+          if moving {
+            if let Some(temp) = slots.projected_literal.and_then(|id| self.temp_cols.get(&id)) {
+              let temp = temp.clone();
+              if self.redirect_temporary_operand(&temp, &from, &to_ro, &read) {
+                return;
+              }
+            }
+          }
+          if !moving && src.is_ref && value_flow.is_some_and(|flow| flow.reads_argument_referent(slots)) {
+            let title = crate::svg_generator::hover_messages::copied_operator_reference(&from.name(), &fn_name);
+            self.row_layout.aggregate_titles.insert(*self.unique_id, title);
+          }
+          self.add_read_transfer(&read, if moving { Evt::Move } else { Evt::Copy }, to_ro, from);
+          return;
+        }
+        OperandEffect::Borrow { source, mutable, of_ref_slot } => {
+          let Some(mut from) = self.transfer_source(source, arg) else { return };
+          // The whole reborrow uses the reference's column. Projected
+          // reborrows retain the field name on the same column.
+          from = match from {
+            ResourceTy::Deref(r) | ResourceTy::Index(r, ..) => ResourceTy::Value(r),
+            ResourceTy::DerefField(r, ..) if source.element => ResourceTy::Value(r),
+            other => other,
+          };
+          let (from, mutable, through) = projected_loan.as_ref().map_or(
+            (from, *mutable, source.through.is_some()),
+            |(_, place, mutable, through)| (place.clone(), *mutable, *through));
+          (read.site.row, from, if mutable { Mutability::Mut } else { Mutability::Not }, *of_ref_slot, through)
+        }
+      },
+      // Returning a reference from a call is separate from issuing a
+      // loan at this argument. Keep the existing call-relationship
+      // explanation when the MIR proves the nested call produced it.
+      None if projected_loan.is_some() => {
+        let (line, from, mutable, through) = projected_loan.unwrap();
+        (line, from, if mutable { Mutability::Mut } else { Mutability::Not }, false, through)
+      }
+      None if arg_ty.is_ref() && self.mir_call(arg).is_some_and(|c| c.has_result) =>
+        (expr_to_line(arg, &self.tcx), self.borrow_source(arg), arg_ty.ref_mutability().unwrap(), false, false),
+      None => return,
+    };
+    if let Some(rap) = from_ro.extract_rap() {
       self.update_rap(rap, line_num);
     }
-    let mut to_ro = ResourceTy::Value(self.raps.get(&fn_key(&fn_name)).unwrap().rap.to_owned());
-    // `drop(x)` is where x's value is dropped: say so on the move,
-    // unless its type has nothing to drop.
-    if !arg_ty.is_ref() && !is_copyable && self.is_mem_drop_arg(arg)
-      && self.needs_drop(arg_ty, arg.hir_id.owner)
     {
-      if let ResourceTy::Value(rap) = &to_ro {
-        to_ro = ResourceTy::Value(rap.with_drops_arg());
-      }
-    }
-    // type-check the arg and add event accordingly
-    if arg_ty.is_ref() {
-      // `look(r)` with `r: &mut i32` and `look(x: &i32)`: rustc passes
-      // `&*r`, an immutable reborrow, so r isn't moved and is usable
-      // again after the call; drawn like `look(&*r)` (#1329).
-      let arg_mut = if !matches!(arg.kind, ExprKind::AddrOf(..)) && is_implicit_shared_reborrow_of_mut(arg, tycheck_results) {
-        Mutability::Not
-      } else {
-        arg_ty.ref_mutability().unwrap()
-      };
-      // `show(&x)` / `bump(&mut m)` with x / m a reference variable and
-      // a `&&String` / `&mut &mut String` parameter: the call borrows
-      // x / m itself, not what it points to (#938).
       let argument_loan = self.argument_loan(arg.span);
-      let of_ref_var = ref_var_borrow(arg, tycheck_results)
-        || matches!((&from_ro, argument_loan),
-          (ResourceTy::Value(r), Some(loan)) if r.is_member() && r.is_ref() && *r.name() == loan.lender);
       let projected = argument_loan.and_then(|loan| Some((loan.loan, loan.projected.clone()?)));
       // `point(&mut hold, &t)` where point's signature lets it store
       // `&t` in `hold`: t stays borrowed past the call (#513).
@@ -6612,26 +6861,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           self.add_pass_by_sref_ev_full(line_num, to_ro, from_ro, ImplicitRef::No, false, pointee_interior_mut, of_ref_var, deep)
         }
         Mutability::Mut => {
-          // Reborrow if written `f(&mut *r)`, or if rustc inserted
-          // the reborrow for `f(r)` (param type `&mut T`). `take(r)`
-          // into a generic `T` has no such adjustment: r is moved.
-          // `f(&mut r.a)` with r a reference reborrows through r too.
-          let is_reborrow = matches!(from_ro, ResourceTy::DerefField(..)) || match arg.kind {
-            ExprKind::AddrOf(_, _, operand) => is_explicit_reborrow(operand, tycheck_results)
-              || is_coerced_ref_var_reborrow(arg, tycheck_results),
-            _ => is_implicit_mut_reborrow(arg, tycheck_results),
-          };
-          // An existing `&mut` (not a fresh `&mut x` written at the
-          // call) that rustc didn't reborrow is moved into the call:
-          // `&mut T` isn't Copy, and the reborrow is only inserted
-          // when the parameter's type is itself a reference
-          // (`push(y)` with `x: &mut String`), not for a generic
-          // `take<T>(t: T)` (#200). Using `y` afterwards is E0382.
-          if !is_reborrow && !matches!(arg.kind, ExprKind::AddrOf(..))
-            && matches!(from_ro, ResourceTy::Value(_)) {
-            self.add_ev(line_num, Evt::Move, to_ro, from_ro, false);
-            return;
-          }
           let ends_at_call = self.call_argument_site(arg).is_some_and(|key| self.facts.is_some_and(|b| b.short_call_borrows.contains(&key)));
           self.add_pass_by_mref_ev_deep(line_num, to_ro, from_ro.clone(), is_reborrow, ends_at_call, ImplicitRef::No, of_ref_var, deep);
           // `grow(&mut r.name)` with `r = &mut p`: the call can modify
@@ -6646,18 +6875,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         }
       }
     }
-    else {
-      match is_copyable {
-        // `show(v[0])` / `show(pts[0].x)`: a copy of one element (or a
-        // field of one), drawn out of `v[0]` on v's column, as for
-        // `let n = v[0];`; v isn't copied (#1170).
-        true => {
-          let from_ro = self.returned_part(arg).unwrap_or(from_ro);
-          self.add_ev(line_num, Evt::Copy, to_ro, from_ro, false)
-        }
-        false => self.add_ev(line_num, Evt::Move, to_ro, from_ro, false)
-      }
-    }
+
   }
 
   /// `get_ref_data` plus, when the lender has no column, the
@@ -9969,6 +10187,19 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
     if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
       out.push((ResourceTy::Value(r), is_mut, call));
     }
+    else if let Some((id, call)) = self.mir_call(head).filter(|c| c.std_ref_adapter).and_then(|c| c.site)
+      .and_then(|call_site| self.preprocessed_events.iter().find_map(|(_, e)| match e {
+      ExternalEvent::Copy { from: ResourceTy::Value(from), to: ResourceTy::Value(call), id, .. }
+        if from.hash() == r.hash() && call.is_fn()
+          && self.argument_slots.get(id) == Some(&(call_site.at, 1)) =>
+          Some((*id, call.name().clone())),
+      _ => None,
+    })) {
+      self.row_layout.aggregate_titles.insert(id,
+        crate::svg_generator::hover_messages::event_dot_lend_through_ref_to_loop_iterator(
+          r.name(), false, false, r.points_to_copy()));
+      out.push((ResourceTy::Value(r), false, call));
+    }
   }
   out
 }
@@ -10797,6 +11028,12 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
   if self.tcx.typeck(rhs.hir_id.owner).expr_ty_opt(rhs).is_some_and(|ty| ty.is_never()) {
     return;
   }
+  if matches!(lhs, ResourceTy::Caller) && matches!(rhs.kind,
+    ExprKind::Path(_) | ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _) | ExprKind::AddrOf(..))
+  {
+    self.return_operand(rhs);
+    return;
+  }
   // `let (Some(a), _) = (x, make()) else { .. }`: the literal is the
   // `let`-`else`'s temporary, which x was moved into; `a` is moved out
   // of it, not out of x (#954). Keyed by the literal and by each
@@ -10876,13 +11113,14 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // (#1351). (For String, that is s's own buffer, moved on.)
     ExprKind::Binary(..) | ExprKind::Unary(UnOp::Neg | UnOp::Not, _) if overloaded_value_op(rhs, &self.tcx).is_some() => {
       let op = overloaded_value_op(rhs, &self.tcx).unwrap().to_owned();
-      let line_num = span_to_line(&rhs.span, &self.tcx);
+      let Some(call) = self.mir_call(rhs).filter(|c| c.has_result) else { return };
+      let evt = if call.copyable { Evt::Copy } else { Evt::Move };
       if !self.raps.contains_key(&fn_key(&op)) {
         self.add_fn(op.clone());
       }
       let from = self.raps.get(&fn_key(&op))
-        .map_or(ResourceTy::Anonymous, |rd| ResourceTy::Value(rd.rap.to_owned()));
-      self.add_ev(line_num, evt, lhs, from, false);
+        .map_or(ResourceTy::Anonymous, |rd| ResourceTy::Value(rd.rap.with_mir_result()));
+      self.add_call_result(call, expr_to_line(rhs, &self.tcx), evt, lhs, from);
     }
     ExprKind::Lit(_) | ExprKind::Binary(..) | // Any type of literal on RHS implies a bind
     ExprKind::Unary(UnOp::Neg, _) | // ~<expr>
@@ -11055,9 +11293,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // Same Anonymous fallback as the Call arm — chained / macro /
       // desugared method calls may not have a registered name.
       let from = hirid_to_var_name(name_and_generic_args.hir_id, &self.tcx)
-        .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| fn_result_rap(rhs, rd.rap.to_owned(), &self.tcx)))
+        .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| fn_result_rap(rhs, rd.rap.with_mir_result(), &self.tcx)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value);
-      self.add_ev(line_num, evt, lhs.clone(), from, false);
+      let Some(call) = self.mir_call(rhs).filter(|c| c.has_result) else { return };
+      let evt = if matches!(lhs, ResourceTy::Caller) && call.copyable { Evt::Copy } else { evt };
+      self.add_call_result(call, line_num, evt, lhs.clone(), from);
       self.emit_struct_field_borrows(&lhs, rhs, name_and_generic_args.ident.as_str().to_owned(), line_num);
     }
     // Struct intializer list:
@@ -11323,12 +11563,29 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             // move from `r` to `n`, in place of the move into the `?`
             // `note_try` drew if it got here first.
             if matches!(lhs, ResourceTy::Value(_) | ResourceTy::Caller) {
-              if let Some((_, kind, _)) = self.try_moved_place(rhs) {
-                if let Some(Some(id)) = self.try_moves.insert(rhs.hir_id, None) {
-                  self.preprocessed_events.retain(|(_, e)| e.get_id() != id);
+              if let Some((from, kind, site)) = self.try_moved_place(rhs) {
+                let previous = self.try_moves.insert(rhs.hir_id, None).flatten();
+                let id = previous.unwrap_or_else(|| {
+                  let id = *self.unique_id;
+                  *self.unique_id += 1;
+                  id
+                });
+                if previous.is_some() {
+                  self.preprocessed_events.retain(|(_, event)| event.get_id() != id);
+                }
+                self.transfer_sites.insert(id, site);
+                if let Some(path) = self.body_facts.and_then(|b| b.value_flow.returned_try(rhs.span)).filter(|p| !p.is_empty()) {
+                  let title = crate::svg_generator::hover_messages::event_dot_try_into_returned_ctor(
+                    &from.name(), kind, path, from.extract_rap().is_some_and(|r| r.holds_value()) && matches!(from, ResourceTy::Value(_)));
+                  if matches!(lhs, ResourceTy::Caller) {
+                    self.row_layout.aggregate_titles.insert(id, title.clone());
+                  }
+                  self.try_result_titles.insert(id, title);
                 }
                 self.try_move = Some(kind);
-                self.match_rhs(lhs, operand, Evt::Move);
+                let partial = matches!(from, ResourceTy::Index(..));
+                let event = self.ext_ev_of_evt(Evt::Move, lhs, from, id, partial);
+                self.add_external_event(site.row, event);
                 self.try_move = None;
                 return;
               }
@@ -11337,20 +11594,31 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
             // copy of the value inside w, not of w; a reference copied
             // out of w borrows what w borrows, as for `let Some(z) = w`
             // (#1352).
-            if let (ResourceTy::Value(rap), Evt::Copy) = (&lhs, &evt) {
-              if matches!(operand.kind, ExprKind::Path(_) | ExprKind::Field(..)) && !operand.span.from_expansion() {
-                let rap = rap.clone();
-                let line = span_to_line(&rhs.span, &self.tcx);
-                match get_rap(operand, &self.tcx, &self.raps) {
-                  ResourceTy::Value(from) if !from.is_fn() => {
-                    self.update_rap(&from, line);
-                    self.add_ev(line, Evt::Copy, lhs, ResourceTy::Value(from), true);
+            if let (ResourceTy::Value(rap), Some((read, kind))) = (&lhs,
+              self.body_facts.and_then(|b| b.value_flow.try_input(rhs.span)))
+            {
+              if let OperandEffect::Copy(source) = &read.effect {
+                if let Some(from) = self.transfer_source(source, operand) {
+                  let rap = rap.clone();
+                  let row = read.site.row;
+                  if let Some(from) = from.extract_rap() {
+                    self.update_rap(from, row);
                   }
-                  _ => self.match_rhs(lhs, operand, evt.clone()),
+                  if *kind == TryMove::Other {
+                    let title = crate::svg_generator::hover_messages::copied_custom_try(rap.name(), &from.name());
+                    self.row_layout.aggregate_titles.insert(*self.unique_id, title);
+                    self.bind_from_anonymous(row, lhs);
+                    return;
+                  }
+                  self.add_ev(row, Evt::Copy, lhs, from, true);
+                  for event in self.pattern_ref_copy_borrow(&rap, &Evt::Copy, operand, None) {
+                    self.add_external_event(row, event);
+                  }
+                  return;
                 }
-                for b in self.pattern_ref_copy_borrow(&rap, &evt, operand, None) {
-                  self.add_external_event(line, b);
-                }
+              }
+              if matches!(read.effect, OperandEffect::Move(_)) {
+                self.add_ev(read.site.row, Evt::Bind, lhs, ResourceTy::Anonymous, false);
                 return;
               }
             }
@@ -11732,7 +12000,8 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   // `let o = Some(5);`: a constructor of literals is a value of the
   // type, like `let x = 5;`. Nothing is copied from the
   // constructor (#768).
-  if self.is_copy_literal_value(rhs) {
+  let constructor = self.mir_constructor(rhs);
+  if constructor && self.is_copy_literal_value(rhs) {
     self.bind_from_ctor(line_num, lhs, rhs);
     return;
   }
@@ -11757,10 +12026,10 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   // fields have columns is built like the literal `Holder { 0: &x }`,
   // each field getting its argument's value or borrow (#1197, #1206).
   if let ExprKind::Call(_, args) = rhs.kind {
-    if crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner))
+    if constructor
       && self.has_tuple_field_columns(&lhs, args.len())
     {
-      self.discard_ctor_arg_events(rhs, fn_expr);
+      self.discard_ctor_arg_events(rhs);
       let from = hirid_to_var_name(fn_expr.hir_id, &self.tcx)
         .and_then(|n| self.raps.get(&fn_key(&n)))
         .map_or(ResourceTy::Anonymous, |rd| ResourceTy::Value(rd.rap.to_owned()));
@@ -11771,7 +12040,7 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
       return;
     }
   }
-  let retargeted = crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner))
+  let retargeted = constructor
     && self.retarget_ctor_arg_events(rhs, lhs.clone());
   if let Some(func) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
     if self.emit_call_result_borrows(&lhs, rhs, func, line_num) {
@@ -11798,7 +12067,7 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
         // the caller's data (no column here). (A constructor, `Some(r)`,
         // draws r's move into it instead.)
         if matches!(&lhs, ResourceTy::Value(l) if !l.is_ref() && l.holds_borrow())
-          && !crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner)) {
+          && !constructor {
           // The value comes from the call, then the borrow it holds.
           if let Some(f) = hirid_to_var_name(fn_expr.hir_id, &self.tcx)
             .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| rd.rap.to_owned())) {
@@ -11823,7 +12092,7 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   // value, literals) is a new value, like a constructor of literals.
   // Nothing is moved or copied out of the constructor: it is never an
   // actor (#768).
-  if crate::visitor::is_ctor_path(fn_expr, self.tcx.typeck(rhs.hir_id.owner)) {
+  if constructor {
     self.bind_from_ctor(line_num, lhs, rhs);
     return;
   }
@@ -11831,6 +12100,10 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   // `f` in place: the result comes from the call, so its source is
   // the call's Function RAP, not `f`'s column (#254, #299). An
   // `FnOnce` call does consume `f`, and keeps `f` as the source.
+  let Some(call) = self.mir_call(rhs).filter(|c| c.has_result) else {
+    return;
+  };
+  let evt = if matches!(lhs, ResourceTy::Caller) && call.copyable { Evt::Copy } else { evt };
   let callee = match local_callee_result_key(rhs, &self.tcx) {
     // A Copy result (`let n = f();` with `f: FnOnce() -> i32`)
     // isn't a copy of anything `f` holds: it comes from the call
@@ -11856,9 +12129,9 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
         }
       }
       let from = self.raps.get(&key)
-        .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.clone(), &self.tcx)))
+        .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.with_mir_result(), &self.tcx)))
         .unwrap_or(ResourceTy::Anonymous);
-      self.add_ev(line_num, evt, lhs, from, false);
+      self.add_call_result(call, line_num, evt, lhs, from);
       return;
     }
     LocalCallee::Consumed => {
@@ -11866,7 +12139,7 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
         .and_then(|n| self.raps.get(&n))
         .map(|rd| ResourceTy::Value(rd.rap.to_owned()))
         .unwrap_or(ResourceTy::Anonymous);
-      self.add_ev(line_num, evt, lhs, from, false);
+      self.add_call_result(call, line_num, evt, lhs, from);
       return;
     }
     LocalCallee::NotLocal => {}
@@ -11883,12 +12156,12 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
         self.add_fn(n.clone());
       }
       self.raps.get(&fn_key(&n))
-        .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.to_owned(), &self.tcx)))
+        .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.with_mir_result(), &self.tcx)))
         .unwrap_or(ResourceTy::Anonymous)
     }
     None => ResourceTy::Anonymous,
   };
-  self.add_ev(line_num, evt, lhs.clone(), from, false);
+  self.add_call_result(call, line_num, evt, lhs.clone(), from);
   if let Some(func) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
     self.emit_struct_field_borrows(&lhs, rhs, func, line_num);
   }
@@ -14955,24 +15228,20 @@ pub fn gos_line_from(evs: &[(usize, ExternalEvent)], rap: &ResourceAccessPoint, 
 /// Takes out of `events` (through nested branches), into `out`, the
 /// moves and copies into a constructor among the events `ids` of its
 /// arguments (`retarget_ctor_arg_events`, #1455).
-fn take_ctor_arg_events_in(events: &mut Vec<(usize, ExternalEvent)>, ids: std::ops::Range<usize>, out: &mut Vec<(usize, ExternalEvent)>) {
-  let is_ctor_fn = |t: &ResourceTy| matches!(t,
-    ResourceTy::Value(ResourceAccessPoint::Function(f))
-      if f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase())));
-  events.retain_mut(|(l, e)| {
-    if let ExternalEvent::Branch { branches, .. } = e {
-      for b in branches.iter_mut() {
-        take_ctor_arg_events_in(&mut b.e_data, ids.clone(), out);
+fn take_ctor_arg_events_in(events: &mut Vec<(usize, ExternalEvent)>, ids: &std::ops::Range<usize>, hash: u64, out: &mut Vec<(usize, ExternalEvent)>, returned: &mut impl FnMut(usize) -> bool) {
+  events.retain_mut(|(line, event)| {
+    if let ExternalEvent::Branch { branches, .. } = event {
+      for branch in branches.iter_mut() {
+        take_ctor_arg_events_in(&mut branch.e_data, ids, hash, out, returned);
       }
-      return true;
     }
-    let hit = ids.contains(&e.get_id()) && match e {
-      ExternalEvent::Move { from, to, .. } | ExternalEvent::Copy { from, to, .. } =>
-        is_ctor_fn(to) && from.extract_rap().is_some(),
+    let hit = ids.contains(&event.get_id()) && match event {
+      ExternalEvent::Move { from, to, id, .. } | ExternalEvent::Copy { from, to, id, .. } =>
+        (*to.hash() == hash || returned(*id)) && from.extract_rap().is_some(),
       _ => false,
     };
     if hit {
-      out.push((*l, e.clone()));
+      out.push((*line, event.clone()));
     }
     !hit
   });

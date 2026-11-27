@@ -162,7 +162,7 @@ const BOOK: &[Snippet] = &[
             "L3 the value bytes points to is immutably borrowed by the `for` loop's iterator, through a copy of bytes, until the loop ends",
             "L7 the `for` loop's iterator no longer borrows the value bytes points to",
             "L7 If bytes holds a shared borrow affecting the data behind s, that borrow ends here. It no longer restricts access to the data behind s",
-            "Copy of the value first_word() returns to word",
+            "word receives the value first_word() returns",
             // `==` on u8 copies item; it isn't an actor (#908).
             "L4 item's value is copied",
         ],
@@ -298,7 +298,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "x's value is copied to the caller",
             "Copy from a to add_one",
-            "Copy of the value add_one() returns to b",
+            "b receives the value add_one() returns",
         ],
         must_not_contain: &["x's resource is moved to the caller", "x's resource is copied to the caller"],
         ..E
@@ -433,7 +433,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "self is an immutable borrow from the caller",
             "c is passed to get by shared reference (as self, implicitly borrowed). get may read it",
-            "Copy of the value get() returns to v",
+            "v receives the value get() returns",
         ],
         must_not_contain: &["self is the owner of the resource"],
         ..E
@@ -489,7 +489,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Move from c to value_in_cents",
             "coin goes out of scope",
-            "Copy of the value value_in_cents() returns to v",
+            "v receives the value value_in_cents() returns",
             "c goes out of scope",
             "c is initialized with a Dime value",
         ],
@@ -504,7 +504,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_03_plus_one",
-        must_contain: &["Partial copy from x to i", "Copy from five to plus_one", "Copy of the value plus_one() returns to six"],
+        must_contain: &["Partial copy from x to i", "Copy from five to plus_one", "six receives the value plus_one() returns"],
         ..E
     },
     Snippet {
@@ -566,7 +566,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_09_option_unwrap_or",
-        must_contain: &["Copy of the value unwrap_or() returns to y", "x is passed to is_some by shared reference (as self, implicitly borrowed). is_some may read it"],
+        must_contain: &["y receives the value unwrap_or() returns", "x is passed to is_some by shared reference (as self, implicitly borrowed). is_some may read it"],
         ..E
     },
     Snippet {
@@ -745,7 +745,7 @@ const BOOK: &[Snippet] = &[
             "scores is passed to insert by mutable reference (as self, implicitly borrowed). insert may read or write it",
             "scores is passed to get by shared reference (as self, implicitly borrowed). get may read it",
             "team_name is passed to get by shared reference. get may read it",
-            "Copy of the value unwrap_or() returns to score",
+            "score receives the value unwrap_or() returns",
         ],
         ..E
     },
@@ -830,7 +830,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c9_02_parse_unwrap",
-        must_contain: &["Copy of the value unwrap() returns to n"],
+        must_contain: &["n receives the value unwrap() returns"],
         ..E
     },
     Snippet {
@@ -904,7 +904,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "Move from String::from to r",
             "Move from r to unwrap_or_else",
-            "Copy of the value unwrap_or_else() returns to n",
+            "n receives the value unwrap_or_else() returns",
             "r goes out of scope. No resource is dropped.",
         ],
         // #768: `Err` is a constructor, never an actor.
@@ -1025,14 +1025,14 @@ const BOOK: &[Snippet] = &[
     // ─── Chapter 13: closures and iterators ───────────────────────────
     Snippet {
         id: "c13_01_closure_param",
-        status: Wrong,
-        note: "The result arrow says Copy. The call borrows add_one and initializes y directly with its result. The shared borrow of the closure is missing (#299)",
+        status: Missing,
+        note: "The shared borrow of the closure is missing (#299)",
         must_contain: &[
             "Closure add_one is bound",
             "L3 y is initialized with the value add_one() returns",
+            "y receives the value add_one() returns",
         ],
-        must_not_contain: &["add_one's resource is copied"],
-        known_wrong: &["Copy of the value add_one() returns to y"],
+        must_not_contain: &["add_one's resource is copied", "Copy of the value add_one() returns to y"],
         ..E
     },
     Snippet {
@@ -1074,7 +1074,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "f acquires ownership from the caller",
             "f goes out of scope. Its resource is dropped.",
-            "Copy of the value apply() returns to r",
+            "r receives the value apply() returns",
         ],
         must_not_contain: &["f is initialized with a copy of Anonymous resource"],
         ..E
@@ -1119,7 +1119,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c13_09_iter_sum",
-        must_contain: &["iter takes a shared reference (as self, implicitly borrowed). It may read through that reference", "Copy of the value sum() returns to total"],
+        must_contain: &["iter takes a shared reference (as self, implicitly borrowed). It may read through that reference", "total receives the value sum() returns"],
         ..E
     },
     Snippet {
@@ -1378,7 +1378,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "m_12_method_chain_trim_len",
-        must_contain: &["trim takes a shared reference (as self, implicitly borrowed). It may read through that reference", "Copy of the value len() returns to n"],
+        must_contain: &["trim takes a shared reference (as self, implicitly borrowed). It may read through that reference", "n receives the value len() returns"],
         ..E
     },
     Snippet {
@@ -1584,7 +1584,7 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "x13_nested_same_fn_call",
-        must_contain: &["Copy of the value add() returns to x"],
+        must_contain: &["x receives the value add() returns"],
         ..E
     },
     Snippet {

@@ -1,6 +1,6 @@
-// #178: moving a `&mut` (`let r2 = r;`, or returning it) moves the
-// reference, and copying a `&T` copies the reference; the resource it
-// points to stays with its owner `s` / `x`.
+// An inferred `let r2 = r` moves the mutable reference. Returning `r`
+// to the declared reference type reborrows its referent. Copying a
+// shared reference leaves the referent with its owner.
 fn pass(r: &mut String) -> &mut String { r }
 
 fn main() {
