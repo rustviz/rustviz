@@ -807,6 +807,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         TyKind::Ref(..) => "shared_ref",
         _ => "owner",
     };
+    let is_option_ref = |ty: rustc_middle::ty::Ty<'tcx>| {
+        matches!(ty.kind(), TyKind::Adt(def, args)
+            if tcx.is_diagnostic_item(rustc_span::sym::Option, def.did()) && args.type_at(0).is_ref())
+    };
     let mut vars: Vec<VarInfo> = Vec::new();
     for (local, name) in &cx.names.locals {
         let decl = &body.local_decls[*local];
@@ -819,6 +823,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             copy,
             needs_drop,
             ty: format!("{}", ty),
+            is_option_ref: is_option_ref(ty),
             capture: None,
         });
     }
@@ -833,6 +838,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             copy,
             needs_drop,
             ty: format!("{}", ty),
+            is_option_ref: is_option_ref(ty),
             capture: Some(match cap {
                 Capture::ByValue => "by_value",
                 Capture::ByRef => "by_ref",

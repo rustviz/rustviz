@@ -28564,6 +28564,32 @@ fn column_line_at(svg: &str, column: &str, row: usize) -> (String, Vec<String>) 
 }
 
 #[test]
+fn option_holder_title_follows_live_loan_1880() {
+    let svg = run_with_local_backend("rv3_option_holder_title_1880").timeline_panel_string();
+    // Moving clear() above black_box(maybe) gives E0502, including when
+    // first() would return None on an empty vector. After black_box it compiles.
+    let (_, live) = column_line_at(&svg, "maybe", 2);
+    let (_, ended) = column_line_at(&svg, "maybe", 3);
+    assert!(!live[0].contains("contains a reference") && !ended[0].contains("contains a reference"),
+        "first() can return None: live {live:?}, ended {ended:?}");
+    assert!(live[0].contains("maybe holds a value that can hold a reference")
+        && live[0].contains("keeps v borrowed"), "{live:?}");
+    assert_eq!(ended[0], "maybe holds a copyable value");
+}
+
+#[test]
+fn stacked_owner_title_follows_current_dot_1875() {
+    let svg = run_with_local_backend("rv3_stacked_owner_title_1875").timeline_panel_string();
+    // &mut p.a before inspect(q) is E0502. The same borrow after it
+    // compiles, and inspect(&p) is legal again after r.clear().
+    let shared = tooltip_of_id(&svg, "p@L4:line:partial_privilege").unwrap();
+    assert!(shared.contains("p's resource is being shared by one or more variables")
+        && !shared.contains("p.a"), "{shared}");
+    let exclusive = tooltip_of_id(&svg, "p@L4-5:line:revoked_privilege").unwrap();
+    assert!(exclusive.contains("p.a is mutably borrowed by r"), "{exclusive}");
+}
+
+#[test]
 fn reference_reservation_shows_shared_access_1861() {
     let rv = run_with_local_backend("reference_two_phase_reservation_1861");
     let svg = rv.timeline_panel_string();

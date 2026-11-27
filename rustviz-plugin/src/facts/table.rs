@@ -142,6 +142,7 @@ struct BodyTable {
     columns: Vec<String>,
     array_lengths: BTreeMap<String, usize>,
     boxes: BTreeSet<String>,
+    option_refs: BTreeSet<String>,
     /// Each loan's borrowed place (`s`, `p.a`, `*b`, `v[_]`).
     loans: BTreeMap<usize, LoanInfo>,
     part_lenders: BTreeSet<String>,
@@ -622,6 +623,10 @@ impl StateTable {
         self.body(fn_line, column).is_some_and(|b| b.boxes.contains(column))
     }
 
+    pub fn is_option_ref(&self, fn_line: usize, column: &str) -> bool {
+        self.body(fn_line, column).is_some_and(|b| b.option_refs.contains(column))
+    }
+
     pub fn array_len(&self, fn_line: usize, column: &str) -> Option<usize> {
         self.body(fn_line, column)?.array_lengths.get(column).copied()
     }
@@ -786,10 +791,16 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     }
     let array_lengths = b.columns.iter().filter_map(|c| Some((c.name.clone(), c.array_len?))).collect();
     let boxes = b.columns.iter().filter(|c| c.is_box).map(|c| c.name.clone()).collect();
+    // Only variable cells have holds. Shared display columns require all
+    // their variables to agree on the type before using an option title.
+    let mut option_refs: BTreeSet<_> = b.vars.iter().filter(|v| v.is_option_ref).map(|v| v.name.clone()).collect();
+    for v in b.vars.iter().filter(|v| !v.is_option_ref) {
+        option_refs.remove(&v.name);
+    }
     let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
-    BodyTable { joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    BodyTable { joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, option_refs, loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]

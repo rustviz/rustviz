@@ -3529,6 +3529,17 @@ pub fn state_holder_borrows_from(name: &str, sources: &[Option<String>]) -> Stri
     format!("{me} holds a value that borrows from {} ({me} isn't a reference itself)", place_list(sources, "and"))
 }
 
+/// The borrow checker can count loans through an option even when it is None.
+pub fn state_option_holds_loans(name: &str, lenders: &[Option<String>]) -> String {
+    let me = styled_name_html(name);
+    let mut title = format!("{me} holds a value that can hold a reference ({me} isn't a reference itself)");
+    if !lenders.is_empty() {
+        let places = place_list(lenders, "and");
+        title.push_str(&format!(". The borrow checker keeps {places} borrowed while {me} is in use"));
+    }
+    title
+}
+
 /// RustViz 3: added to the title of a value that holds references: the
 /// places whose loans its origins contain here.
 pub fn state_holder_tracks(name: &str, sources: &[Option<String>]) -> String {

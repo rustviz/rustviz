@@ -138,6 +138,9 @@ pub struct VarInfo {
     pub copy: bool,
     pub needs_drop: bool,
     pub ty: String,
+    /// The typed MIR variable is an `Option<&T>` or `Option<&mut T>`.
+    #[serde(skip)]
+    pub is_option_ref: bool,
     /// In a closure body: a captured variable of the enclosing body
     /// ("by_value" | "by_ref" | "by_mut_ref"); None for its own locals.
     pub capture: Option<&'static str>,
