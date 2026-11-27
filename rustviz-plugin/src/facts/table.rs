@@ -923,6 +923,10 @@ mod tests {
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
+            aggregate_loans: Default::default(),
+            issued_operand_loans: Default::default(),
+            returned_operand_loans: Default::default(),
+            conditional_ends: Default::default(),
             evaluated_spans: Vec::new(),
             constructed_vecs: Default::default(),
             def_id: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(),
@@ -939,6 +943,7 @@ mod tests {
             binding_loans: BTreeMap::new(),
             inline_holder_ends: Vec::new(),
             loans: vec![LoanInfo {
+                issue: None,
                 loan: 0,
                 line: 3,
                 col: 5,

@@ -24197,8 +24197,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a reference from h is returned to the caller; the data it points to is not copied",
             "a reference from k is returned to the caller; the data it points to is not copied",
             "a reference from m is returned to the caller; the data it points to is not copied",
-            "y's mutable reference is moved to the caller (not the resource it points to)",
-            "z's mutable reference is moved to the caller (not the resource it points to)",
+            "If this operand reaches the returned value, the caller receives a mutable reference to *y, reborrowed through y, not the resource it points to. The data it points to is not copied",
+            "If this operand reaches the returned value, the caller receives a mutable reference to *z, reborrowed through z, not the resource it points to. The data it points to is not copied",
             "a reference into n (from trim), reborrowed through n, is returned to the caller; the data it points to is not copied",
             "a reference to o[1..], reborrowed through o, is returned to the caller; the data it points to is not copied",
             "a reference into rr (from trim), reborrowed through rr, is returned to the caller; the data it points to is not copied",
@@ -24234,6 +24234,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=m's immutable borrow ends",
             "=y's mutable borrow ends",
             "=z's mutable borrow ends",
+            "y's mutable reference is moved to the caller",
+            "z's mutable reference is moved to the caller",
             "=n's immutable borrow ends",
             "=o's immutable borrow ends",
             "=rr's immutable borrow ends",
@@ -28416,7 +28418,138 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &["The iterator's next() returned None, so the loop exits instead of starting another iteration."],
         must_not_contain: &["When the iterator has no next item, the loop ends without entering its body."],
     },
+    TooltipExpect {
+        name: "aggregate_reborrow_1657",
+        // MIR builds the annotated aggregates with &*r, &*s and &mut *m.
+        // The inferred tuple moves original; the raw tuple takes &raw const *source.
+        must_contain: &[
+            "the value r points to is immutably borrowed by h through r",
+            "h no longer borrows the value r points to",
+            "the value s points to is immutably borrowed by pair through s",
+            "the value m points to is mutably borrowed by both through m; m can't be used while the borrow is live",
+            "Move from original to moved",
+            "*source is assigned a new value",
+            "Mutable reborrow from p to bag: bag holds the borrows its argument holds: first and *p, and both stay borrowed while bag is in use; bag isn't a reference, but its value holds one",
+            "If bag holds the borrow of *p, that borrow ends here",
+            "If bag holds the borrow of first, that borrow ends here",
+        ],
+        must_not_contain: &[
+            "Return mutably borrowed value from bag to *p",
+            "Return immutably borrowed value from bag to first",
+            "Move from r to h",
+            "Mutable borrow from b to h",
+            "Move from s to pair",
+            "Move from m to both",
+            "Move from source to ptr",
+            "Immutable reborrow from p to bag",
+        ],
+    },
+    TooltipExpect {
+        name: "known_bugs/1823_shared_ref_of_mut_siblings",
+        // Only the else arm takes &b12. Its shared loan ends with o12,
+        // even though the other arm carries an exclusive loan of a12.
+        must_contain: &[
+            "b12's resource is immutably borrowed by o12; b12 is read-only while the borrow is live",
+            "If o12 holds the borrow of b12, that borrow ends here",
+        ],
+        must_not_contain: &["Mutable borrow from b12 to o12", "Return mutably borrowed resource from o12 to b12"],
+    },
+    TooltipExpect {
+        name: "aggregate_alias_1657",
+        // Alias::Some builds the same Option with the same loan of x.
+        must_contain: &[
+            "aliased holds a value that immutably borrows x's value (aliased isn't a reference itself)",
+            "the value a points to is immutably borrowed by h through a",
+            "the value b points to is mutably borrowed by h through b; b can't be used while the borrow is live",
+        ],
+        must_not_contain: &["Move from x to aliased", "Move from a to h", "Move from b to h", "Mutable reborrow from a to h"],
+    },
+    TooltipExpect {
+        name: "aggregate_raw_coercion_1657",
+        // MIR takes &raw const *source. The write through source compiles
+        // before black_box(ptr), with no reference loan kept by ptr.
+        must_contain: &["*source is assigned a new value"],
+        must_not_contain: &["Move from source to ptr", "reborrow from source to ptr"],
+    },
+    TooltipExpect {
+        name: "aggregate_operand_loans_1657",
+        must_contain: &[
+            "the value p points to is immutably borrowed by h through p",
+            "A mutable reborrow through p is reserved for h. Shared reads are allowed while the remaining operands are evaluated. Exclusive access begins at activation",
+            "Immutable reborrow from p to bag: bag holds the borrows its argument holds: *p and *q, and both stay borrowed while bag is in use; bag isn't a reference, but its value holds one",
+            "the value through points to is immutably borrowed by raw_pair through through",
+            "Immutable reborrow from r to refs",
+            "Immutable reborrow from ptr to fields.1",
+            "If this operand is selected, either holds a shared borrow of a. The borrow checker keeps the borrowed place restricted while either is in use",
+            "If this operand is selected, either holds a shared borrow of b. The borrow checker keeps the borrowed place restricted while either is in use",
+            "If saved holds the borrow of a, that borrow ends here",
+            "If this operand is selected, saved holds a mutable borrow of a. The borrow checker keeps the borrowed place restricted while saved is in use",
+            "If this operand is selected, saved holds a shared borrow of b. The borrow checker keeps the borrowed place restricted while saved is in use",
+            "saved holds a shared borrow of c. The borrow checker keeps the borrowed place restricted while saved is in use",
+            "r holds a mutable reference. Access through r is reserved for a mutable borrow. Until activation, shared reads through r are allowed. The reservation blocks moving the reference or taking another mutable borrow of the reserved place",
+            "A mutable reborrow through r is reserved for pair. Shared reads are allowed while the remaining operands are evaluated. Exclusive access begins at activation",
+            "If this operand reaches the returned value, the caller receives a reference, not the resource it points to. The data it points to is not copied",
+            "If this operand reaches the returned value, the caller receives a mutable reference to *r, reborrowed through r, not the resource it points to. The data it points to is not copied",
+        ],
+        must_not_contain: &[
+            "Mutable reborrow from p to h: Choice::S",
+            "Mutable reborrow from p to bag: bag holds the borrows its argument holds: *p and *q",
+            "reborrow from source to raw_pair",
+            "reborrow from raw_parent to raw_pair",
+            "Mutable borrow from b to refs",
+            "Move from ptr to fields.1",
+            "either holds the borrows its argument holds: a, b",
+            "Mutable reborrow from r to pair:",
+            "Access through r is reserved for a mutable borrow by a call",
+            "the value r points to is mutably borrowed by pair through r; r can't be used while the borrow is live",
+            "a reference to *s, reborrowed through s, is returned",
+            "a mutable reference to *r, reborrowed through r, is returned",
+            "Copy from &mut *q to Some",
+            "Return mutably borrowed value from saved to a",
+            "Mutable borrow from b to saved",
+            "Mutable borrow from c to saved",
+        ],
+    },
 ];
+
+#[test]
+fn aggregate_operand_issue_rows_1657() {
+    let tl = run_with_local_backend("aggregate_operand_loans_1657").timeline_panel_string();
+    let elements = common::svg::rv_elements(&tl);
+    // The write through q and the store into data[0] precede the loans.
+    // rustc issues two distinct shared borrows of *q, one on each row.
+    for (source, holder, expected) in [
+        ("q", "multiple", vec!["71", "73"]), ("data", "multiple", vec!["72"]), ("r", "multiple", vec!["74"]),
+        ("b", "refs", vec!["109"]), ("p", "refs", vec!["110"]),
+    ] {
+        let rows: Vec<_> = elements.iter().filter(|e| e.kind == "arrow" && e.var.as_deref() == Some(source)
+            && e.to.as_deref() == Some(holder)).filter_map(|e| e.line.as_deref()).collect();
+        assert_eq!(rows, expected, "{source} to {holder}");
+    }
+}
+
+#[test]
+fn aggregate_reborrow_limits_the_parent_until_last_use_1657() {
+    let snippet = "aggregate_reborrow_1657";
+    // rustc permits &*r here, rejects *r = 9 with E0506, and accepts the
+    // write just after h.unwrap().  The mutable reborrow rejects even &*m.
+    assert_owner_title(snippet, "r", 5, 6, None, "the way a shared reference can", "read and write");
+    assert_owner_title(snippet, "r", 6, 7, None, "can read and write", "currently shared");
+    assert_owner_title(snippet, "m", 25, 26, None, "can't be read, moved, or used", "can read and write");
+    assert_owner_title(snippet, "m", 26, 27, None, "can read and write", "can't be read");
+    // Even the path that may construct bag prevents using *p before
+    // println! (E0502). The write after its last use compiles.
+    assert_owner_title(snippet, "p", 49, 50, None, "can't be read, moved, or used", "the way a shared reference can");
+    // MIR issues &sibling on its operand and &*parent at the block's
+    // tail, after *parent += 1.
+    let svg = run_with_local_backend(snippet).timeline_panel_string();
+    let elements = common::svg::rv_elements(&svg);
+    for (var, row) in [("sibling", "58"), ("parent", "61")] {
+        let rows: Vec<_> = elements.iter().filter(|e| e.kind == "arrow"
+            && e.var.as_deref() == Some(var) && e.to.as_deref() == Some("later")).map(|e| e.line.as_deref()).collect();
+        assert_eq!(rows, [Some(row)], "{var} → later");
+    }
+}
 
 /// A figure's timeline elements whose `data-rv-id` starts with `prefix`:
 /// (id, plain tooltip, x range, y range of what they draw).

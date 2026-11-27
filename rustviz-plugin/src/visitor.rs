@@ -5452,23 +5452,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               let arg_ty = typeck.node_type(arg.hir_id);
               if !arg_ty.is_ref() {
                 self.match_arg(arg, name.clone());
-              } else if !to_call && matches!(arg.kind, ExprKind::Path(_) | ExprKind::Field(..)) {
-                // A reference variable put into the value: its copy
-                // (or move, for `&mut`) goes where the value goes, and
-                // is drawn there once that's known (#768).
-                let from = self.rap_or_field_through_ref(arg);
-                let line = expr_to_line(arg, &self.tcx);
-                if let (ResourceTy::Value(rap) | ResourceTy::Deref(rap), Some(to)) = (&from, self.raps.get(&fn_key(&name))) {
-                  let (rap, to) = (rap.to_owned(), ResourceTy::Value(to.rap.to_owned()));
-                  self.update_rap(&rap, line);
-                  // `let o: Option<&i32> = Some(r);` (or `Option<&mut
-                  // i32>`) with r a `&mut`: rustc reborrows r where the
-                  // expected type is a reference, so r isn't moved; the
-                  // holder's borrow is drawn as for a shared reference's
-                  // copy (#1329).
-                  let evt = if arg_ty.ref_mutability() == Some(Mutability::Mut) && !is_implicit_reborrow(arg, typeck) { Evt::Move } else { Evt::Copy };
-                  self.add_ev(line, evt, to, from, false);
-                }
               } else if !to_call {
                 // `Some(x.trim())` with x a reference: the reborrow goes
                 // where the value goes, as `Some(x)` does (#1340).

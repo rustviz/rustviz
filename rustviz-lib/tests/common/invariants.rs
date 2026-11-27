@@ -88,7 +88,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1715_nested_downgrade", "invalid-state", 1715),
     ("known_bugs/1732_stored_loan_kinds", "arrow-along-leg", 1732),
     ("known_bugs/1732_stored_loan_kinds", "invalid-state", 1732),
-    ("known_bugs/1750_mixed_arm_holder", "invalid-state", 1750),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "arrow-along-leg", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "invalid-state", 1823),
     ("known_bugs/1823_shared_ref_of_mut_kinds", "invalid-state", 1823),
