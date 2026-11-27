@@ -33,6 +33,7 @@ pub(crate) mod call_wording;
 mod holder_path;
 mod places;
 pub(crate) mod repoints;
+mod direct_holders;
 mod rows;
 mod runtime;
 pub mod schema;

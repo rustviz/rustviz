@@ -679,6 +679,9 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// a borrow (`Some(n)` on `it.next()`, #391): their borrow is part of
   /// that value's, and ends at their own last use (#575).
   pub pattern_copies: HashSet<String>,
+  /// Loans implicated by a fixed array copy, including restrictions
+  /// arising from the shared element lifetime.
+  pub(crate) array_copy_lenders: BTreeMap<usize, ResourceTy>,
   /// Bindings under a `&` sub-pattern (`Some(&y)` on `orr`), by RAP
   /// hash: the copy into each, from the matched value named here, is
   /// of the value a reference stored in it points to (#874); `true`
@@ -1308,6 +1311,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       stored_borrows: Vec::new(),
       derived: Vec::new(),
       pattern_copies: HashSet::new(),
+      array_copy_lenders: BTreeMap::new(),
       pointee_copies: HashMap::new(),
       deref_ref_pats: HashSet::new(),
       pattern_lender: None,
@@ -2164,7 +2168,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  pub fn add_external_event(&mut self, line_num: usize, mut event: ExternalEvent) {
+  pub fn add_external_event(&mut self, line_num: usize, event: ExternalEvent) {
+    self.add_external_event_with_write(line_num, event, true);
+  }
+
+  fn add_external_event_with_write(&mut self, line_num: usize, mut event: ExternalEvent, check_write: bool) {
     let line_num = self.line_override.unwrap_or(line_num);
     if let ExternalEvent::Move { from: ResourceTy::Value(from), break_out, .. } = &mut event {
       // Or one of its fields, which move with it (#1280).
@@ -2272,7 +2280,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => ()
     }
     self.propagate_struct_transfer(line_num, &event);
-    self.note_dead_loan_write(line_num, &event);
+    if check_write {
+      self.note_dead_loan_write(line_num, &event);
+    }
   }
 
   /// `event` writes to a variable's column (an assignment, or a `&mut`
@@ -9667,18 +9677,24 @@ pub fn register_iflet_let_bindings(
             moved_by_pattern.push(from.clone());
         }
         let evt_kind = evt.clone();
-        let event = self.ext_ev_of_evt(
-            evt,
-            ResourceTy::Value(binding_rap.clone()),
-            from,
-            *self.unique_id,
-            // (None: an or-pattern's name, bound as a new value.)
-            is_partial.unwrap_or(false),
-        );
-        let row = self.pattern_loans.get(binding_rap.hash()).map_or(let_line, |loan| loan.line);
+        let id = *self.unique_id;
+        let exact_copy = matches!(evt_kind, Evt::Copy).then(|| self.raps.pattern_local(binding_rap.name(), let_expr.pat)
+          .and_then(|local| self.array_reference_copy(local, &binding_rap, id))).flatten();
+        let exact = exact_copy.is_some();
+        let (row, event) = exact_copy.unwrap_or_else(|| {
+            let event = self.ext_ev_of_evt(
+                evt, ResourceTy::Value(binding_rap.clone()), from, id,
+                // (None: an or-pattern's name, bound as a new value.)
+                is_partial.unwrap_or(false),
+            );
+            let row = self.pattern_loans.get(binding_rap.hash()).map_or(let_line, |loan| loan.line);
+            (row, event)
+        });
         self.add_external_event(row, event);
         *self.unique_id += 1;
-        borrows.extend(self.pattern_ref_copy_borrow(&binding_rap, &evt_kind, scrutinee, Some(let_expr.pat)));
+        if !exact {
+          borrows.extend(self.pattern_ref_copy_borrow(&binding_rap, &evt_kind, scrutinee, Some(let_expr.pat)));
+        }
 
         // A struct binding's field columns (`x.name`, `x.n`) are
         // declared here too: they go out of scope with `x`, and in a
@@ -10102,7 +10118,7 @@ fn draw_holder_borrows(&mut self, lhs: &ResourceTy, lenders: &[ResourceTy], rd: 
     } else {
       ExternalEvent::StaticBorrow { from, to: lhs.clone(), is_partial: false, is_reborrow, break_alt: None, via: via.cloned(), id, of_ref_var: false }
     };
-    self.add_external_event(line, ev);
+    self.add_external_event_with_write(line, ev, operand.is_none_or(|b| b.issued));
     *self.unique_id += 1;
   }
 }
@@ -12962,6 +12978,21 @@ pub fn print_out_of_scope(&mut self){
     }
 
     let slot_keys: Vec<String> = slots.iter().map(|s| s.key.clone()).collect();
+    // Array elements can share a region while carrying distinct references.
+    // Use the compiler's holder places for these releases. A release with
+    // no named holder is drawn on the lender's column only.
+    let array_releases: BTreeMap<_, _> = self.array_copy_lenders.iter().filter_map(|(&id, lender)| {
+      if !matches!(lender, ResourceTy::Value(r) if !r.is_ref()) { return None; }
+      let mut ends = self.reference_effects.ends(id).filter(|b| b.release);
+      let end = ends.next()?;
+      ends.next().is_none().then(|| (id, (lender.clone(), end)))
+    }).collect();
+    let is_slot = |p: &crate::facts::EndPlace, slot: &Slot, raps: &BodyRaps| {
+      p.name == slot.key && match slot.rd.local {
+        Some(local) => p.local == local.index() && p.projection.is_empty(),
+        None => raps.place(Local::from_usize(p.local), &p.name).is_some(),
+      }
+    };
     // Per slot and lender: the end, from the facts.
     let lends_to = |rd: &RefData| -> Vec<ResourceTy> {
       let mut v = vec![rd.lender.clone()];
@@ -13022,6 +13053,20 @@ pub fn print_out_of_scope(&mut self){
           mine = ix.loans_reaching(&slot.key).into_iter()
             .filter(|f| !claimed.get(&slot.key).is_some_and(|c| c.contains(&f.loan)) && ix.lends(f, &l.real_name()))
             .map(|f| f.loan).collect();
+        }
+        if let [id] = mine.as_slice() {
+          if let Some((lender, release)) = array_releases.get(id).filter(|(lender, _)| lender == l) {
+            let end = if matches!(release.fact.end_places.as_slice(), [p] if is_slot(p, slot, &self.raps)) {
+              End::Arrow(release.row)
+            } else {
+              let stop = self.reference_effects.ends(*id).filter(|b| !b.release
+                && b.fact.end_places.iter().any(|p| is_slot(p, slot, &self.raps)))
+                .map(|b| b.row).max();
+              stop.map_or(End::None, End::Own)
+            };
+            ends.push(Pending { lender: lender.clone(), end, loans: mine, own: None, holder_stops: None, walk: false });
+            continue;
+          }
         }
         // (Not for a lender with a column of its own the facts give k no
         // loan of, `r2` after `std::mem::swap(&mut r1, &mut r2)`: the
@@ -13474,6 +13519,11 @@ pub fn print_out_of_scope(&mut self){
           e => e,
         };
         let first_id = *self.unique_id;
+        let exact_array_loan = match loans.as_slice() {
+          [id] if array_releases.get(id).is_some_and(|(l, _)| *l == lender) => facts
+            .and_then(|f| f.loans.iter().find(|l| l.loan == *id)),
+          _ => None,
+        };
         match end {
           End::None => {}
           End::Arrow(line) => {
@@ -13515,6 +13565,9 @@ pub fn print_out_of_scope(&mut self){
             self.add_ev(back, evt, to_ro, ResourceTy::Anonymous, false);
           }
           End::Own(_) if co => {}
+          End::Own(line) if exact_array_loan.is_some() => {
+            self.add_own_end(line, &from_ro, to_ro, k, &loans);
+          }
           End::Own(line) => 'own: {
             // A copy of a reference to a string literal or a `static`
             // (whose lender has no column, so no end draws an arrow) says
@@ -13543,6 +13596,19 @@ pub fn print_out_of_scope(&mut self){
               break 'own;
             }
             self.add_own_end(line, &from_ro, to_ro, k, &loans);
+          }
+        }
+        if let Some(loan) = exact_array_loan {
+          use crate::svg_generator::hover_messages as hover;
+          let title = match end {
+            End::Arrow(_) => Some(hover::array_loan_release(Some(k), &loan.lender, loan.kind)),
+            End::Own(_) => Some(hover::reference_hold_end(k, &loan.lender, loan.kind)),
+            _ => None,
+          };
+          if let Some(title) = title {
+            for id in first_id..*self.unique_id {
+              self.row_layout.aggregate_titles.insert(id, title.clone());
+            }
           }
         }
         let projected = match (end, loans.as_slice()) {
@@ -13576,6 +13642,16 @@ pub fn print_out_of_scope(&mut self){
           }
         }
       }
+    }
+    for (loan, (lender, release)) in array_releases {
+      if release.fact.end_places.len() == 1 { continue; }
+      let Some(info) = facts.and_then(|f| f.loans.iter().find(|l| l.loan == loan)) else { continue; };
+      let id = *self.unique_id;
+      let event = if info.kind == "mut" { Evt::MDie } else { Evt::SDie };
+      self.add_ev(release.row, event, lender, ResourceTy::Anonymous, false);
+      self.end_loans.insert(id, vec![loan]);
+      self.drawn_references.ends.insert(id, vec![release]);
+      self.row_layout.aggregate_titles.insert(id, crate::svg_generator::hover_messages::array_loan_release(None, &info.lender, info.kind));
     }
   }
 

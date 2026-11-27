@@ -6931,6 +6931,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                   if let Some(store) = store { self.drawn_references.replaced_by.insert(id, store); }
                 }
               }
+              if let ([id], Some(store)) = (old.as_slice(), store) {
+                if lhs_rap.is_member() {
+                  let slot = crate::facts::EndPlace::new(self.tcx, store.destination, me.clone());
+                  if let Some(loan) = self.facts.and_then(|f| f.loans.iter().find(|l| l.loan == *id
+                    && l.kind == "shared" && !store.installed.contains(id))) {
+                    for (row, event) in self.preprocessed_events.iter().chain(self.late_old_ends.iter()) {
+                      let ExternalEvent::RefDie { id, .. } = event else { continue };
+                      if *id < ends_lo { continue; }
+                      let mut ends = self.reference_effects.ends(loan.loan).filter(|b| !b.release && b.row == *row
+                        && b.fact.end_places.contains(&slot) && !b.fact.continuing_places.is_empty()
+                        && (b.fact.occurrence.at == store.fact.occurrence.at
+                          || crate::facts::repoints::precedes(&self.bwf.body, b.fact, store.fact)
+                          || crate::facts::repoints::precedes(&self.bwf.body, store.fact, b.fact)));
+                      if let Some(end) = ends.next().filter(|_| ends.next().is_none()) {
+                        self.drawn_references.ends.insert(*id, vec![end]);
+                        self.row_layout.aggregate_titles.insert(*id,
+                          crate::svg_generator::hover_messages::reference_hold_end(&me, &loan.lender, loan.kind));
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
 
@@ -7479,6 +7501,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             if matches!(ev, ExternalEvent::StaticBorrow { to, .. } | ExternalEvent::MutableBorrow { to, .. }
               | ExternalEvent::Copy { to, .. } | ExternalEvent::Move { to, .. } if to == &lhs_rty) {
               self.drawn_references.install(ev.get_id(), rhs_expr.span, *lhs_rty.hash(), self.tcx, store);
+            }
+            if let ExternalEvent::Copy { from: ResourceTy::Value(src), to: ResourceTy::Value(dest), id, .. } = ev {
+              if dest.is_ref() && dest.is_member() && ResourceTy::Value(dest.clone()) == lhs_rty
+                && self.field_store_reborrows(store, src, rhs_expr.span) {
+                self.row_layout.aggregate_titles.insert(*id,
+                  crate::svg_generator::hover_messages::event_dot_shared_field_reborrow(dest, src));
+              }
             }
           }
         }
@@ -8987,16 +9016,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         *self.unique_id += 1;
         let mut ext_ev = self.ext_ev_of_evt(e.clone(), ResourceTy::Value(to_ro.clone()), from.clone(), id, is_partial);
         self.arm_part_borrow(guard_expr, arm_pat, to_ro, from, &mut ext_ev);
+        let mut pat_line = self.pattern_loans.get(to_ro.hash()).map_or(pat_line, |l| l.line);
         // A reference copied out of a value that holds a
         // borrow also borrows what that value borrows (#391).
-        pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee, Some(arm_pat)));
+        if let Some((row, copy)) = matches!(e, Evt::Copy).then(||
+          self.raps.pattern_local(to_ro.name(), arm_pat).and_then(|local| self.array_reference_copy(local, to_ro, id))).flatten() {
+          pat_line = row;
+          ext_ev = copy;
+        } else {
+          pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee, Some(arm_pat)));
+        }
         // add_external_event gives a struct's fields their
         // part of a whole (non-partial) move; otherwise
         // that's done below.
         if matches!(e, Evt::Move | Evt::Copy) && (!inline || is_partial) {
           member_binds.push(to_ro.clone());
         }
-        let pat_line = self.pattern_loans.get(to_ro.hash()).map_or(pat_line, |l| l.line);
         if inline {
           self.add_external_event(pat_line, ext_ev);
         } else {
@@ -9086,7 +9121,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           Some(fields) if fields.len() == parents.len() => &fields[i],
           _ => guard_expr,
         };
-        pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee, Some(arm_pat)));
+        let mut pat_line = self.pattern_loans.get(to_ro.hash()).map_or(pat_line, |l| l.line);
+        if let Some((row, copy)) = matches!(e, Evt::Copy).then(||
+          self.raps.pattern_local(to_ro.name(), arm_pat).and_then(|local| self.array_reference_copy(local, to_ro, id))).flatten() {
+          pat_line = row;
+          ext_ev = copy;
+        } else {
+          pending_borrows.extend(self.pattern_ref_copy_borrow(to_ro, e, scrutinee, Some(arm_pat)));
+        }
         if matches!(e, Evt::Move | Evt::Copy) && !inline {
           member_binds.push(to_ro.clone());
         }
@@ -9100,7 +9142,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           (ExternalEvent::Move { from, is_partial: false, .. }, false) => box_payload_of(from).map(|b| b.name().clone()),
           _ => None,
         };
-        let pat_line = self.pattern_loans.get(to_ro.hash()).map_or(pat_line, |l| l.line);
         if inline {
           let row = match (&mut ext_ev, slot_borrows.get(to_ro.hash())) {
             (ExternalEvent::MutableBorrow { of_ref_var, .. } | ExternalEvent::StaticBorrow { of_ref_var, .. }, Some(&line)) => {
@@ -13578,13 +13619,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       PatKind::Binding(annotation, hirid, _, sub_pat) => {
         let name = self.raps.declare(hirid, &self.tcx);
         let first_id = *self.unique_id;
-        self.bind_one(name.clone(), annotation, hirid, init, is_skipped);
-        if nested {
+        let exact_array_copy = self.bind_one(name.clone(), annotation, hirid, init, is_skipped);
+        if nested && !exact_array_copy {
           self.mark_copy_inside(&name, hirid, init, first_id);
           self.mark_copy_pointee(&name, hirid, init, first_id);
           self.mark_part_borrow(&name, hirid, init, first_id);
         }
-        if nested && !is_skipped && self.own_ref_binding(hirid).is_none() {
+        if nested && !exact_array_copy && !is_skipped && self.own_ref_binding(hirid).is_none() {
           if let Some(rap) = self.raps.get(&name).map(|rd| rd.rap.to_owned()) {
             let lhs_ty = self.tcx.typeck(hirid.owner).node_type(hirid);
             let evt = self.bind_evt(lhs_ty, hirid);
@@ -13646,6 +13687,96 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       | PatKind::Expr(_)
       | PatKind::Range(..) => {}
     }
+  }
+
+  /// The RHS can lower to a reborrow and a transfer from its temporary.
+  /// Match the issued reference value to this particular field store.
+  fn field_store_reborrows(&self, store: crate::facts::repoints::Store<'_, 'tcx>, src: &ResourceAccessPoint, rhs: rustc_span::Span) -> bool {
+    use rustc_middle::mir::{BorrowKind, ProjectionElem, Rvalue, StatementKind};
+    let Some(local) = src.ref_local() else { return false };
+    let Some(facts) = self.facts else { return false };
+    let slot = crate::facts::EndPlace::new(self.tcx, store.destination, String::new());
+    store.installed.iter().any(|id| {
+      let Some(loan) = facts.loans.iter().find(|l| l.loan == *id) else { return false };
+      let Some(at) = loan.issue else { return false };
+      let Some(stmt) = self.bwf.body[at.block].statements.get(at.statement_index) else { return false };
+      stmt.source_info.span.source_equal(rhs)
+        && matches!(&stmt.kind, StatementKind::Assign(a) if matches!(a.1,
+          Rvalue::Ref(_, BorrowKind::Shared, place) if place.local == local && place.projection.as_slice() == [ProjectionElem::Deref]))
+        && loan.holder_stores.iter().any(|s| s.complete && s.occurrence == store.fact.occurrence
+          && s.place.local == slot.local && s.place.projection == slot.projection)
+    })
+  }
+
+  /// A fixed array slot can identify a copied reference even when its
+  /// siblings share the same borrowck origin. Attach that proof to the
+  /// copy arrow and keep the other borrowck restrictions in its text.
+  pub(crate) fn array_reference_copy(&mut self, local: Local, to: &ResourceAccessPoint, id: usize) -> Option<(usize, ExternalEvent)> {
+    use crate::svg_generator::hover_messages as hover;
+    use rustc_middle::mir::{ProjectionElem, Rvalue, StatementKind};
+    if !to.is_ref() || to.is_mutref() { return None; }
+    let facts = self.facts?;
+    let bindings = facts.binding_loans.get(&local)?;
+    let mut sources = facts.binding_sources.iter().filter(|s| s.runs && s.declaration == local
+        && bindings.contains_key(&s.location));
+    let source = sources.next()?;
+    if sources.next().is_some() || source.row == 0 { return None; }
+    let location = source.location;
+    let (array, column, element) = source.fixed_array_copy.as_ref()?;
+    let from = self.raps.place(*array, column)?.rap.clone();
+    let stored = |s: &crate::facts::HolderStore| s.place.local == local.index()
+        && s.place.projection.is_empty() && s.occurrence.at == location;
+    let mut installed = facts.loans.iter().filter(|l| l.holder_stores.iter().any(stored));
+    let loan = installed.next()?;
+    if installed.next().is_some() || !loan.holder_stores.iter().any(|s| stored(s) && s.complete) { return None; }
+    let bare_deref = |l: &crate::facts::LoanInfo| {
+      l.issue.and_then(|at| self.bwf.body[at.block].statements.get(at.statement_index))
+        .is_some_and(|s| matches!(&s.kind, StatementKind::Assign(a)
+          if matches!(a.1, Rvalue::Ref(_, _, p) if p.projection.as_slice() == [ProjectionElem::Deref])))
+    };
+    let lender = if let Some(r) = self.raps.place(loan.lender_local?, &loan.lender) {
+      ResourceTy::Value(r.rap.clone())
+    } else if bare_deref(loan) {
+      ResourceTy::Deref(self.raps.place(loan.lender_local?, loan.through.as_ref()?)?.rap.clone())
+    } else {
+      return None;
+    };
+    let name = |l: &crate::facts::LoanInfo| {
+      if let Some(p) = l.payload.as_ref().or(l.projected.as_ref()) {
+        hover::projected_place_html(p)
+      } else if let Some(through) = l.through.as_ref().filter(|_| bare_deref(l)) {
+        format!("what {} points to", hover::styled_name_html(through))
+      } else if l.lender_local.and_then(|local| self.raps.place(local, &l.lender)).is_some() {
+        hover::styled_name_html(&l.lender)
+      } else {
+        "another value".to_owned()
+      }
+    };
+    let active = &bindings[&location];
+    let restrictions = facts.loans.iter().filter(|l| l.runs && l.source == "borrow"
+        && active.contains(&l.loan) && l.loan != loan.loan
+        && !(bare_deref(l) && l.made_through.iter().any(|parent| active.contains(parent))));
+    let restriction_names = restrictions.clone().map(name).collect();
+    let mutable = loan.kind == "mut";
+    let read_only = matches!(&lender, ResourceTy::Value(r) if !r.may_have_interior_mut());
+    let title = hover::array_reference_copy(to.name(), element, &name(loan), mutable, read_only, &restriction_names);
+    for restriction in restrictions {
+      if let Some(r) = restriction.lender_local.and_then(|local| self.raps.place(local, &restriction.lender)) {
+        self.array_copy_lenders.insert(restriction.loan, ResourceTy::Value(r.rap.clone()));
+      }
+    }
+    let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+    let rd = self.borrow_map.get_mut(to.name())?;
+    rd.lender = lender.clone();
+    rd.aliasing = aliasing;
+    rd.co_lenders.clear();
+    rd.lender_muts = if mutable { vec![(lender.clone(), true)] } else { Vec::new() };
+    rd.static_lender = None;
+    self.pattern_copies.insert(to.name().clone());
+    self.row_layout.aggregate_titles.insert(id, title);
+    self.array_copy_lenders.insert(loan.loan, lender);
+    let copy = self.ext_ev_of_evt(Evt::Copy, ResourceTy::Value(to.clone()), ResourceTy::Value(from), id, true);
+    Some((source.row, copy))
   }
 
   /// For `unset_lender_copied_from_holder`'s caller (`bind_walk_in`):
@@ -14170,13 +14301,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     hirid: HirId,
     init: &'tcx Expr<'tcx>,
     is_skipped: bool,
-  ) {
+  ) -> bool {
     let tycheck_results = self.tcx.typeck(hirid.owner);
     let lhs_ty = tycheck_results.node_type(hirid);
     // `let ref r = s;` is `let r = &s;`: a borrow, not a copy (#380).
     if let Some(mutbl) = self.own_ref_binding(hirid) {
       self.bind_ref_binding(name, annotation, hirid, init, is_skipped, mutbl, lhs_ty);
-      return;
+      return false;
     }
     let is_copyable = self.tcx.type_is_copy_modulo_regions(
       typing_env(self.tcx, hirid.owner),
@@ -14204,6 +14335,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.skip_raps.insert(name);
     } else {
       let rap = self.raps.get(&name).unwrap().rap.to_owned();
+      if let Some((row, copy)) = self.facts.and_then(|f| f.bindings.declarations.get(&hirid))
+        .and_then(|&local| self.array_reference_copy(local, &rap, *self.unique_id)) {
+        *self.unique_id += 1;
+        self.add_external_event(row, copy);
+        return true;
+      }
       // `let [d, _] = duo;`: d is moved out of `duo[0]`, which leaves the
       // rest in duo (#1285).
       match self.slice_elem_source(hirid, &self.rap_or_field_through_ref(init)).filter(|_| matches!(evt, Evt::Move)) {
@@ -14219,6 +14356,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       self.draw_kept_closure_borrows(&name, init);
     }
+    false
   }
 
   /// Move vs. Copy for binding a value of type `ty` (a `&T` is Copy,

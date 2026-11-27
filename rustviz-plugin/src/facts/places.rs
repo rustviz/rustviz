@@ -8,7 +8,7 @@
 
 use crate::expr_visitor_utils::{body_binding_names, binding_name};
 use super::schema::BodyBindings;
-use rustc_middle::mir::{Body, Place, PlaceElem, ProjectionElem, VarDebugInfoContents};
+use rustc_middle::mir::{Body, Local, Place, PlaceElem, ProjectionElem, VarDebugInfoContents};
 use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 
 /// How a closure body sees a captured variable.
@@ -128,14 +128,40 @@ impl<'tcx> Names<'tcx> {
         Some(name_projections(root, &mut ty, &place.projection[skip..]))
     }
 
+    /// Name the visible array and its slot after MIR index normalization.
+    pub(super) fn fixed_array_slot(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Option<(Local, String, String)> {
+        use std::fmt::Write;
+        let (_, skip, _) = self.root(place)?;
+        let index = (skip..place.projection.len()).find(|&i| matches!(place.projection[i], ProjectionElem::ConstantIndex { .. }))?;
+        let base = Place { local: place.local, projection: tcx.mk_place_elems(&place.projection[..index]) };
+        if !column_projection(body, base, skip) { return None; }
+        let array = self.name(tcx, body, base)?;
+        let mut label = array.clone();
+        for step in &place.projection[index..] {
+            let ProjectionElem::ConstantIndex { offset, from_end: false, .. } = step else { return None };
+            write!(label, "[{offset}]").unwrap();
+        }
+        Some((place.local, array, label))
+    }
+
     /// Describe projections that cannot be written as a named source place.
     pub(super) fn projected(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Option<super::ProjectedPlace> {
-        use super::PlaceStep;
         let (_, skip, _) = self.root(place)?;
         if !place.projection[skip..].iter().any(|p| matches!(p, ProjectionElem::Index(_) |
             ProjectionElem::ConstantIndex { .. } | ProjectionElem::Subslice { .. })) {
             return None;
         }
+        self.describe_projection(tcx, body, place, skip)
+    }
+
+    pub(super) fn payload(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Option<super::ProjectedPlace> {
+        let (_, skip, _) = self.root(place)?;
+        place.projection[skip..].iter().any(|p| matches!(p, ProjectionElem::Downcast(..)))
+            .then(|| self.describe_projection(tcx, body, place, skip)).flatten()
+    }
+
+    fn describe_projection(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>, skip: usize) -> Option<super::ProjectedPlace> {
+        use super::PlaceStep;
         let first = (skip..place.projection.len()).find(|&i| matches!(place.projection[i],
             ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } |
             ProjectionElem::Subslice { .. } | ProjectionElem::Downcast(..)))?;

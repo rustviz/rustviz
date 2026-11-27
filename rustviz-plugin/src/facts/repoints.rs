@@ -2,10 +2,13 @@
 //! selects a store once, when the visitor emits its arrow. After that, even
 //! identical arrows use the MIR destination and occurrence of that store.
 use super::{BodyFacts, DropRoute, Ev, Fact, Occurrence};
-use rustc_middle::mir::{Body, Location, Place, StatementKind, TerminatorKind};
-use rustc_middle::ty::TyCtxt;
+use rustc_middle::mir::{Body, Location, Place, ProjectionElem, Rvalue, StatementKind, TerminatorKind};
+use rustc_middle::ty::{TyCtxt, TyKind};
 use rustc_span::Span;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Store<'a, 'tcx> {
@@ -154,6 +157,7 @@ pub(super) fn addressed_slots<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Vec
 pub(super) struct Incoming {
     pub sites: BTreeSet<Occurrence>,
     pub uninitialized: bool,
+    pub argument: bool,
     pub unknown: bool,
 }
 
@@ -165,7 +169,26 @@ pub(super) struct IncomingStores<'a, 'tcx> {
     pub moves: &'a rustc_mir_dataflow::move_paths::MoveData<'tcx>,
 }
 
-impl<'tcx> IncomingStores<'_, 'tcx> {
+impl<'a, 'tcx> IncomingStores<'a, 'tcx> {
+    #[cfg(test)]
+    pub fn new(
+        tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>, runs: &BTreeSet<rustc_middle::mir::BasicBlock>,
+        moves: &'a rustc_mir_dataflow::move_paths::MoveData<'tcx>,
+    ) -> Self {
+        let mut preds: BTreeMap<Location, Vec<Location>> = BTreeMap::new();
+        for &block in runs {
+            let terminator = body.terminator_loc(block);
+            for statement_index in 0..terminator.statement_index {
+                let at = Location { block, statement_index };
+                preds.entry(at.successor_within_block()).or_default().push(at);
+            }
+            for next in super::real_successor_blocks(body, block).into_iter().filter(|b| runs.contains(b)) {
+                preds.entry(next.start_location()).or_default().push(terminator);
+            }
+        }
+        Self { tcx, body, preds, addressed: addressed_slots(tcx, body), moves }
+    }
+
     /// Follow only value-preserving transfers back to the issuing borrow.
     /// The signature of a call cannot identify which reference it returned.
     pub fn direct_borrow(&self, mut before: Location, mut slot: Place<'tcx>) -> Option<Location> {
@@ -173,7 +196,7 @@ impl<'tcx> IncomingStores<'_, 'tcx> {
         let mut seen = std::collections::HashSet::new();
         while seen.insert((before, slot)) {
             let defs = self.definitions(before, slot);
-            if defs.unknown || defs.uninitialized || defs.sites.len() != 1 { return None; }
+            if defs.unknown || defs.uninitialized || defs.argument || defs.sites.len() != 1 { return None; }
             let site = defs.sites.first()?;
             let st = self.body[site.at.block].statements.get(site.at.statement_index)?;
             let StatementKind::Assign(write) = &st.kind else { return None };
@@ -189,30 +212,75 @@ impl<'tcx> IncomingStores<'_, 'tcx> {
         None
     }
 
+    /// Normalize fixed array coordinates, including indices whose reaching
+    /// definitions all evaluate to the same MIR constant. An index local is
+    /// an operand, so its identity alone cannot identify array storage.
+    pub(super) fn slot_before(&self, at: Location, place: Place<'tcx>) -> Option<Place<'tcx>> {
+        let mut out = Place::from(place.local);
+        for step in place.projection.iter() {
+            out = match step {
+                ProjectionElem::Field(..) | ProjectionElem::Downcast(..) => self.tcx.mk_place_elem(out, step),
+                ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } => {
+                    let TyKind::Array(_, len) = *super::body::decl_place_ty(self.tcx, self.body, out).kind() else { return None };
+                    let len = len.try_to_target_usize(self.tcx)?;
+                    let offset = match step {
+                        ProjectionElem::Index(index) => self.constant_index(at, index)?,
+                        ProjectionElem::ConstantIndex { offset, from_end: true, .. } => len.checked_sub(offset)?,
+                        ProjectionElem::ConstantIndex { offset, .. } => offset,
+                        _ => unreachable!(),
+                    };
+                    if offset >= len { return None; }
+                    super::direct_holders::element(self.tcx, out, offset, len)
+                }
+                _ => return None,
+            };
+        }
+        Some(out)
+    }
+
+    fn constant_index(&self, at: Location, index: rustc_middle::mir::Local) -> Option<u64> {
+        let defs = self.definitions(at, index.into());
+        if defs.unknown || defs.uninitialized || defs.argument { return None; }
+        let mut result = None;
+        for site in defs.sites {
+            let st = self.body[site.at.block].statements.get(site.at.statement_index)?;
+            let StatementKind::Assign(pair) = &st.kind else { return None };
+            let Rvalue::Use(op) = &pair.1 else { return None };
+            let index = op.constant()?.const_.try_eval_target_usize(self.tcx, self.body.typing_env(self.tcx))?;
+            if result.is_some_and(|old| old != index) { return None; }
+            result = Some(index);
+        }
+        result
+    }
+
     /// Stop each normal incoming path independently. An uninitialized arm
     /// contributes no loan, but its sibling's definition still reaches the join.
     pub fn definitions(&self, point: Location, slot: Place<'tcx>) -> Incoming {
-        use rustc_middle::mir::ProjectionElem;
         let Self { tcx, body, preds, addressed, moves } = self;
         let tcx = *tcx;
-        let slot = tcx.erase_and_anonymize_regions(slot);
-        let defines = |dst: Place<'tcx>| {
-            dst.local == slot.local && slot.projection.starts_with(tcx.erase_and_anonymize_regions(dst).projection)
-        };
         let mut result = Incoming::default();
-        if !slot.iter_projections().all(|(base, step)|
-            matches!(step, ProjectionElem::Field(..)) && !base.ty(&body.local_decls, tcx).ty.is_union())
-        {
+        let Some(slot) = self.slot_before(point, slot) else {
+            result.unknown = true;
+            return result;
+        };
+        let under = super::places::place_under;
+        if slot.iter_projections().any(|(base, _)| base.ty(&body.local_decls, tcx).ty.is_union()) {
             result.unknown = true;
             return result;
         }
-        let exposed = addressed.iter().any(|&p| defines(p));
+        let defines = |at, dst: Place<'tcx>| dst.local == slot.local
+            && self.slot_before(at, dst).is_some_and(|dst| under(slot, dst));
+        let overlaps = |place: Place<'tcx>| {
+            place.local == slot.local && !place.is_indirect()
+                && rustc_borrowck::consumers::places_conflict(tcx, body, place, slot, rustc_borrowck::consumers::PlaceConflictBias::Overlap)
+        };
+        let exposed = addressed.iter().copied().any(overlaps);
         let mut work = vec![point];
         let mut seen = BTreeSet::new();
         while let Some(next) = work.pop() {
             if !seen.insert(next) { continue; }
             let Some(incoming) = preds.get(&next) else {
-                if body.args_iter().any(|l| l == slot.local) { result.unknown = true; }
+                if body.args_iter().any(|l| l == slot.local) { result.argument = true; }
                 else { result.uninitialized = true; }
                 continue;
             };
@@ -220,7 +288,16 @@ impl<'tcx> IncomingStores<'_, 'tcx> {
                 let data = &body[at.block];
                 let def = if let Some(st) = data.statements.get(at.statement_index) {
                     match &st.kind {
-                        StatementKind::Assign(write) if defines(write.0) => Some(None),
+                        StatementKind::Assign(write) if defines(at, write.0) => Some(None),
+                        StatementKind::Assign(write) if overlaps(write.0)
+                            && self.slot_before(at, write.0).is_none() => {
+                            result.unknown = true;
+                            continue;
+                        }
+                        StatementKind::SetDiscriminant { place, .. } if overlaps(**place) => {
+                            result.unknown = true;
+                            continue;
+                        }
                         StatementKind::StorageLive(l) | StatementKind::StorageDead(l) if *l == slot.local => {
                             result.uninitialized = true;
                             continue;
@@ -239,7 +316,7 @@ impl<'tcx> IncomingStores<'_, 'tcx> {
                 } else {
                     match data.terminator().kind {
                         TerminatorKind::Call { destination, target: Some(target), .. }
-                            if target.start_location() == next && defines(destination) => Some(Some(next)),
+                            if target.start_location() == next && defines(at, destination) => Some(Some(next)),
                         TerminatorKind::Goto { .. } | TerminatorKind::SwitchInt { .. } => None,
                         _ if exposed => {
                             result.unknown = true;
@@ -254,7 +331,7 @@ impl<'tcx> IncomingStores<'_, 'tcx> {
                 };
                 if let Some(successor) = def {
                     result.sites.insert(Occurrence { at, exit: None, successor });
-                } else if moves.loc_map[at].iter().any(|m| defines(moves.move_paths[moves.moves[*m].path].place)) {
+                } else if moves.loc_map[at].iter().any(|m| defines(at, moves.move_paths[moves.moves[*m].path].place)) {
                     result.uninitialized = true;
                 } else {
                     work.push(at);

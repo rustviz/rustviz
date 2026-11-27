@@ -1407,7 +1407,7 @@ pub fn array_elem_ref_deref_depth<'tcx, 'a>(e: &'a Expr<'tcx>, typeck: &TypeckRe
     ty = *t;
     n += 1;
   }
-  Some((elem, n - 1, ty, last_ref?))
+  Some((elem, n.checked_sub(1)?, ty, last_ref?))
 }
 
 /// True iff the method receiver `rcvr` hands the callee a reference to
