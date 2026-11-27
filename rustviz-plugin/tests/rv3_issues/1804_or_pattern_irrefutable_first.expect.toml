@@ -4,7 +4,6 @@ title = "`(x, _) | (_, x)`: the first alternative is irrefutable, so t.0 always 
 note = "Passes since rv3 P1-4 (Q5 refined): moved on every real execution, though borrowck's imaginary edge to the unreachable second alternative skips the move, so the word is `moved`; usability still follows borrowck."
 fn = "g"
 places = ["t.0", "t.1"]
-beyond_facts = "P3: 2.x draws `x is bound from t.0 or t.1` and says each field is dropped only if no branch moved it (fixtures pin it)"
 
 [[state]]
 row = 3

@@ -2182,6 +2182,9 @@ enum ManuallyDropFn { Drop, Take }
 /// A name an or-pattern arm binds from a different place in each
 /// alternative (#533): the places, in the order of the alternatives.
 pub(crate) struct OrConflict {
+  sole_runtime_source: Option<String>,
+  source_names: BTreeMap<String, String>,
+  other_bindings: BTreeMap<String, crate::facts::OtherBindings>,
   name: String,
   places: Vec<ResourceAccessPoint>,
 }
@@ -2585,7 +2588,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         *self.unique_id += 1;
         self.exit_drops.insert(id);
         let early = Some(EarlyReturns { process_exit: process_exit.clone(), ..EarlyReturns::default() });
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, early });
       }
       for rap in scoped {
         let id = *self.unique_id;
@@ -2593,7 +2596,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         self.exit_drops.insert(id);
         self.exit_scope_ended.insert(rap.name().to_string());
         let early = Some(EarlyReturns { process_exit: process_exit.clone(), ..EarlyReturns::default() });
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, early });
       }
       return;
     }
@@ -2631,7 +2634,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: Some(ty), when, literal, early, part, id })
         }
         None if extended_temp => self.add_external_event(line, ExternalEvent::TemporaryDrop { ro: rap, ty: None, when, literal: false, early: false, part: None, id }),
-        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early: None }),
+        None => self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, early: None }),
       }
     }
     while let Some(t) = tuples.pop() {
@@ -2642,7 +2645,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       *self.unique_id += 1;
       self.exit_drops.insert(id);
       self.exit_scope_ended.insert(rap.name().to_string());
-      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, holds: None, id, early: None });
+      self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: rap, id, early: None });
     }
     // Innermost first, like the drops above. Not `exit_drops`: the
     // column doesn't end in this dot, whose drop happens on some paths
@@ -2659,7 +2662,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for rap in maybe_dropped {
       let id = *self.unique_id;
       *self.unique_id += 1;
-      self.add_external_event(line, ExternalEvent::OwnerDropUnlessReturned { ro: rap, id });
+      self.add_external_event(line, ExternalEvent::OwnerDropUnlessReturned { ro: rap, is_break: how == "break", id });
     }
   }
 
@@ -2774,7 +2777,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           loop_head: LoopHead::No,
           break_alt: None,
           break_out: false,
-          via_try: Some(*kind),
+          carried_with: None, via_try: Some(*kind),
           closure_value: false,
           id,
         });
@@ -4787,6 +4790,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.labeled_frames[i].paths.push((path, hide, value_moves));
   }
 
+  fn emit_assignment_joins(&mut self, expr: &'tcx Expr<'tcx>, imaginary: bool) {
+    let Some(join) = self.facts.and_then(|f| f.joins.get(&expr.span)) else { return };
+    for (name, always_assigned) in &join.assignments {
+      if *always_assigned != imaginary { continue; }
+      if let Some(rd) = self.raps.get(name) {
+        let ro = rd.rap.clone();
+        self.add_external_event(span_end_line(&expr.span, &self.tcx), ExternalEvent::AssignmentJoin {
+          ro, always_assigned: *always_assigned, id: *self.unique_id,
+        });
+        *self.unique_id += 1;
+      }
+    }
+  }
+
   /// At the end of the labeled block `expr` (#1286): a variable declared
   /// before it that the way to its end moves, where a `break` out of it
   /// before the move skipped it (`'a: { if c { break 'a 1; } drop(s); 2
@@ -5831,6 +5848,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           if let (Some(frame), Some(through)) = (frame, through) {
             self.emit_block_break_skips(expr, frame, &through, &emitted);
           }
+          self.emit_assignment_joins(expr, false);
         }
       }
 
@@ -5921,7 +5939,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
 
       // if <expr> { } Option<else>
-      ExprKind::If(guard_expr, if_expr, else_expr) => self.visit_if(expr, guard_expr, if_expr, else_expr),
+      ExprKind::If(guard_expr, if_expr, else_expr) => {
+        self.visit_if(expr, guard_expr, if_expr, else_expr);
+        self.emit_assignment_joins(expr, true);
+      }
 
       ExprKind::Loop(block, _, loop_ty, _span) => {
         self.note_breakless_loop(expr);
@@ -8265,7 +8286,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // can have: an irrefutable pattern, or one that takes apart a
     // literal the way it was built (`(x, _)` on `(f, s)`, `Some(x)` on
     // `Some(f)`, #981). Its body always runs.
-    let always_matches = iflet_tuple.is_some_and(|l| self.let_always_matches(l.pat, l.init));
+    let always_matches = iflet_tuple.is_some_and(|l| self.let_always_matches(l.pat, l.init)
+      || (pat_has_or(l.pat) && else_expr.is_none() && self.facts.and_then(|f| f.joins.get(&expr.span)).is_some_and(|j| j.dead_implicit_else)));
     // Its `else` block, if any, is dead code (#987): rustc warns
     // `irrefutable_let_patterns`, and the compiled program has no else
     // block (its MIR drops what the block would have moved at scope
@@ -8642,7 +8664,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !left.contains(v)) {
                 self.preprocessed_events.push((
                     if_end,
-                    ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None },
+                    ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id, early: None },
                 ));
                 *self.unique_id += 1;
             }
@@ -8728,12 +8750,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let if_left = self.left_at_exits(self.ends_at_exits(if_expr, true), &if_decl);
     let else_left = self.left_at_exits(else_expr.is_some_and(|e| self.ends_at_exits(e, true)), &else_decl);
     for var in in_decl_order(&if_decl).into_iter().filter(|v| needs_scope_end(v) && !if_scoped.contains(v) && !if_left.contains(v)) {
-      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
+      if_ev.push((if_end, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
 
     for var in in_decl_order(&else_decl).into_iter().filter(|v| needs_scope_end(v) && !else_scoped.contains(v) && !else_left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
     if_decl.extend(if_inner);
@@ -8773,7 +8795,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           loop_head: LoopHead::No,
           break_alt: None,
           break_out: false,
-          via_try: None,
+          carried_with: None, via_try: None,
           closure_value: false,
         }));
         *self.unique_id += 1;
@@ -8905,6 +8927,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.event_spans.insert(*self.unique_id, guard_expr.span);
     self.add_external_event(line_num,
       ExternalEvent::Branch {
+        join_span: Some(expr.span),
         live_vars: liveness,
         branches: b_branches,
         branch_type: b_ty,
@@ -9271,7 +9294,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for r in in_decl_order(&arm_decls).into_iter().filter(|v| needs_scope_end(v) && !arm_scoped.contains(v) && !arm_left.contains(v)) {
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), holds: None, id, early: None };
+        let gos = ExternalEvent::GoOutOfScope { ro: r.clone(), id, early: None };
         if inline {
           self.add_external_event(end, gos);
         } else {
@@ -9767,6 +9790,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.event_spans.insert(*self.unique_id, scrutinee.span);
     }
     self.add_external_event(split, ExternalEvent::Branch {
+      join_span: Some(expr.span),
       live_vars: liveness,
       branches: branch_data,
       branch_type,
@@ -12985,7 +13009,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let left = self.left_at_exits(self.block_ends_at_exits(els, true), &decl);
     for var in in_decl_order(&decl).into_iter().filter(|v| needs_scope_end(v) && !scoped.contains(v) && !left.contains(v)) {
-      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), holds: None, id: *self.unique_id, early: None }));
+      else_ev.push((merge, ExternalEvent::GoOutOfScope { ro: var.clone(), id: *self.unique_id, early: None }));
       *self.unique_id += 1;
     }
     decl_vars.extend(decl);
@@ -13023,6 +13047,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     pat.each_binding(|_, hid, _, _| bound.push(binding_name(&self.tcx, hid)));
     self.let_else_scrutinees.insert(*self.unique_id, (holder, bound));
     self.add_external_event(split, ExternalEvent::Branch {
+      join_span: None,
       live_vars: liveness,
       branches,
       branch_type: BranchType::If(labels, vec![else_slice, match_slice]),
@@ -13959,8 +13984,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.add_external_event(line, ev);
     }
     // (A reference is drawn by its `OrAltBorrow`s.)
-    if !bound.is_empty() {
-      self.add_ev(line, Evt::Bind, ResourceTy::Value(to), ResourceTy::Anonymous, false);
+    for (to, event, from, partial) in bound {
+      self.add_ev(line, event, ResourceTy::Value(to), from, partial.unwrap_or(false));
     }
   }
 
@@ -14806,7 +14831,36 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           None => refuse("the name"),
         }
       }
-      conflicts.push(OrConflict { name: name.clone(), places: raps });
+      let mut sole_runtime_source = None;
+      let mut source_names = BTreeMap::new();
+      let mut other_bindings = BTreeMap::new();
+      if let (Some(binding), Some(facts)) = (binding, self.facts) {
+        let sites: Vec<_> = facts.binding_sources.iter().filter(|s| s.runs && pat.span.contains(s.site)).collect();
+        // A parameter column may end at the enclosing tuple. Keep the
+        // precise MIR field name even when the dot is drawn on its parent.
+        let mapped: Option<BTreeMap<_, _>> = sites.iter().filter(|s| s.declaration == binding.span)
+          .map(|s| {
+            let from = s.from.as_ref()?;
+            let rap = raps.iter().find(|r| r.name() == from)
+              .or_else(|| raps.iter().find(|r| s.parents.contains(r.name())))?;
+            Some((from.clone(), rap.name().clone()))
+          }).collect();
+        if let Some(mapped) = mapped.filter(|m| !m.is_empty()
+          && m.values().collect::<BTreeSet<_>>().len() == m.len()) {
+          if mapped.len() == 1 { sole_runtime_source = mapped.keys().next().cloned(); }
+          source_names = mapped.into_iter().map(|(from, column)| (column, from)).collect();
+          if !by_ref { raps.retain(|r| source_names.contains_key(r.name())); }
+        }
+        if !by_ref && !copied {
+          for rap in &raps {
+            let source = source_names.get(rap.name()).unwrap_or(rap.name());
+            for place in std::iter::once(source.clone()).chain(self.struct_members_deep(rap.name()).into_iter().map(|r| r.name().clone())) {
+              other_bindings.insert(place.clone(), crate::facts::OtherBindings::for_place(&sites, binding.span, &place));
+            }
+          }
+        }
+      }
+      conflicts.push(OrConflict { name: name.clone(), places: raps, sole_runtime_source, source_names, other_bindings });
     }
     (stand_in, conflicts)
   }
@@ -14881,7 +14935,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let written = written_name(entry.0.name());
       let Some(c) = conflicts.iter().find(|c| c.name == written) else { continue };
       let xname = entry.0.name().clone();
-      let names: Vec<String> = c.places.iter().map(|r| r.name().to_string()).collect();
+      let names: Vec<String> = c.sole_runtime_source.as_ref().map_or_else(|| c.places.iter().map(|r| c.source_names.get(r.name()).unwrap_or(r.name()).clone()).collect(), |p| vec![p.clone()]);
       match entry.1 {
         Evt::SBorrow | Evt::MBorrow => {
           let mutable = matches!(entry.1, Evt::MBorrow);
@@ -14906,13 +14960,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           taken.push(k);
         }
         Evt::Move | Evt::Copy => {
+          if c.sole_runtime_source.as_ref() == Some(c.places[0].name()) && !Self::in_scrutinee_tuple(tuple_vars, &c.places[0]) {
+            entry.2 = ResourceTy::Value(c.places[0].clone());
+            continue;
+          }
           if matches!(entry.1, Evt::Move) {
             for place in &c.places {
               let id = *self.unique_id;
               *self.unique_id += 1;
               let in_tuple = Self::in_scrutinee_tuple(tuple_vars, place).then(|| tuple.to_owned());
+              let source = c.source_names.get(place.name()).unwrap_or(place.name());
               out.start.push(ExternalEvent::OrAltMove {
-                ro: place.clone(), into: xname.clone(), from: names.clone(), tuple: in_tuple.clone(), part_of: None, in_let, id,
+                ro: place.clone(), into: xname.clone(), from: names.clone(), source: source.clone(), others: c.other_bindings.get(source).cloned().unwrap_or_default(), tuple: in_tuple.clone(), part_of: None, in_let, id,
               });
               // A struct or tuple moves its fields with it.
               let prefix = format!("{}.", place.name());
@@ -14931,7 +14990,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 let id = *self.unique_id;
                 *self.unique_id += 1;
                 out.start.push(ExternalEvent::OrAltMove {
-                  ro: member.clone(), into, from: names.clone(), tuple: in_tuple.clone(),
+                  ro: member.clone(), into, from: names.clone(), source: member.name().clone(), others: c.other_bindings.get(member.name()).cloned().unwrap_or_default(), tuple: in_tuple.clone(),
                   part_of: Some((xname.clone(), place.name().to_string())), in_let, id,
                 });
               }

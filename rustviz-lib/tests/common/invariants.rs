@@ -90,8 +90,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1584_maybe_held_second_returning_if", "line-starts-nowhere", 1584),
     ("known_bugs/1585_unused_ref_binding_nested_return", "invalid-state", 1585),
     ("known_bugs/1585_unused_ref_binding_nested_return", "line-through-fork", 1585),
-    ("known_bugs/1587_loop_two_conditionals", "owner-after-maybe-moved-join", 1587),
-    ("known_bugs/1587_maybe_held_reassign_after_loop", "owner-after-maybe-moved-join", 1587),
     ("known_bugs/1598_else_if_let_implicit_else_join", "fork-without-dot", 1598),
     ("known_bugs/1625_repoint_live_reborrow", "event-on-dead-column", 1625),
     ("known_bugs/1625_repoint_live_reborrow", "invalid-state", 1625),
@@ -461,7 +459,7 @@ fn states_partial_drop(d: &Dot) -> bool {
 /// out, drawn where the block ends (#1288: "k's resource is moved to r if
 /// the block ended with break 'blk k").
 fn break_out_move(d: &Dot) -> bool {
-    d.has("move") && (d.tip.contains("break that ends the loop") || block_local_break_move(d) || loop_break_alt_move(d))
+    d.has("move") && (d.tip.contains("break that ends the loop") || d.tip.contains("the loop can end with break ") || block_local_break_move(d) || loop_break_alt_move(d))
 }
 
 /// A move of a labeled block's local by one of the block's ways out
@@ -568,9 +566,11 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
                 // drop, but drawn unusable (dashed) because the borrow checker
                 // also checks an unreachable path that skips the assignment
                 // (an irrefutable `if let`'s dead `else`, design Q5, #1867).
-                let borrowck_only_unassigned = fig.segs.iter().any(|s| s.hash == d.hash
-                    && s.tip.contains("is assigned on every path that runs") && meets(s, d.x, d.y).0);
-                if !maybe && !box_contents && !partial && !borrowck_only_unassigned {
+                // The same applies to a value moved only on an imaginary
+                // edge: its dashed incoming line still carries a runtime drop.
+                let held_at_runtime = fig.segs.iter().any(|s| s.hash == d.hash && meets(s, d.x, d.y).0
+                    && (s.tip.contains("is assigned on every path that runs") || s.tip.contains("still holds its value at runtime")));
+                if !maybe && !box_contents && !partial && !held_at_runtime {
                     out.push(("drop-without-value", d.describe()));
                 }
             }

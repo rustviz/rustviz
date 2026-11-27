@@ -2,7 +2,6 @@ issue = 1791
 cluster = "C09"
 title = "An assignment in the right operand of `&&` runs only if the left operand is true: it is not on every path"
 fn = "f"
-beyond_facts = "P3: the row-3 join title says the old value is dropped when s is assigned again; the `&&` operand is not drawn as conditional"
 
 [[state]]
 row = 3

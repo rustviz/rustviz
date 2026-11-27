@@ -9,7 +9,7 @@
 //! by the first row of the leg it draws, since rows above a leg's start
 //! may belong to another arm.
 
-use super::schema::{LoanInfo, BodyFacts, CrateFacts, Fact, Lent, Parts, State};
+use super::schema::{DropRoute, LoanInfo, BodyFacts, CrateFacts, Fact, Lent, Parts, State};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A column's value on a row.
@@ -56,7 +56,7 @@ pub enum Why {
     Assigned { reassign: bool, maybe_had: bool },
     /// Its old value dropped ("drops", "drops_if_init", "drops_rest",
     /// "nothing_to_drop"), on this row's path or an early exit's.
-    Dropped { how: &'static str, early_exit: Option<usize>, at_reassign: bool },
+    Dropped { how: &'static str, early_exit: Option<usize>, at_reassign: bool, route: DropRoute },
 }
 
 /// One column on one row (or one arm of a row).
@@ -88,6 +88,8 @@ pub struct Cell {
     /// column (only variable columns have them).
     pub holds: Vec<usize>,
     pub always_assigned: bool,
+    pub reassigned: Option<bool>,
+    pub moved_in_arm: bool,
     pub why: Vec<Why>,
     /// The row this state was read on (the row asked for, or the row
     /// above it that the state carries over from).
@@ -107,6 +109,7 @@ pub struct ArmSpan {
 /// An arm of a one-line branch on a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArmInfo {
+    pub runs: bool,
     pub branch: usize,
     pub arm: usize,
     pub parent: Option<usize>,
@@ -134,6 +137,7 @@ struct BodyTable {
     first_line: usize,
     last_line: usize,
     rows: BTreeMap<usize, RowCells>,
+    joins: BTreeMap<rustc_span::Span, Cells>,
     /// Column names, in the facts' order.
     columns: Vec<String>,
     array_lengths: BTreeMap<String, usize>,
@@ -283,6 +287,7 @@ impl StateTable {
                         own.may = n.may;
                         own.cause = n.cause;
                         own.always_assigned = n.always_assigned;
+                        own.reassigned = n.reassigned;
                     }
                 }
                 return Some(own);
@@ -297,7 +302,7 @@ impl StateTable {
             // Paths on which a block-local was never in scope can meet at
             // its StorageDead. Inside its scope the binding has its own state.
             let definitely_dropped = boundary.why.get(column).is_some_and(|events| events.iter().any(|(_, why)|
-                matches!(why, Why::Dropped { how: "drops", early_exit: None, at_reassign: false })));
+                matches!(why, Why::Dropped { how: "drops", early_exit: None, at_reassign: false, .. })));
             if (definitely_dropped && here.init == Init::Own) || here.why.iter().any(|w| matches!(w, Why::Assigned { .. }))
                 || (cell.cause == Some("unassigned") && !boundary.cells.contains_key(column)) {
                 return Some(here);
@@ -316,13 +321,46 @@ impl StateTable {
         Some(cell)
     }
 
+    pub fn join_cell(&self, function: usize, column: &str, span: rustc_span::Span) -> Option<&Cell> {
+        self.body(function, column)?.joins.get(&span)?.get(column)
+    }
+
+    /// On a shared row, the only write is in one arm and a real sibling
+    /// can leave the place moved. This also covers a short-circuit RHS.
+    pub fn skips_reassignment(&self, function: usize, column: &str, row: usize) -> bool {
+        let Some(rc) = self.body(function, column).and_then(|b| b.rows.get(&row)) else { return false };
+        let Some(why) = rc.why.get(column) else { return false };
+        let mut writes = why.iter().filter(|(_, w)| matches!(w, Why::Assigned { .. }));
+        let Some((Some(arm), Why::Assigned { reassign: true, .. })) = writes.next() else { return false };
+        if writes.next().is_some() || !why.iter().any(|(a, w)| a.as_ref() == Some(arm) && matches!(w,
+            Why::Dropped { how: "drops_if_init", at_reassign: true, .. })) { return false; }
+        let Some((written, _)) = rc.arms.get(*arm) else { return false };
+        rc.arms.iter().any(|(a, cells)| a.runs && a.branch == written.branch && a.arm != written.arm
+            && cells.get(column).is_some_and(|c| c.init == Init::Maybe && c.cause == Some("moved")))
+    }
+
+    /// A normal scope-end drop (the column can already be out of storage
+    /// in the row's after-cell). Several sites must agree.
+    pub fn scope_drop(&self, function: usize, column: &str, row: usize) -> Option<&'static str> {
+        let events = self.body(function, column)?.rows.get(&row)?.why.get(column)?;
+        if events.iter().any(|(_, w)| matches!(w, Why::Dropped { how: "drops_if_init", early_exit: None, at_reassign: false, route: DropRoute::Shared })) {
+            return None;
+        }
+        let mut drops = events.iter().filter_map(|(_, w)| match w {
+            Why::Dropped { how, early_exit: None, at_reassign: false, route: DropRoute::Normal | DropRoute::Shared } => Some(*how),
+            _ => None,
+        });
+        let how = drops.next()?;
+        drops.all(|h| h == how).then_some(how)
+    }
+
     /// The next MIR boundary is the function's scope exit and actually
     /// drops the remainder of this place (drop elaboration).
     pub fn drops_rest_at_exit(&self, function: usize, column: &str, row: usize) -> bool {
         let Some(body) = self.body(function, column) else { return false };
         let Some((&next, next_row)) = body.rows.range(row + 1..).next() else { return false };
         next == body.last_line && next_row.why.get(column).is_some_and(|events| events.iter().any(|(_, why)|
-            matches!(why, Why::Dropped { how: "drops_rest", early_exit: None, at_reassign: false })))
+            matches!(why, Why::Dropped { how: "drops_rest", early_exit: None, at_reassign: false, .. })))
     }
 
     pub fn loan(&self, fn_line: usize, column: &str, loan: usize) -> Option<&LoanInfo> {
@@ -679,6 +717,8 @@ fn cells_of(st: &State) -> Cells {
                 parts,
                 cause: st.cause.get(col).copied(),
                 always_assigned: st.always_assigned.contains(col),
+                reassigned: st.reassigned.get(col).copied(),
+                moved_in_arm: st.moved_in_arm.contains(col),
                 may,
                 may_lend: st.may_lend.contains(col),
                 unnamed_maybe: st.unnamed_maybe.contains(col),
@@ -712,7 +752,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     for r in &b.rows {
         let mut rc = RowCells { snapshot: !r.after.state.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
         for a in &r.arms {
-            let info = ArmInfo { branch: a.branch, arm: a.arm, parent: a.parent, col_lo: a.col_lo, col_hi: a.col_hi };
+            let info = ArmInfo { runs: a.runs, branch: a.branch, arm: a.arm, parent: a.parent, col_lo: a.col_lo, col_hi: a.col_hi };
             rc.arms.push((info, cells_of(&a.after)));
         }
         for ev in &r.facts {
@@ -726,7 +766,9 @@ fn body_table(b: &BodyFacts) -> BodyTable {
                     }
                 }
                 Fact::Init { path, reassign, maybe_had, .. } => add(path, Why::Assigned { reassign: *reassign, maybe_had: *maybe_had }),
-                Fact::Drop { path, how, early_exit, at_reassign, .. } => add(path, Why::Dropped { how, early_exit: *early_exit, at_reassign: *at_reassign }),
+                Fact::Drop { path, how, early_exit, at_reassign, .. } => add(path, Why::Dropped {
+                    how, early_exit: *early_exit, at_reassign: *at_reassign, route: ev.drop_route,
+                }),
                 Fact::Borrow { loan, .. } => {
                     for c in loan_cols.get(loan).into_iter().flat_map(|v| v.iter()) {
                         add(c, Why::Lent { loan: *loan });
@@ -747,7 +789,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
-    BodyTable { first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    BodyTable { joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, rows, columns, array_lengths, boxes, loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]
@@ -767,7 +809,7 @@ mod tests {
     }
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
-        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, col: 1, arm, fact, order: (0, 0, 0), site: None, successor: None }).collect();
+        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, drop_route: DropRoute::Normal, col: 1, arm, fact, order: (0, 0, 0), site: None, successor: None }).collect();
         Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new() }
     }
 
@@ -812,6 +854,8 @@ mod tests {
             rows,
             temps: Vec::new(),
             notes: Vec::new(),
+            binding_sources: Vec::new(),
+            joins: BTreeMap::new(),
             dead_lines: BTreeSet::new(),
         }
     }
@@ -820,8 +864,8 @@ mod tests {
         let mut one_line = row(8, &[("s", "maybe")], &[], vec![(Some(0), Fact::Move { path: "s".into(), to: "f()".into(), in_macro: None })]);
         one_line.after.cause.insert("s".into(), "moved");
         one_line.arms = vec![
-            Arm { branch: 0, arm: 0, parent: None, col_lo: 10, col_hi: 20, after: state(&[("s", "moved")], &[]) },
-            Arm { branch: 0, arm: 1, parent: None, col_lo: 30, col_hi: 40, after: state(&[("s", "own")], &[]) },
+            Arm { runs: true, branch: 0, arm: 0, parent: None, col_lo: 10, col_hi: 20, after: state(&[("s", "moved")], &[]) },
+            Arm { runs: true, branch: 0, arm: 1, parent: None, col_lo: 30, col_hi: 40, after: state(&[("s", "own")], &[]) },
         ];
         body("main", 1, &["s", "p", "p.a"], vec![
             row(2, &[("s", "own")], &[], vec![(None, Fact::Init { path: "s".into(), from: "<value>".into(), reassign: false, maybe_had: false })]),

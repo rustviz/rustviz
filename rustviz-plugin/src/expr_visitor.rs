@@ -329,6 +329,7 @@ pub struct DeferredLet {
 
 
 pub struct ExprVisitor<'a, 'tcx:'a> {
+  pub facts: Option<&'a crate::facts::BodyFacts>,
   pub tcx: TyCtxt<'tcx>, // type context
   pub event_spans: HashMap<usize, rustc_span::Span>,
   /// Ends drawn for the previous fields of an overwritten whole value.
@@ -1168,6 +1169,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       emitting_span: None,
       end_loans: BTreeMap::new(),
       row_layout: Default::default(),
+      facts: None,
       tcx,
       mir_body,
       hir_body,
@@ -1950,7 +1952,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       | ExternalEvent::ChainFailUse { ro, .. }
       | ExternalEvent::TiedParamNote { ro, .. }
       | ExternalEvent::ReslicedInPlace { ro, .. }
-      | ExternalEvent::DeadElseNote { ro, .. }
+      | ExternalEvent::AssignmentJoin { ro, .. } | ExternalEvent::DeadElseNote { ro, .. }
       | ExternalEvent::PassRestDrop { ro, .. }
       | ExternalEvent::DeadLoanNote { ro, .. }
       | ExternalEvent::OwnerDropAtReassign { ro, .. }
@@ -2262,6 +2264,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           continue;
         }
         let child_name = child.name().clone();
+        let carried_with = to_struct.as_ref().filter(|_| child.is_copy_owner() && !is_copy && !matches!(dest, ResourceTy::Anonymous))
+          .map(|to| (from_name.clone(), to.clone()));
         let from_child = ResourceTy::Value(child);
         let ev_id = *self.unique_id;
         *self.unique_id += 1;
@@ -2269,7 +2273,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let ev = if is_copy {
           ExternalEvent::Copy { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None }
         } else {
-          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
+          ExternalEvent::Move { from: from_child, to: dest, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, carried_with, via_try: None, closure_value: false }
         };
         self.add_external_event(line_num, ev);
         // A nested struct field moved into a function / closure
@@ -2341,7 +2345,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.add_external_event(line_num, if is_copy {
         ExternalEvent::Copy { from, to, id: ev_id, is_partial: false, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee: None, of_const: None }
       } else {
-        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: None, closure_value: false }
+        ExternalEvent::Move { from, to, id: ev_id, is_partial: false, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, carried_with: None, via_try: None, closure_value: false }
       });
     }
   }
@@ -2530,7 +2534,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         loop_head: LoopHead::No,
         break_alt: None,
         break_out: false,
-        via_try: None,
+        carried_with: None, via_try: None,
         closure_value: false,
       });
       self.move_struct_fields_away(line_num, &name);
@@ -2934,7 +2938,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let is_partial = is_partial && pointee.is_none();
         ExternalEvent::Copy { from: rhs, to: lhs, id, is_partial, into_closure: false, break_alt: None, closure_value: false, into_ctor: None, pointee, of_const: None }
       }
-      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, via_try: self.try_move, closure_value: false },
+      Evt::Move => ExternalEvent::Move { from: rhs, to: lhs, id, is_partial, into_closure: false, loop_head: LoopHead::No, break_alt: None, break_out: false, carried_with: None, via_try: self.try_move, closure_value: false },
       Evt::SBorrow => ExternalEvent::StaticBorrow { of_ref_var: pattern_ref(&lhs, &rhs), from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::MBorrow => ExternalEvent::MutableBorrow { of_ref_var: pattern_ref(&lhs, &rhs), from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None },
@@ -8730,7 +8734,7 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     vars.sort_by_key(|r| *r.hash());
     vars.dedup_by_key(|r| *r.hash());
     for var in vars {
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, holds: None, id: *self.unique_id, early: None });
+        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, id: *self.unique_id, early: None });
         *self.unique_id += 1;
     }
 }
@@ -8891,7 +8895,6 @@ pub fn register_iflet_let_bindings(
             if let Some(body_end) = emit_gos_at {
                 self.add_external_event(body_end, ExternalEvent::GoOutOfScope {
                     ro: r.clone(),
-                    holds: None,
                     id: *self.unique_id,
                     early: None,
                 });
@@ -10046,6 +10049,14 @@ fn sub_pat_at(&self, pat: &'tcx Pat<'tcx>, step: &str,
   }
 }
 
+/// An alternative is dead when MIR contains its binding assignments
+/// and none of them is on an executable edge.
+fn pattern_alternative_runs(&self, pat: &Pat<'_>) -> bool {
+  let Some(facts) = self.facts else { return true };
+  let mut sites = facts.binding_sources.iter().filter(|s| pat.span.contains(s.site)).peekable();
+  sites.peek().is_none() || sites.any(|s| s.runs)
+}
+
 /// What `pat`, matched against the scrutinee, leaves in the tuple of
 /// the place at field path `path` in it (#627: through nested tuple
 /// literals and a variable's parts): all of it (`Some(false)`), part of
@@ -10058,7 +10069,8 @@ pub fn path_left(&self, pat: &'tcx Pat<'tcx>, path: &[String],
     // When they differ, "the rest of" covers both (all of it, or
     // what's left after the move).
     PatKind::Or(alts) => {
-      let each: Vec<Option<bool>> = alts.iter().map(|a| self.path_left(a, path, typeck, env)).collect();
+      let each: Vec<Option<bool>> = alts.iter().filter(|a| self.pattern_alternative_runs(a)).map(|a| self.path_left(a, path, typeck, env)).collect();
+      if each.is_empty() { return Some(true); }
       if each.iter().all(|l| *l == each[0]) { each[0] } else { Some(true) }
     }
     _ => match self.sub_pat_at(pat, step, typeck) {
@@ -10083,6 +10095,7 @@ fn path_takers(&self, pat: &'tcx Pat<'tcx>, path: &[String],
   let mut out: Vec<String> = Vec::new();
   match pat.kind {
     PatKind::Or(alts) => {
+      let alts: Vec<_> = alts.iter().filter(|a| self.pattern_alternative_runs(a)).collect();
       let each: Vec<Option<bool>> = alts.iter().map(|a| self.path_left(a, path, typeck, env)).collect();
       if each.iter().all(|l| *l == each[0]) {
         // An or-pattern further in may still decide.
@@ -11887,12 +11900,12 @@ pub fn print_out_of_scope(&mut self){
         }
       }
       if rap.is_global && !duplicate && !left_at(rap.scope) {
-        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
+        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
       // The later variables that share this column (#589).
       for &scope in rap.extra_scopes.iter().filter(|s| !left_at(**s)) {
-        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), holds: None, id: *self.unique_id, early: None });
+        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro: rap.rap.clone(), id: *self.unique_id, early: None });
         *self.unique_id += 1;
       }
     }

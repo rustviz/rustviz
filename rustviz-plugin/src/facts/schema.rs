@@ -58,6 +58,73 @@ pub struct BodyFacts {
     /// `if let`). Their rows' states are that imaginary path's.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub dead_lines: BTreeSet<usize>,
+    /// Binding assignments on both checked and executable MIR paths.
+    #[serde(skip)]
+    pub binding_sources: Vec<BindingSource>,
+    /// The state at a conditional's normal MIR continuation, before its first instruction.
+    #[serde(skip)]
+    pub joins: BTreeMap<rustc_span::Span, Join>,
+}
+
+pub struct Join {
+    pub state: State,
+    /// A real write reaches this join on one edge. The other leaves the
+    /// place empty (false), or skips initialization only in borrowck (true).
+    pub assignments: BTreeMap<String, bool>,
+    pub dead_implicit_else: bool,
+}
+
+pub struct BindingSource {
+    pub location: rustc_middle::mir::Location,
+    pub runs: bool,
+    pub declaration: rustc_span::Span,
+    pub site: rustc_span::Span,
+    pub into: String,
+    pub from: Option<String>,
+    /// The source's named enclosing fields and its named subplaces.
+    pub parents: Vec<String>,
+    pub covers: Vec<String>,
+    pub moves: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OtherBindings {
+    pub moves: BTreeSet<(String, String)>,
+    pub retained: bool,
+    /// Some sibling takes an unpictured projection, such as an enum payload.
+    pub unpictured_move: bool,
+}
+
+impl OtherBindings {
+    /// Compare complete sets of simultaneous MIR pattern bindings. A move
+    /// of an enclosing place carries its fields; a field move takes only
+    /// that field out of the enclosing place.
+    pub fn for_place(sites: &[&BindingSource], declaration: rustc_span::Span, place: &str) -> Self {
+        let mut result = Self::default();
+        let declarations: BTreeSet<_> = sites.iter().map(|s| s.declaration).collect();
+        let mut groups = BTreeMap::<_, Vec<_>>::new();
+        for &s in sites { groups.entry(s.location.block).or_default().push(s); }
+        for group in groups.values() {
+            let mut touched = false;
+            for s in group.iter().filter(|s| s.moves) {
+                if s.covers.iter().chain(&s.parents).any(|p| p == place) {
+                    touched = true;
+                    if s.declaration != declaration {
+                        if let Some(from) = &s.from {
+                            result.moves.insert((from.clone(), s.into.clone()));
+                        } else {
+                            result.unpictured_move = true;
+                        }
+                    }
+                }
+            }
+            if !touched && group.iter().all(|s| !s.moves || !s.covers.is_empty())
+                && group.iter().map(|s| s.declaration).collect::<BTreeSet<_>>() == declarations {
+                result.retained = true;
+            }
+        }
+        result
+    }
 }
 
 #[derive(Serialize)]
@@ -251,6 +318,14 @@ pub struct State {
     /// The place is initialized on every executable path to this boundary.
     #[serde(skip)]
     pub always_assigned: BTreeSet<String>,
+    /// For a possibly empty place, a later assignment before scope exit on
+    /// every (true) or only some (false) continuing runtime paths.
+    #[serde(skip)]
+    pub reassigned: BTreeMap<String, bool>,
+    /// Only at an expression join: a move inside an arm reaches one
+    /// executable incoming edge and another still owns the value.
+    #[serde(skip)]
+    pub moved_in_arm: BTreeSet<String>,
     /// A real CFG path to this boundary can bypass all the live loans
     /// of the strongest kind restricting the column.
     #[serde(skip)]
@@ -297,6 +372,8 @@ pub struct Row {
 
 #[derive(Serialize)]
 pub struct Arm {
+    #[serde(skip)]
+    pub runs: bool,
     /// Index of the branch on this row (one per `SwitchInt` with arms
     /// here), and of the arm within it (MIR successor order).
     pub branch: usize,
@@ -311,12 +388,23 @@ pub struct Arm {
     pub after: State,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DropRoute {
+    #[default]
+    Normal,
+    Shared,
+    ExitOnly,
+}
+
 /// A fact with its position on the row.
 #[derive(Serialize, Clone, PartialEq, Eq)]
 pub struct Ev {
     /// Original MIR location, before the row model places the event.
     #[serde(skip)]
     pub location: rustc_middle::mir::Location,
+    /// Reachability of a scope drop without traversing its early exits.
+    #[serde(skip)]
+    pub drop_route: DropRoute,
     /// Source column (1-based) where the MIR location's span starts.
     pub col: usize,
     /// The innermost arm of this event's row. For an early-exit drop,

@@ -2,7 +2,6 @@ issue = 1685
 cluster = "C13"
 title = "Labeled block whose `break` skips `s2 = ..`: after the block s2 is maybe-unassigned, but drawn solid 'owner'"
 places = ["s2"]
-beyond_facts = "P3: s2's line is solid 'owner' from the assignment on, with no dot at the block's end"
 
 [[state]]
 row = 5
