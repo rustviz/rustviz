@@ -8283,14 +8283,14 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
                 dots,
                 if x2 > x1 && head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) { head_offset + CALL_ICON_CLEARANCE } else { head_offset },
                 if dots.lanes.leg_turn.contains_key(&key) || matches!(external_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }
-                    | ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }) {
+) {
                     &dots.legs
                 } else {
                     &[]
                 },
                 dots.lanes.leg_turn.get(&key).copied(),
                 dots.lanes.branch_hops.contains(&key),
-                matches!(external_event, ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }),
+                false,
             )).flatten() {
                 dots.lanes.capture(Drawn {
                     key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
