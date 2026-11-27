@@ -1966,6 +1966,8 @@ pub enum TryMove {
 /// it was this one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BreakAlt {
+    /// Loan issued by the MIR reborrow of this break operand, when unique.
+    pub reborrow: Option<usize>,
     /// The `break` as written (`break a`), or `None` when it is too
     /// long to quote in a tooltip.
     pub brk: Option<String>,
@@ -2124,6 +2126,8 @@ pub enum ExternalEvent {
         // return the resource to "to"
         from: ResourceTy,
         to: ResourceTy,
+        /// First event emitted for this end. Copies on branch legs keep its slot.
+        slot: usize,
         id: usize,
         static_lender: Option<StaticLender>,
         still_borrowed_by: Vec<String>,
@@ -2135,6 +2139,8 @@ pub enum ExternalEvent {
         // return the resource to "to"
         from: ResourceTy,
         to: ResourceTy,
+        /// First event emitted for this end. Copies on branch legs keep its slot.
+        slot: usize,
         id: usize,
         static_lender: Option<StaticLender>,
         still_borrowed_by: Vec<String>,
@@ -2146,6 +2152,8 @@ pub enum ExternalEvent {
         from: ResourceTy,
         to: ResourceTy,
         num_curr_borrowers: usize,
+        /// First event emitted for this end. Copies on branch legs keep its slot.
+        slot: usize,
         id: usize
     },
     // a use of the Owner, happens when var pass by reference
@@ -2202,6 +2210,7 @@ pub enum ExternalEvent {
     PassByMutableReference {
         // This MIR callee reads the inner value without writing the wrapper.
         manually_takes: bool,
+        terminal: Option<crate::facts::TerminalArgument>,
         from: ResourceTy,
         to: ResourceTy, // must be a function
         is_reborrow: bool,
@@ -2642,6 +2651,14 @@ impl ExternalEvent {
         }
     }
     
+    /// The original borrow-end template, shared by its branch-specific copies.
+    pub fn end_slot(&self) -> Option<usize> {
+        match self {
+            Self::MutableDie { slot, .. } | Self::StaticDie { slot, .. } | Self::RefDie { slot, .. } => Some(*slot),
+            _ => None,
+        }
+    }
+
     pub fn get_id(&self) -> usize {
         match self {
             &ExternalEvent::Copy {id, ..} | &ExternalEvent::Move {id, ..} |

@@ -1163,9 +1163,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           *self.unique_id += 1;
           let (from, to) = (ResourceTy::Value(r.rap.clone()), ResourceTy::Value(l.clone()));
           evs.push(if r.mutable {
-            ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
+            ExternalEvent::MutableDie { slot: id, from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
           } else {
-            ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
+            ExternalEvent::StaticDie { slot: id, from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
           });
         }
         continue;
@@ -1641,7 +1641,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             let line_num = expr_to_line(recv, &self.tcx);
             let id = *self.unique_id;
             self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-              manually_takes: false, from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::MacroArg,
+              manually_takes: false, terminal: None, from, to, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::MacroArg,
               result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false, deep: None,
             });
             *self.unique_id += 1;
@@ -3502,16 +3502,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// Record what an exit in the conditional `expr`, whose Branch event
   /// gets the next id, leaves (see `ExitScope`).
-  fn note_exit_scope(&mut self, expr: &'tcx Expr<'tcx>) {
-    let sm = self.tcx.sess.source_map();
+  fn note_exit_scope(&mut self) {
     let loop_id = self.exit_frames.iter().rev()
       .find_map(|f| match f {
         ExitFrame::Loop { id, .. } => Some(*id),
         ExitFrame::Branch { .. } => None,
       });
-    let loop_lines = loop_id.map(|id| self.tcx.hir_span(id))
-      .map(|sp| (sm.lookup_char_pos(sp.lo()).line, sm.lookup_char_pos(sp.hi()).line));
-    self.exit_scopes.insert(*self.unique_id, ExitScope { in_closure: self.in_closure(expr), loop_lines, loop_id });
+    self.exit_scopes.insert(*self.unique_id, ExitScope { loop_id });
   }
 
   /// Whether a borrow made before the `if` without `else` `if_expr`
@@ -7287,7 +7284,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               // (Where the old loan ends, its last use, when that is
               // before the write, #1432.)
               let die_line = if taken_over { line_num } else { old_end.or(dead_before_arms).unwrap_or(line_num) };
-              self.add_external_event(die_line, ExternalEvent::RefDie { from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
+              self.add_external_event(die_line, ExternalEvent::RefDie { slot: *self.unique_id, from: lhs_rty.clone(), to: to_ro, num_curr_borrowers: borrowers.len() - 1, id: *self.unique_id });
               *self.unique_id += 1;
               // r's other lenders (`b` in `r = if c { &a } else { &b };`
               // with a also borrowed by z) are given back where the old
@@ -7369,7 +7366,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               if shared {
                 if co_end != end_line {
                   self.defer_old_ends = co_end > line_num;
-                  self.add_external_event(co_end, ExternalEvent::RefDie { from: lhs_rty.clone(), to: co.clone(), num_curr_borrowers: 1, id: *self.unique_id });
+                  self.add_external_event(co_end, ExternalEvent::RefDie { slot: *self.unique_id, from: lhs_rty.clone(), to: co.clone(), num_curr_borrowers: 1, id: *self.unique_id });
                   *self.unique_id += 1;
                   self.defer_old_ends = false;
                 }
@@ -8898,7 +8895,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       b_labels[0] = IF_LET_ARM.to_owned();
     }
     let b_ty = BranchType::If(b_labels, b_slices);
-    self.note_exit_scope(expr);
+    self.note_exit_scope();
     let loop_assigned = self.loop_assigned_now(&liveness);
     // (The arms' events are out of the global timeline by now: what
     // it says is the state where the `if` starts.)
@@ -9811,7 +9808,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !branch_data.is_empty() && branch_data.iter().all(|b| b.diverges) && self.at_fn_level(expr) {
       self.note_all_paths_exit(expr);
     }
-    self.note_exit_scope(expr);
+    self.note_exit_scope();
     let loop_assigned = self.loop_assigned_now(&liveness);
     let reaching: Vec<&[(usize, ExternalEvent)]> = branch_data.iter()
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
@@ -10497,7 +10494,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let lent = self.borrow_map.get(decl.name())
             .is_some_and(|rd| !matches!(rd.lender, ResourceTy::Anonymous));
           if lent {
-            self.for_loop_loans.insert(decl.name().to_owned());
             let floor = self.borrow_floor.entry(decl.name().to_owned()).or_insert(body_end);
             *floor = (*floor).max(body_end);
           }
@@ -10600,9 +10596,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let (from, to) = (ResourceTy::Anonymous, lender);
           let static_lender = Some(static_lender);
           let ev = if is_mut {
-            ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
+            ExternalEvent::MutableDie { slot: id, from, to, id, static_lender, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
           } else {
-            ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
+            ExternalEvent::StaticDie { slot: id, from, to, id, static_lender, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
           };
           self.add_external_event(body_end, ev);
         }
@@ -13068,7 +13064,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .filter(|t| !t.contains('\n') && !pat.span.from_expansion())
       .unwrap_or_else(|| get_name_of_pat(pat, &self.tcx));
     let labels = vec!["Else".to_owned(), pat_text];
-    self.note_exit_scope(init);
+    self.note_exit_scope();
     let loop_assigned = self.loop_assigned_now(&liveness);
     self.let_else_branches.insert(*self.unique_id);
     self.branch_conditions.insert(*self.unique_id, pat.span);
@@ -16460,7 +16456,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           ExprKind::Block(_, Some(_)) => AltEnd::Block,
           _ => AltEnd::Loop,
         };
-        self.break_alt = Some(BreakAlt { brk: brk.clone(), in_loop, end });
+        let reborrow = self.body_facts.and_then(|facts| {
+          let mut issued = facts.loans.iter().filter(|loan| loan.through.is_some()
+            && loan.issue.is_some_and(|loc| self.mir_body.source_info(loc).span.source_equal(value.span)));
+          let loan = issued.next()?;
+          issued.next().is_none().then_some(loan.loan)
+        });
+        self.break_alt = Some(BreakAlt { brk: brk.clone(), in_loop, end, reborrow });
         pair(self, value);
         self.break_alt = None;
       }

@@ -4240,6 +4240,12 @@ pub fn state_ref_reserved(name: &str, mutable: bool, call: Option<&str>, binding
     title
 }
 
+pub fn state_repointed_lender(name: &str, holder: &str, value: bool) -> String {
+    let me = styled_name_html(name);
+    let holder = styled_name_html(holder);
+    format!("On paths where {holder} still points to {me}, {me}'s {} is mutably borrowed by {holder}. The borrow checker restricts access to {me} until the borrow ends", held(value))
+}
+
 /// What the exclusive loan on this segment restricts.
 pub enum LentPlace {
     Owned { holds_value: bool },
@@ -5345,6 +5351,16 @@ pub fn event_dot_branch_merge_after_break(my_name: &String, breaking: usize) -> 
         styled_name_html(my_name),
         if breaking == 1 { "branch that breaks out of it" } else { "branches that break out of it" },
     )
+}
+
+pub fn both_branches_break(name: &str, label: &str, supplied: bool) -> String {
+    let arm = arm_name_html(label);
+    let name = styled_name_html(name);
+    if supplied {
+        format!("Both branches break out of the loop. No branch above reaches this point. The {arm} branch supplies a reborrow through {name} as the loop result")
+    } else {
+        format!("Both branches break out of the loop. No branch above reaches this point. {name} goes on after the loop from the {arm} branch")
+    }
 }
 
 // Dashed rest of an `if` / `match` arm after the borrow held by a
@@ -6673,6 +6689,8 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
 
         let title_fn = match external_event {
             ExternalEvent::PassByStaticReference { .. } => " reads from ",
+            ExternalEvent::PassByMutableReference { terminal: Some(crate::facts::TerminalArgument::Formatted), .. } => " reads through ",
+            ExternalEvent::PassByMutableReference { terminal: Some(_), .. } => " borrows ",
             // `r` is itself a `&mut` reference (#812): f
             // reads and writes the value r points to, not r,
             // so say "through" like the other `&mut` writes.
@@ -6693,6 +6711,9 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
         // passing a shared reference copies it, and r is
         // read-only before, during and after the call.
         let reborrow_suffix: String = match external_event {
+            ExternalEvent::PassByMutableReference { is_reborrow: true, terminal: Some(_), .. } => format!(
+                " (mutable reborrow — {} cannot be used while the reborrow is live)", styled_from_name,
+            ),
             ExternalEvent::PassByMutableReference { is_reborrow: true, result_has_lifetime: false, .. } => format!(
                 " (mutable reborrow — {} can't be used until {} returns)",
                 styled_from_name, styled_fn_name,

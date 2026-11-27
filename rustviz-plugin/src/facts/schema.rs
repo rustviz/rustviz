@@ -83,12 +83,21 @@ pub struct ReceiverLoan {
     pub newly_held: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalArgument {
+    Borrowed,
+    Formatted,
+}
+
 #[derive(Serialize)]
 pub struct BodyFacts {
     /// Places a callee can write through a mutable operand, paired with
     /// the loans carried by the source operand at that exact MIR call.
     #[serde(skip)]
     pub(crate) argument_stores: std::collections::HashMap<(rustc_span::Span, usize), Vec<(String, BTreeSet<usize>)>>,
+    /// Named holders still carrying each loan when their destructor runs.
+    #[serde(skip)]
+    pub drop_holders: BTreeMap<usize, BTreeSet<String>>,
     /// Loans carried by the operands of this MIR aggregate, in operand order.
     #[serde(skip)]
     pub aggregate_loans: std::collections::HashMap<rustc_span::Span, Vec<AggregateLoan>>,
@@ -99,6 +108,10 @@ pub struct BodyFacts {
     /// A reborrow end after which no loan still restricts its parent on this CFG edge.
     #[serde(skip)]
     pub restored_reborrows: BTreeSet<(rustc_middle::mir::Location, rustc_middle::mir::Location, usize)>,
+    /// Holder ends absorbed into a give-back on the same row. The edge still
+    /// identifies where this individual copy stopped carrying its loan.
+    #[serde(skip)]
+    pub inline_holder_ends: Vec<(usize, Ev)>,
     #[serde(skip)]
     pub evaluated_spans: Vec<rustc_span::Span>,
     /// Borrow issues whose references are staged directly in an aggregate.
@@ -145,8 +158,6 @@ pub struct BodyFacts {
     /// Borrowck loans at MIR assignments to pattern bindings.
     #[serde(skip)]
     pub binding_loans: BTreeMap<rustc_middle::mir::Location, Vec<usize>>,
-    #[serde(skip)]
-    pub inline_holder_ends: Vec<(usize, Ev)>,
     pub rows: Vec<Row>,
     /// Temporaries that hold a value needing drop.
     pub temps: Vec<TempInfo>,
@@ -539,6 +550,25 @@ impl DropRoute {
     }
 }
 
+/// A slot carrying the loan on an ending edge. The local index distinguishes
+/// bindings sharing a display column. Named slots include their field path;
+/// a hidden for-loop iterator has the name `<iterator>`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EndPlace {
+    pub local: usize,
+    pub name: String,
+}
+
+/// A holder along a reaching MIR value transfer. `assigned_at` is the
+/// defining basic block and statement index when the definition is unique.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HolderStep {
+    #[serde(flatten)]
+    pub place: EndPlace,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_at: Option<(usize, usize)>,
+}
+
 /// A fact with its position on the row.
 #[derive(Serialize, Clone, PartialEq, Eq)]
 pub struct Ev {
@@ -554,6 +584,20 @@ pub struct Ev {
     /// Successor on which this borrow or hold ends. Two edges can lead to the same display row.
     #[serde(skip)]
     pub end_successor: Option<rustc_middle::mir::Location>,
+    /// MIR location used by the row model to display an early exit.
+    #[serde(skip)]
+    pub display_location: rustc_middle::mir::Location,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub end_places: Vec<EndPlace>,
+    /// Original caller slot still initialized when this loan ends. A reborrow
+    /// can keep it restricted after its own origin stops carrying the loan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_slot: Option<EndPlace>,
+    /// Slots along each proven transfer chain, from earlier to later. For an
+    /// iterator end, includes transfers to still-initialized loop bindings.
+    /// Locals are MIR local indices in this body. A path may stop at a merge.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transfer_paths: Vec<Vec<HolderStep>>,
     /// Source column (1-based) where the MIR location's span starts.
     pub col: usize,
     /// The innermost arm of this event's row. For an early-exit drop,
@@ -588,7 +632,8 @@ mod tests {
     #[test]
     fn dedup_keeps_ends_with_distinct_mir_successors() {
         let first = Ev {
-            location: Location::START, drop_route: DropRoute::Normal, end_successor: Some(BasicBlock::from_usize(1).start_location()),
+            location: Location::START, display_location: Location::START, drop_route: DropRoute::Normal, end_successor: Some(BasicBlock::from_usize(1).start_location()),
+            end_places: vec![], caller_slot: None, transfer_paths: vec![],
             col: 8, arm: None, order: (0, 0, 1), site: None,
             fact: Fact::HoldEnd { loan: 0, holder: "other.r".into(), to_line: 4, to_col: 1 },
         };
@@ -616,11 +661,11 @@ pub enum Fact {
     /// row, on the CFG edge to `to_line` (the next row of that path, past
     /// temporaries' drops) at source column `to_col` (one event per edge:
     /// two arms on one row are two; `to_line` 0: the path returns from the
-    /// function here). `holder`: who holds it as it ends.
+    /// function here, or the call has no normal successor). `holder`: who holds it as it ends.
     /// `why`: "no further use" (nothing uses the loan on this path any
     /// more), "holder overwritten", "<x> out of scope", "<x> dropped",
     /// "unused, the function returns" (a reference parameter the body
-    /// never uses: the caller's loan ends with the call).
+    /// never uses: the caller's loan ends with the call), "non-returning call".
     BorrowEnd { loan: usize, lender: String, holder: String, why: String, to_line: usize, to_col: usize },
     /// `holder`, which holds the loan as its own reference (one of the
     /// loan's `direct_holders` or `via_call`), no longer holds it after

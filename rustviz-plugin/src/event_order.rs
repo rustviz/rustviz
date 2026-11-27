@@ -200,6 +200,19 @@ impl Order<'_, '_> {
             }
         }
         let mut candidates: Vec<_> = normal_facts(row).filter(|e| self.matches(ev, e)).collect();
+        if candidates.is_empty() && (is_end || matches!(ev, E::GoOutOfScope { .. })) {
+            // Cleanup for a terminal call is displayed at that call. Its
+            // drop and release still take place at their actual MIR points.
+            let mut cleanup = row.facts.iter().filter(|f| {
+                f.drop_route == DropRoute::Unwind && self.matches(ev, f)
+                    && matches!(self.body[f.display_location.block].terminator().kind, TerminatorKind::Call { target: None, .. })
+            });
+            if let Some(first) = cleanup.next() {
+                if cleanup.all(|f| f.display_location == first.display_location && f.order == first.order) {
+                    return Some(fact_point(first));
+                }
+            }
+        }
         // Closure captures passed to calls have a presentation-only
         // function column. Resolve the actual MIR capture by its expression
         // and its place when that identifies a single borrow.
@@ -625,13 +638,12 @@ impl Order<'_, '_> {
         }
     }
 
-    // The exit walk can duplicate an enclosing end inside a return arm.
-    // Once its unique loan edge is proven to precede the test, keep the
-    // enclosing end and let both legs start with an expired reference.
+    // A unique loan end before the test expires the reference on entry to
+    // both legs, including when the exit pass has no arm copy to remove.
     fn remove_ends_before_fork(&self, events: &mut [(usize, E)], layout: &mut RowLayout) {
         for i in 0..events.len() {
             let (line, branch) = &events[i];
-            let E::Branch { branches, .. } = branch else { continue };
+            let E::Branch { branches, live_vars, .. } = branch else { continue };
             let Some(row) = self.facts.rows.iter().find(|r| r.line == *line) else {
                 continue;
             };
@@ -662,12 +674,23 @@ impl Order<'_, '_> {
                 }) {
                     continue;
                 }
+                let mut duplicated = false;
                 for (_, other) in branches.iter().flat_map(|arm| &arm.e_data) {
                     if end(other) && endpoints(e) == endpoints(other) && self.point(other, row, false) == Some(at) {
                         duplicates.insert(other.get_id());
-                        if let Some(holder) = endpoints(e).0.extract_rap() {
-                            layout.ended_at_fork.insert((branch.get_id(), *holder.hash()));
-                        }
+                        duplicated = true;
+                    }
+                }
+                // An early return may contain only the scope exit of a
+                // reference whose end is already before the fork (#1606).
+                // A new assignment in an arm needs its own join description.
+                if let Some(holder) = endpoints(e).0.extract_rap() {
+                    let exits = branches.iter().any(|arm| arm.diverges
+                        && arm.e_data.iter().any(|(_, ev)| ev.is_gos_ev() == Some(holder)));
+                    let keeps_end = branches.iter().flat_map(|arm| &arm.e_data).all(|(_, ev)|
+                        ev.is_gos_ev() == Some(holder) || !crate::expr_visitor::touches(ev, holder));
+                    if duplicated || holder.is_ref() && live_vars.contains(holder) && exits && keeps_end {
+                        layout.ended_at_fork.insert((branch.get_id(), *holder.hash()));
                     }
                 }
             }
@@ -958,7 +981,7 @@ impl Order<'_, '_> {
                 }
             }
         }
-        if let E::MutableDie { id, from, to, static_lender, still_borrowed_by, of_ref_var, exhaustion } = ev {
+        if let E::MutableDie { slot, id, from, to, static_lender, still_borrowed_by, of_ref_var, exhaustion } = ev {
             // A call may keep a shared input beside a mutable input. Use
             // the returned loan's kind for the particular input slot.
             if (*of_ref_var || to.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref()))
@@ -970,6 +993,7 @@ impl Order<'_, '_> {
                 })
             {
                 *ev = E::StaticDie {
+                    slot: *slot,
                     id: *id,
                     from: from.clone(),
                     to: to.clone(),
@@ -1463,6 +1487,10 @@ mod tests {
         let mut row = Row {
             facts: vec![Ev {
                 location: Location::START,
+                display_location: Location::START,
+                caller_slot: None,
+                transfer_paths: Vec::new(),
+                end_places: Vec::new(),
                 drop_route: DropRoute::Unwind,
                 end_successor: None,
                 col: 1,

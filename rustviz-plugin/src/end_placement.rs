@@ -10,6 +10,8 @@ use rustc_span::Span;
 use rustc_utils::SpanExt;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod exit;
+
 type Events = Vec<(usize, ExternalEvent)>;
 type LineMap = BTreeMap<usize, Vec<ExternalEvent>>;
 type Path = Vec<(usize, usize)>; // Branch event id, arm index.
@@ -432,7 +434,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let id = *self.unique_id;
         *self.unique_id += 1;
         self.end_loans.insert(id, vec![*loan]);
-        put.push((site, ExternalEvent::RefDie { id, from: from.clone(), to: to.clone(), num_curr_borrowers: 1 }));
+        put.push((site, ExternalEvent::RefDie { slot: id, id, from: from.clone(), to: to.clone(), num_curr_borrowers: 1 }));
       }
     }
     remove_from(self.preprocessed_events, self.event_line_map, &remove);
@@ -579,7 +581,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       remove.insert(ev.get_id());
       for (i, ((s, only_holder), ids)) in dests.into_iter().enumerate() {
         let mut event = if only_holder {
-          ExternalEvent::RefDie { from: from.clone(), to: to.clone(), id: ev.get_id(), num_curr_borrowers: 1 }
+          ExternalEvent::RefDie { slot: ev.end_slot().unwrap_or(ev.get_id()), from: from.clone(), to: to.clone(), id: ev.get_id(), num_curr_borrowers: 1 }
         } else {
           ev.clone()
         };
@@ -946,6 +948,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           *self.unique_id += 1;
           let event = if loan.kind == "mut" {
             ExternalEvent::MutableDie {
+              slot: id_ev,
               from: from.clone(),
               to,
               id: id_ev,
@@ -956,6 +959,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
           } else {
             ExternalEvent::StaticDie {
+              slot: id_ev,
               from: from.clone(),
               to,
               id: id_ev,
@@ -1094,9 +1098,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.end_loans.insert(id, vec![loan.loan]);
             let to = ResourceTy::Value(lender.clone());
             let end = if loan.kind == "mut" {
-              ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
+              ExternalEvent::MutableDie { slot: id, from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
             } else {
-              ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
+              ExternalEvent::StaticDie { slot: id, from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
             };
             put.push((site.path, site.before, (site.row, end)));
           }
@@ -1122,6 +1126,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     ArmSpan { start: pos(sp.lo()), end: pos(sp.hi()) }
   }
 
+  /// Returns true when the ending edge itself enters the selected arm.
   fn locate(
     &self,
     events: &Events,
@@ -1130,7 +1135,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     end: &Ev,
     next: usize,
     site: &mut Site,
-  ) {
+  ) -> bool {
     let body = &self.bwf.body;
     for (_, e) in events {
       let ExternalEvent::Branch { id, branches, branch_type, split_point, merge_point, .. } = e else { continue };
@@ -1148,20 +1153,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             continue;
           }
           let mut candidates = BTreeSet::new();
+          let mut boundary_effects = BTreeSet::new();
           for (bb, data) in body.basic_blocks.iter_enumerated() {
             if data.is_cleanup || !body.basic_blocks.dominators().dominates(t, bb) {
               continue;
             }
             for statement_index in 0..=data.statements.len() {
               let span = self.site_span(Location { block: bb, statement_index });
+              let effect = match data.statements.get(statement_index) {
+                Some(st) => matches!(&st.kind, rustc_middle::mir::StatementKind::Assign(pair)
+                  if !matches!(&pair.1, rustc_middle::mir::Rvalue::Use(rustc_middle::mir::Operand::Constant(c)) if c.const_.ty().is_unit())),
+                None => matches!(data.terminator().kind, TerminatorKind::Call { .. } | TerminatorKind::SwitchInt { .. }),
+              };
               for (a, b) in branches.iter().enumerate() {
                 // A cleanup or a unit assignment spanned over the entire block or its
                 // closing brace also runs on the empty arm of an if without else.
                 if b.source_span.is_some_and(|s| s.start < span.start && span.end < s.end) {
                   candidates.insert(a);
+                } else if effect && b.source_span.is_some_and(|s| contains(s, span)) {
+                  boundary_effects.insert(a);
                 }
               }
             }
+          }
+          if candidates.is_empty() {
+            // A call may occupy its whole arm, e.g. _ => panic!().
+            candidates = boundary_effects;
           }
           if candidates.len() == 1 {
             let a = *candidates.first().unwrap();
@@ -1176,6 +1193,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         if unknown == [to.block] && remaining.len() == 1 {
           entry = remaining.first().copied();
         }
+        // Empty exit arms can leave only bookkeeping after the switch.
+        // For an if testing the boolean computed at its condition, MIR
+        // identifies both arms directly (0 is false, 1 is true).
+        if entry.is_none() && remaining.len() == 2 && branches.len() == 2
+          && matches!(branch_type, crate::svg_generator::data::BranchType::If(..))
+        {
+          let data = &body.basic_blocks[switch.block];
+          if let TerminatorKind::SwitchInt { discr, targets } = &data.terminator().kind {
+            let span = data.terminator().source_info.span;
+            if self.branch_conditions.get(id) == Some(&span) && discr.ty(&body.local_decls, self.tcx).is_bool()
+              && data.statements.iter().rev().any(|st| st.source_info.span == span
+                && matches!(&st.kind, rustc_middle::mir::StatementKind::Assign(a) if Some(a.0) == discr.place()))
+            {
+              entry = (0..=1).find(|&v| targets.target_for_value(v) == to.block).map(|v| (1 - v) as usize);
+            }
+          }
+        }
       }
       if let Some(a) = entry {
         site.path.push((*id, a));
@@ -1184,20 +1218,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let (lo, _) = branch_type.get_start_end(a);
         let hi = branch_type.get_start_end(a).1;
         site.row = if lo <= next && next <= hi { next } else { lo.max(*split_point).min(*merge_point) };
-        return;
+        return true;
       }
       if !sw.is_empty() && sw.iter().all(|&s| end.end_successor.is_some_and(|to| dominates(body, to, s))) {
         if site.row <= *split_point {
           site.before = Some(*id);
-          return;
+          return false;
         }
       }
       if let Some((i, arm)) = branches.iter().enumerate().find(|(_, arm)| arm.source_span.is_some_and(|s| contains(s, src))) {
         site.path.push((*id, i));
-        self.locate(&arm.e_data, switches, src, end, next, site);
-        return;
+        return self.locate(&arm.e_data, switches, src, end, next, site);
       }
     }
+    false
   }
 }
 
@@ -1336,18 +1370,28 @@ fn replace_end(events: &mut Events, map: &mut LineMap, end: &ExternalEvent) {
 }
 
 fn remove_from(events: &mut Events, map: &mut LineMap, ids: &BTreeSet<usize>) {
-  events.retain_mut(|(_, e)| {
-    if let ExternalEvent::Branch { branches, .. } = e {
-      for arm in branches {
-        remove_from(&mut arm.e_data, &mut arm.line_map, ids);
-      }
-    }
-    !ids.contains(&e.get_id())
-  });
-  for group in map.values_mut() {
-    group.retain(|e| !ids.contains(&e.get_id()));
-  }
+  remove_except_reserved(events, map, ids, &BTreeSet::new());
 }
+
+// A slot can itself be inside a containing arm. A stacked arrow moved
+// within its original row keeps its reservation in the enclosing line map.
+fn remove_except_reserved(events: &mut Events, map: &mut LineMap, removed: &BTreeSet<usize>, reserved: &BTreeSet<usize>) {
+    if removed.is_empty() {
+        return;
+    }
+    events.retain(|(_, e)| !removed.contains(&e.get_id()));
+    for arrows in map.values_mut() {
+        arrows.retain(|e| !removed.contains(&e.get_id()) || reserved.contains(&e.get_id()));
+    }
+    for (_, e) in events {
+        if let ExternalEvent::Branch { branches, .. } = e {
+            for arm in branches {
+                remove_except_reserved(&mut arm.e_data, &mut arm.line_map, removed, reserved);
+            }
+        }
+    }
+}
+
 
 fn insert(
   events: &mut Events,
@@ -1479,7 +1523,7 @@ mod tests {
   fn split_repoint_ends_remain_selectable_by_their_own_loan() {
     // Two MIR definitions reaching an overwrite through different arms.
     // The later passes look up each copy by its drawing ID.
-    let mut first = ExternalEvent::RefDie {
+    let mut first = ExternalEvent::RefDie { slot: 12,
       from: ResourceTy::Anonymous, to: ResourceTy::Caller, id: 12, num_curr_borrowers: 0,
     };
     let mut second = first.clone();

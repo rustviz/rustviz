@@ -1236,6 +1236,10 @@ fn append_dot(
     dots.add_event(dot_data.hash, dot_data.dot_x, dot_data.dot_y, timeline_data, dot_data.title, false, lend_id, ev, row);
 }
 
+fn caller_end(event: &Event) -> bool {
+    matches!(event, Event::StaticDie { to: ResourceTy::Caller, .. } | Event::MutableDie { to: ResourceTy::Caller, .. })
+}
+
 /// The split dot, the arm lines and the join dot a conditional draws on one
 /// variable's column (an `Event::Branch` in its history).
 fn render_branch_dots(
@@ -1332,7 +1336,7 @@ fn render_branch_dots(
         // the join dot or past it; one an arm that returns or
         // panics leaves can't (that arm never gets there).
         let mut leftover: Vec<(String, &'static str)> = Vec::new();
-        for branch in branch_history.iter() {
+        for (arm, branch) in branch_history.iter().enumerate() {
             dots.set_carry(*hash, arm_carry.clone());
             // Whether the value is still owned when it goes out
             // of scope inside the branch: only at a `return`
@@ -1352,6 +1356,16 @@ fn render_branch_dots(
                     State::FullPrivilege { s: LineState::Full | LineState::Gray } | State::PartialPrivilege { .. }
                 ));
             render_dot(hash, &branch.e_data, &branch.t_data, visualization_data, hold, dots, held_at_event);
+            if branch.diverges && branch_history.iter().all(|b| b.diverges) {
+                // The end dot occupies the stop marker on this column.
+                let stop = ty.get_start_end(arm).1;
+                if let Some((row, _)) = branch.e_data.last().filter(|(row, e)| *row == stop && caller_end(e)) {
+                    let at = (*hash, branch.t_data.x_val, get_y_axis_pos(*row));
+                    if let Some(&i) = dots.at.get(&at) {
+                        dots.dots[i].lines.push((None, hover_messages::branch_never_reaches_merge(branch.exits.contains(&BranchExit::Other))));
+                    }
+                }
+            }
             for text in dots.take_carry(*hash) {
                 if !branch.diverges && !leftover.iter().any(|(t, _)| *t == text.0) {
                     leftover.push(text);
@@ -1402,10 +1416,26 @@ fn render_branch_dots(
             if seg_drawn(rap, &state) {
                 // The branches it goes on from: those that break still
                 // holding something (not one that dropped it, #410).
-                let breaking = branch_history.iter()
-                    .filter(|b| breaks_out_only(&b.exits)
+                let live: Vec<_> = branch_history.iter().enumerate()
+                    .filter(|(_, b)| breaks_out_only(&b.exits)
                         && b.states.last().is_some_and(|s| seg_drawn(rap, &convert_back(&s.2))))
-                    .count();
+                    .map(|(i, _)| i).collect();
+                let carried = match live.as_slice() {
+                    [arm] if branch_history.len() == 2 && branch_history.iter().all(|b| b.exits.as_slice() == [BranchExit::Break]) => {
+                        let b = &branch_history[*arm];
+                        b.source_span.and_then(|span| {
+                            let f = *visualization_data.fn_source_lines.get(hash)?;
+                            let (cell, _) = visualization_data.state_table.arm_loan_cell(f, rap.name(), span.end.0, span)?;
+                            // MIR reborrows the reference on this edge. The
+                            // transfer to the loop result has that same holder.
+                            let supplied = cell.lent.iter().any(|l| history.iter().any(|(_, e)|
+                                matches!(e, Event::MutableLend { id, to, .. } if to.name() == l.holder
+                                    && borrow_break_alt(*id, visualization_data).is_some_and(|a| a.end == AltEnd::Loop && a.reborrow == Some(l.loan)))));
+                            Some(hover_messages::both_branches_break(rap.name(), &ty.string_of_branch(*arm), supplied))
+                        })
+                    }
+                    _ => None,
+                };
                 let cy = get_y_axis_pos(*merge_point) + if collapsed { COLLAPSED_APEX } else { 0 };
                 let m_data = EventDotData {
                     hash: *hash as u64,
@@ -1414,7 +1444,7 @@ fn render_branch_dots(
                     title: if exhausted {
                         "The iterator's next() returned None, so the loop exits instead of starting another iteration.".to_owned()
                     } else {
-                        hover_messages::event_dot_branch_merge_after_break(&is.real_name(), breaking)
+                        carried.unwrap_or_else(|| hover_messages::event_dot_branch_merge_after_break(&is.real_name(), live.len()))
                     },
                 };
                 append_dot(m_data, timeline_data, dots, None, rv_attrs::BRANCH_JOIN, *merge_point);
@@ -9038,11 +9068,18 @@ fn render_branches(
                 (None, Some(rise)) => column_top_y - rise as f64,
                 (None, None) => column_top_y,
             };
+            let split_segment = segs.len();
             push_seg_if_renderable(
                 &mut segs, rap,
                 (parent_x, split_y), (branch_x, leg_end_y),
                 leading_state.clone(), visualization_data, &arm_label, Leg::Split, *split_point, *split_point, &arm_path,
             );
+            if is_active && branch.diverges && !branch.e_data.is_empty() && branch.e_data.iter().all(|(_, e)| caller_end(e)) {
+                if let Some(seg) = segs.get_mut(split_segment) {
+                    seg.title.push_str(". ");
+                    seg.title.push_str(&hover_messages::state_arm_split(&arm_label));
+                }
+            }
             // An arm that starts below the raised fork's row (the `else`)
             // runs down to its first row in the state it forked with. When
             // that row starts a conditional of the arm's own whose fork is
@@ -10905,7 +10942,15 @@ fn owner_loan_title(
             && possible_sources.is_some_and(|sources| sources.iter().any(|p| holder_rap(p).is_some_and(|r| r.is_ref())));
         let stored = vd.row_layout.stored_lender_loans.get(rap.hash())
             .is_some_and(|ids| loans.iter().any(|l| ids.contains(&l.loan)));
-        if !stored && (exclusive || !borrows_slots) {
+        if let Some(h) = kept_by.filter(|h| exclusive && whole && possible_sources.is_some_and(|s| s.len() > 1)
+            && !rap.is_ref() && replayed_lent_holder(rap, vd, row, &[]).holder.is_none()
+            && holder_rap(h).is_some_and(|r| r.is_mutref())
+            && loans.iter().all(|l| table.loan(fn_line, name, l.loan).is_some_and(|i| i.direct_holder.as_deref() == Some(*h))))
+        {
+            return (state, hover_messages::state_repointed_lender(name, h, rap.holds_value()), true);
+        }
+        let drops_holder = kept_by.is_some_and(|h| loans.iter().any(|l| table.kept_through_drop(fn_line, name, l.loan, h)));
+        if !stored && !drops_holder && (exclusive || !borrows_slots) {
             return (layout.clone(), legacy(), true);
         }
         legacy()

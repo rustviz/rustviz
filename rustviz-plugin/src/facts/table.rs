@@ -163,6 +163,7 @@ struct BodyTable {
     uniform_option_refs: BTreeMap<String, bool>,
     /// Each loan's borrowed place (`s`, `p.a`, `*b`, `v[_]`).
     loans: BTreeMap<usize, LoanInfo>,
+    drop_holders: BTreeMap<usize, BTreeSet<String>>,
     part_lenders: BTreeSet<String>,
     /// Columns with fields this body can't name (no columns of their own).
     hidden_fields: BTreeSet<String>,
@@ -393,6 +394,10 @@ impl StateTable {
 
     pub fn loan(&self, fn_line: usize, column: &str, loan: usize) -> Option<&LoanInfo> {
         self.body(fn_line, column)?.loans.get(&loan)
+    }
+
+    pub fn kept_through_drop(&self, function: usize, column: &str, loan: usize, holder: &str) -> bool {
+        self.body(function, column).and_then(|b| b.drop_holders.get(&loan)).is_some_and(|places| places.contains(holder))
     }
 
     /// The source lines of the loans of `lender` (a temporary's `(code)`
@@ -890,7 +895,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
-    BodyTable { joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    BodyTable { drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 #[cfg(test)]
@@ -910,7 +915,7 @@ mod tests {
     }
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
-        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, drop_route: DropRoute::Normal, end_successor: None, col: 1, arm, fact, order: (0, 0, 0), site: None }).collect();
+        let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, display_location: rustc_middle::mir::Location::START, drop_route: DropRoute::Normal, end_successor: None, end_places: vec![], caller_slot: None, transfer_paths: vec![], col: 1, arm, fact, order: (0, 0, 0), site: None }).collect();
         Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new() }
     }
 
@@ -920,11 +925,13 @@ mod tests {
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
+            drop_holders: Default::default(),
             aggregate_loans: Default::default(),
             issued_operand_loans: Default::default(),
             returned_operand_loans: Default::default(),
             conditional_ends: Default::default(),
             argument_stores: Default::default(), receiver_loans: Default::default(), restored_reborrows: Default::default(),
+            inline_holder_ends: vec![],
             evaluated_spans: Vec::new(),
             constructed_vecs: Default::default(),
             def_id: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(),
@@ -940,7 +947,6 @@ mod tests {
             columns: cols.iter().map(|c| col(c)).collect(),
             uniform_option_refs: Default::default(),
             binding_loans: BTreeMap::new(),
-            inline_holder_ends: Vec::new(),
             loans: vec![LoanInfo {
                 projected: None,
                 issue: None,
