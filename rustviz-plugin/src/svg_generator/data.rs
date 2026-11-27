@@ -6467,7 +6467,10 @@ impl Visualizable for VisualizationData {
                             // conditionals only, not a loop's body; the plugin
                             // leaves out one whose reference is read after the
                             // conditional, `drop_arm_ref_ends_live_after`.)
-                            append_arm_ref_die(self, ev, *l, var, lo <= *l && *l <= hi && !matches!(branch_type, BranchType::Loop(..)),
+                            // A compiler edge can end this copy at the
+                            // decision, before the first arm instruction.
+                            let on_arm = self.row_layout.has_arm_point(ev.get_id()) || lo <= *l && *l <= hi;
+                            append_arm_ref_die(self, ev, *l, var, on_arm && !matches!(branch_type, BranchType::Loop(..)),
                                 skipped_holds.get(var.hash()), &mut b_history);
                         }
 

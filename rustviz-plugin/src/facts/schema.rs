@@ -390,6 +390,10 @@ pub struct LoanInfo {
     pub lender_local: Option<rustc_middle::mir::Local>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issued_on: Option<SwitchEdge>,
+    /// Switch edges required to reach the MIR issuance, including enclosing
+    /// decisions on other source rows. The row-local edge above is for layout.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub issuance_path: Vec<SwitchEdge>,
     pub loan: usize,
     /// "borrow": a borrow borrowck tracks (its `BorrowIndex`) of a user
     /// place. The others restrict no column (`columns` is empty, no `lent`
@@ -490,6 +494,13 @@ pub struct LoanInfo {
     /// `Holder { r }`, `f(m)` with `m: &mut T`), a macro's. (Not for a
     /// parameter's, a constant's or a temporary's loan.)
     pub implicit: bool,
+}
+
+impl LoanInfo {
+    pub(crate) fn alternative_to(&self, other: &Self) -> bool {
+        self.issuance_path.iter().any(|a| other.issuance_path.iter()
+            .any(|b| a.switch == b.switch && a.successor != b.successor))
+    }
 }
 
 /// One place's state after a row (or an arm of a row).
@@ -809,7 +820,40 @@ impl DropRoute {
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EndPlace {
     pub local: usize,
+    /// The complete MIR projection, independent of the presentation name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub projection: Vec<EndProjection>,
     pub name: String,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum EndProjection {
+    Deref,
+    Field(usize),
+    Index(usize),
+    ConstantIndex { offset: u64, min_length: u64, from_end: bool },
+    Subslice { from: u64, to: u64, from_end: bool },
+    Downcast(usize),
+    OpaqueCast(String),
+    UnwrapUnsafeBinder(String),
+}
+
+impl EndPlace {
+    pub(super) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>, name: String) -> Self {
+        use rustc_middle::mir::ProjectionElem::*;
+        let projection = p.projection.iter().map(|step| match step {
+            Deref => EndProjection::Deref,
+            Field(f, _) => EndProjection::Field(f.index()),
+            Index(i) => EndProjection::Index(i.index()),
+            ConstantIndex { offset, min_length, from_end } => EndProjection::ConstantIndex { offset, min_length, from_end },
+            Subslice { from, to, from_end } => EndProjection::Subslice { from, to, from_end },
+            Downcast(_, v) => EndProjection::Downcast(v.index()),
+            OpaqueCast(ty) => EndProjection::OpaqueCast(format!("{:032x}", tcx.type_id_hash(ty))),
+            UnwrapUnsafeBinder(ty) => EndProjection::UnwrapUnsafeBinder(format!("{:032x}", tcx.type_id_hash(ty))),
+        }).collect();
+        Self { local: p.local.index(), projection, name }
+    }
 }
 
 /// A holder along a reaching MIR value transfer. `assigned_at` is the
@@ -843,6 +887,15 @@ pub struct Ev {
     pub display_location: rustc_middle::mir::Location,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub end_places: Vec<EndPlace>,
+    /// Initialized, named reference slots whose MIR origins contain this loan
+    /// on the HoldEnd successor. Unpictured temporaries can carry it too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub continuing_places: Vec<EndPlace>,
+    /// On this discriminator edge the tested place has a variant with no
+    /// fields. It cannot carry a loan in its payload here, even if a
+    /// BorrowEnd names it among the possible holders at the switch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fieldless_operand: Option<EndPlace>,
     /// Original caller slot still initialized when this loan ends. A reborrow
     /// can keep it restricted after its own origin stops carrying the loan.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -883,7 +936,7 @@ mod tests {
     fn dedup_keeps_ends_with_distinct_mir_successors() {
         let first = Ev {
             location: Location::START, display_location: Location::START, place_local: None, drop_route: DropRoute::Normal, occurrence: super::Occurrence { at: Location::START, exit: None, successor: Some(BasicBlock::from_usize(1).start_location()) },
-            end_places: vec![], caller_slot: None, transfer_paths: vec![],
+            end_places: vec![], continuing_places: vec![], fieldless_operand: None, caller_slot: None, transfer_paths: vec![],
             col: 8, arm: None, order: (0, 0, 1),
             fact: Fact::HoldEnd { loan: 0, holder: "other.r".into(), to_line: 4, to_col: 1 },
         };

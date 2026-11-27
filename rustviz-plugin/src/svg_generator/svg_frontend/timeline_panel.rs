@@ -3290,6 +3290,18 @@ fn ends_several_loans_title(event: &Event, history: &[(usize, Event)], line: usi
         matching.next().is_none().then_some(id)
     };
     if let Some(id) = identified(event) {
+        // One overwritten reference can have alternative reaching loans.
+        // Separate lender names would say it held both. Use its ordinary
+        // end clause when the two definitions came from sibling CFG edges.
+        if rap.is_ref() {
+            let function = vd.fn_source_lines[rap.hash()];
+            if let Some(loan) = table.loan(function, id) {
+                if table.end_loans[&event.get_id()].iter().filter_map(|&other| table.loan(function, other))
+                    .any(|other| loan.alternative_to(other)) {
+                    return None;
+                }
+            }
+        }
         let src = rv_attrs::line_of(line, &vd.row_lines);
         let on_row = |l| src.is_some() && rv_attrs::line_of(l, &vd.row_lines) == src;
         // A field returned by a call may represent alternative lenders.

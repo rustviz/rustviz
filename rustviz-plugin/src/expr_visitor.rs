@@ -13236,7 +13236,7 @@ pub fn print_out_of_scope(&mut self){
     // An arm whose path ends the reference's loan (it returns, or the
     // last use is in another arm) doesn't hold it after that end (#796).
     for s in sharers.iter_mut() {
-      ended_arm_gaps(self.preprocessed_events, &s.name, &s.lenders, s.from, s.to, &mut s.gaps);
+      ended_arm_gaps(self.preprocessed_events, &s.name, &s.lenders, s.from, s.to, &self.row_layout, &mut s.gaps);
     }
     // A borrow a call may have stored in `v` (`keep(&mut v, &s)`,
     // #513) keeps s shared until the loan ends, as a live `let r = &s;`
@@ -13329,7 +13329,7 @@ pub fn print_out_of_scope(&mut self){
       });
     }
     let mut noted: HashMap<usize, Vec<String>> = HashMap::new();
-    note_sharers_in(self.preprocessed_events, &sharers, &self.row_layout.ended_before_call, &mut noted);
+    note_sharers_in(self.preprocessed_events, &sharers, &self.row_layout.ended_before_call, &mut Vec::new(), &mut noted);
     // A borrow end between two variables is listed by line too.
     for evs in self.event_line_map.values_mut() {
       for e in evs.iter_mut() {
@@ -13495,7 +13495,19 @@ pub fn print_out_of_scope(&mut self){
       let made = self.borrow_map.get(r.name()).filter(|d| ends_current_loan(&ev.1, d)).map(|d| d.assigned_at);
       let copies = *self.unique_id;
       let original = ev.1.get_id();
-      end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), made, stacked, self.unique_id, &self.moved_into_result, &holders);
+      let facts = self.body_facts;
+      let ids = self.end_loans.get(&original);
+      let mut entry_end = |arm, id| {
+        let (row, edge) = facts?.reference_end_entering(arm, r.ref_local()?, ids?)?;
+        self.row_layout.record_arm_point(id, edge);
+        Some((row, matches!(edge.fact, crate::facts::Fact::HoldEnd { .. })))
+      };
+      let original_row = ev.0;
+      let moved_entry = end_borrow_in_arms(self.preprocessed_events, ev, &r, lender.as_ref(), made, stacked,
+        self.unique_id, &self.moved_into_result, &holders, &mut entry_end);
+      if moved_entry {
+        if let Some(arrows) = self.event_line_map.get_mut(&original_row) { arrows.retain(|e| e.get_id() != original); }
+      }
       if let Some(loans) = self.end_loans.get(&original).cloned() {
         for id in copies..*self.unique_id { self.end_loans.insert(id,loans.clone()); }
       }
@@ -13553,12 +13565,19 @@ struct Sharer {
   stored: bool,
   /// Lines (first, last) it doesn't hold the loan on: the rest of an
   /// arm that moved its value on (`if c { let w = v; .. }`, #997).
-  gaps: Vec<(usize, usize)>,
+  gaps: Vec<ArmGap>,
+}
+
+#[derive(Clone)]
+struct ArmGap {
+  first: usize,
+  last: usize,
+  arm: Option<crate::facts::SourceArm>,
 }
 
 impl Sharer {
-  fn in_gap(&self, line: usize) -> bool {
-    self.gaps.iter().any(|&(a, b)| a <= line && line <= b)
+  fn in_gap(&self, line: usize, path: &[crate::facts::SourceArm]) -> bool {
+    self.gaps.iter().any(|gap| gap.first <= line && line <= gap.last && gap.arm.is_none_or(|arm| path.contains(&arm)))
   }
 }
 
@@ -13795,7 +13814,8 @@ impl HolderWalk<'_> {
     };
     dead_arm_gaps(list, holder, from, to, &mut gaps);
     self.holders.push(Sharer {
-      name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true, gaps,
+      name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true,
+      gaps: gaps.into_iter().map(|(first, last)| ArmGap { first, last, arm: None }).collect(),
     });
     for h in hops {
       let Some(dest) = h.dest else { continue };
@@ -13842,11 +13862,11 @@ fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to:
 /// println!("{}", u);` ends u's borrow at the arm's start, so the arm's
 /// `println!` leaves h unborrowed, not "still borrowed by u". The end's
 /// own line counts too unless the arm uses `holder` there.
-fn ended_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, lenders: &[String], from: usize, to: usize, out: &mut Vec<(usize, usize)>) {
+fn ended_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, lenders: &[String], from: usize, to: usize, layout: &crate::event_order::RowLayout, out: &mut Vec<ArmGap>) {
   for (_, ev) in list {
     let ExternalEvent::Branch { branches, branch_type, .. } = ev else { continue };
     for (i, b) in branches.iter().enumerate() {
-      ended_arm_gaps(&b.e_data, holder, lenders, from, to, out);
+      ended_arm_gaps(&b.e_data, holder, lenders, from, to, layout, out);
       if matches!(branch_type, BranchType::Loop(..)) {
         continue;
       }
@@ -13854,13 +13874,14 @@ fn ended_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, lenders: &[Stri
       let ended = b.e_data.iter().filter_map(|(line, e)| match e {
         ExternalEvent::StaticDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. }
         | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to: ResourceTy::Value(l), .. }
-          if r.name() == holder && lenders.iter().any(|n| n == l.name()) && from <= *line && *line <= to.min(end) => Some(*line),
+          if r.name() == holder && lenders.iter().any(|n| n == l.name()) && from <= *line && *line <= to.min(end) => Some((*line, e.get_id())),
         _ => None,
       }).min();
-      if let Some(l) = ended {
-        let first = if last_use(&b.e_data, holder, l - 1, l) == Some(l) { l + 1 } else { l };
+      if let Some((l, id)) = ended {
+        let arm = b.source.filter(|_| layout.has_arm_point(id));
+        let first = if arm.is_none() && last_use(&b.e_data, holder, l - 1, l) == Some(l) { l + 1 } else { l };
         if first <= end {
-          out.push((first, end));
+          out.push(ArmGap { first, last: end, arm });
         }
       }
     }
@@ -13969,7 +13990,7 @@ fn note_later_borrowers(events: &mut [(usize, ExternalEvent)]) {
 
 /// `note_sharers_across_calls` over `events`, branches included.
 /// The borrow ends it notes are recorded in `noted`, by event id.
-fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], ended: &BTreeMap<usize,BTreeSet<String>>, noted: &mut HashMap<usize, Vec<String>>) {
+fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], ended: &BTreeMap<usize,BTreeSet<String>>, path: &mut Vec<crate::facts::SourceArm>, noted: &mut HashMap<usize, Vec<String>>) {
   // The lenders a call whose result keeps the borrow has borrowed so
   // far, with its line.
   let mut kept: Vec<(usize, String)> = Vec::new();
@@ -13988,7 +14009,7 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], en
           .filter(|s| {
             let started = s.from < *line
               || (s.from_kept_call && s.from == *line && kept.iter().any(|(l, n)| l == line && n == lender.name()));
-            !ended.get(id).is_some_and(|names|names.contains(&s.name)) && started && s.to >= *line && s.moved.is_none_or(|m| m >= *line) && !s.in_gap(*line)
+            !ended.get(id).is_some_and(|names|names.contains(&s.name)) && started && s.to >= *line && s.moved.is_none_or(|m| m >= *line) && !s.in_gap(*line, path)
               && s.lenders.iter().any(|l| l == lender.name())
           })
           .map(|s| s.name.clone())
@@ -14019,7 +14040,7 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], en
         };
         let mut names: Vec<String> = Vec::new();
         for s in sharers.iter().filter(|s| (s.stored || stored_end) && s.name != holder
-            && s.from <= *line && s.to > *line && s.moved.is_none_or(|m| m > *line) && !s.in_gap(*line)
+            && s.from <= *line && s.to > *line && s.moved.is_none_or(|m| m > *line) && !s.in_gap(*line, path)
             && s.lenders.iter().any(|l| l == lender.name()))
         {
           if !names.contains(&s.name) {
@@ -14033,7 +14054,9 @@ fn note_sharers_in(events: &mut [(usize, ExternalEvent)], sharers: &[Sharer], en
       }
       ExternalEvent::Branch { branches, .. } => {
         for b in branches.iter_mut() {
-          note_sharers_in(&mut b.e_data, sharers, ended, noted);
+          if let Some(arm) = b.source { path.push(arm); }
+          note_sharers_in(&mut b.e_data, sharers, ended, path, noted);
+          if b.source.is_some() { path.pop(); }
         }
       }
       _ => {}
@@ -14184,7 +14207,8 @@ pub(crate) fn end_borrow_in_arms(
   unique_id: &mut usize,
   moved_into_result: &HashSet<usize>,
   holders: &HashSet<String>,
-) {
+  entry_end: &mut impl FnMut(crate::facts::SourceArm, usize) -> Option<(usize, bool)>,
+) -> bool {
   let Some((k, a)) = branch_ending_borrow(events, r, lender, ev.0) else {
     // Right after r's last use on or before its line, ahead of other
     // events on that line: in `Some(x) => ..` on `third`, third's
@@ -14197,7 +14221,7 @@ pub(crate) fn end_borrow_in_arms(
     let after_earlier = events.iter().rposition(|(l, _)| *l < ev.0);
     let at = after_touch.max(after_earlier).map_or(0, |i| i + 1);
     events.insert(at, ev);
-    return;
+    return false;
   };
   let ExternalEvent::Branch { branches, live_vars, branch_type, split_point, merge_point, .. } = &mut events[k].1 else {
     unreachable!("branch_ending_borrow returns a Branch")
@@ -14215,7 +14239,27 @@ pub(crate) fn end_borrow_in_arms(
     live_vars.insert(l.clone());
   }
   live_vars.insert(r.clone());
+  let mut original_at_entry = false;
   for (b, arm) in branches.iter_mut().enumerate() {
+    if !made_in_arm {
+      let id = if b == a { ev.1.get_id() } else { *unique_id };
+      if let Some((row, own)) = arm.source.and_then(|arm| entry_end(arm, id)) {
+        if b == a { original_at_entry = true; } else { *unique_id += 1; }
+        let mut end = ev.1.clone();
+        if own {
+          let (_, to) = borrow_end_of(&end).unwrap();
+          end = ExternalEvent::RefDie { slot: end.end_slot().unwrap(), from: ResourceTy::Value(r.clone()),
+            to: to.clone(), num_curr_borrowers: 1, id };
+        } else {
+          match &mut end {
+            ExternalEvent::StaticDie { id: i, .. } | ExternalEvent::MutableDie { id: i, .. } | ExternalEvent::RefDie { id: i, .. } => *i = id,
+            _ => unreachable!(),
+          }
+        }
+        arm.e_data.insert(0, (row, end));
+        continue;
+      }
+    }
     if b == a {
       // `let h2 = h;` in this arm moved r's reference on (a `&mut`, or
       // a struct's field with the struct, #637): what holds it now
@@ -14234,7 +14278,11 @@ pub(crate) fn end_borrow_in_arms(
         || (inner_split && arm.line_map.get(&ev.0).is_some_and(|evs| !evs.is_empty()))) {
         arm.line_map.entry(ev.0).or_default().push(ev.1.clone());
       }
-      end_borrow_in_arms(&mut arm.e_data, ev.clone(), r, lender, made, in_line_map, unique_id, moved_into_result, holders);
+      original_at_entry = end_borrow_in_arms(&mut arm.e_data, ev.clone(), r, lender, made, in_line_map,
+        unique_id, moved_into_result, holders, entry_end);
+      if original_at_entry {
+        if let Some(arrows) = arm.line_map.get_mut(&ev.0) { arrows.retain(|e| e.get_id() != ev.1.get_id()); }
+      }
       continue;
     }
     if made_in_arm {
@@ -14263,6 +14311,7 @@ pub(crate) fn end_borrow_in_arms(
     }
     end_after_last_use(&mut arm.e_data, branch_type.get_start_end(b).0, copy, r, lender, unique_id);
   }
+  original_at_entry
 }
 
 /// Put `end`, a copy of the end of `r`'s borrow, into `events` (an arm's,

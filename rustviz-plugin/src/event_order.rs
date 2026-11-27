@@ -1371,6 +1371,7 @@ pub struct RowLayout {
 
 impl RowLayout {
     pub fn append(&mut self, other: &mut Self) {
+        self.arm_points.append(&mut other.arm_points);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.closure_result_holders.append(&mut other.closure_result_holders);
         self.stored_lender_loans.append(&mut other.stored_lender_loans);
@@ -1395,6 +1396,14 @@ impl RowLayout {
         self.dependencies.append(&mut other.dependencies);
         self.end_order.append(&mut other.end_order);
         self.projected.append(&mut other.projected);
+    }
+
+    pub(crate) fn record_arm_point(&mut self, id: usize, edge: &Ev) {
+        self.arm_points.insert(id, fact_point(edge));
+    }
+
+    pub(crate) fn has_arm_point(&self, id: usize) -> bool {
+        self.arm_points.contains_key(&id)
     }
 
     pub(crate) fn name_lender(&self, id: usize) -> bool {
@@ -1483,6 +1492,8 @@ mod tests {
                 caller_slot: None,
                 transfer_paths: Vec::new(),
                 end_places: Vec::new(),
+                continuing_places: Vec::new(),
+                fieldless_operand: None,
                 drop_route: DropRoute::Unwind,
                 place_local: None,
                 occurrence: crate::facts::Occurrence::at(Location::START),

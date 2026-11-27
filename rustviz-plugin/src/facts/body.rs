@@ -877,7 +877,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         if matches!(fact, Fact::BorrowEnd { .. }) {
             order.2 = 1;
         }
-        let ev = Ev { location: l, display_location: at, place_local: None, drop_route: DropRoute::Normal, occurrence: Occurrence { at: l, exit: (at != l).then_some(at), successor: None }, end_places: vec![], caller_slot: None, transfer_paths: vec![], col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order };
+        let ev = Ev { location: l, display_location: at, place_local: None, drop_route: DropRoute::Normal, occurrence: Occurrence { at: l, exit: (at != l).then_some(at), successor: None }, end_places: vec![], continuing_places: vec![], fieldless_operand: None, caller_slot: None, transfer_paths: vec![], col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order };
         (row, ev)
     }
 }
@@ -1340,6 +1340,18 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         uninit: MaybeUninitializedPlaces::new(tcx, &rt_body, &rt_md).mark_inactive_variants_as_uninit().include_inactive_in_otherwise().iterate_to_fixpoint(tcx, &rt_body, None).into_results_cursor(&rt_body),
         ever: EverInitializedPlaces::new(&rt_body, &rt_md).iterate_to_fixpoint(tcx, &rt_body, None).into_results_cursor(&rt_body),
     };
+    // A target block can also be reached through another arm. Require
+    // this edge to dominate the target before using block dominance to
+    // establish which enclosing decisions an issuance depends on.
+    let dom = rt_body.basic_blocks.dominators();
+    let exclusive_edges: Vec<_> = switches.iter().map(|s| s.edge).filter(|e|
+        runs.contains(&e.switch.block) && runs.contains(&e.successor)
+        && !dom.dominates(e.successor, e.switch.block)
+        && rt_body.basic_blocks.predecessors()[e.successor].iter().all(|&p|
+            !runs.contains(&p) || p == e.switch.block || dom.dominates(e.successor, p))
+    ).collect();
+    let issuance_path = |at: Location| exclusive_edges.iter().copied().filter(|e|
+        runs.contains(&at.block) && dom.dominates(e.successor, at.block)).collect();
     let mut storage = MaybeStorageLive::new(std::borrow::Cow::Owned(always_storage_live_locals(body)))
         .iterate_to_fixpoint(tcx, body, None)
         .into_results_cursor(body);
@@ -1894,6 +1906,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         loans.push(LoanInfo {
             issue: Some(*loc),
             issued_on: cx.rows.edge_at(*loc),
+            issuance_path: issuance_path(*loc),
             lender_local: Some(bp.local),
             loan: idx,
             line: cx.row_of(*loc),
@@ -1968,6 +1981,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         loans.push(LoanInfo {
             issue: u.at,
             issued_on: u.at.and_then(|at| cx.rows.edge_at(at)),
+            issuance_path: u.at.map(issuance_path).unwrap_or_default(),
             lender_local: u.place.map(|p| p.local).or(u.param),
             loan: id,
             line,
@@ -2722,13 +2736,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
 
     let source_slots = super::holder_path::HolderPath { tcx, body, runs: &runs };
     let iterators: Vec<_> = body.local_decls.indices().filter(|l| for_iter(*l) && !cx.names.locals.contains_key(l)).collect();
-    let mut end_provenance = |loc: Location, bi: BorrowIndex, li: &LoanInfo, only: Option<Place<'tcx>>| {
+    let end_provenance = |flow: &mut Flow<'_, '_, 'tcx>, loc: Location, bi: BorrowIndex, li: &LoanInfo, only: Option<Place<'tcx>>| {
         let caller_slot = bi.index().checked_sub(base).and_then(|id| untracked[id].param).and_then(|param| {
             // A mutable binding may already contain a different reference.
             if body.local_decls[param].mutability.is_mut() { return None; }
             let mpi = move_data.rev_lookup.find_local(param)?;
             (flow.state(&[loc], false, mpi).word() == "own")
-                .then(|| EndPlace { local: param.index(), name: cx.names.locals[&param].clone() })
+                .then(|| EndPlace::new(tcx, Place::from(param), cx.names.locals[&param].clone()))
         });
         let mut places = BTreeSet::new();
         let mut transfers = BTreeSet::new();
@@ -2746,10 +2760,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 li.direct_holders.contains(n) || li.via_call.contains(n) || tested.is_some() && li.holders.contains(n)
             };
             let named = |p: Place<'tcx>| {
-                if iterators.contains(&p.local) && p.projection.is_empty() { return Some(EndPlace { local: p.local.index(), name: "<iterator>".into() }); }
+                if iterators.contains(&p.local) && p.projection.is_empty() { return Some(EndPlace::new(tcx, p, "<iterator>".into())); }
                 let name = cx.name(p)?;
                 can_name(&name)
-                    .then_some(EndPlace { local: p.local.index(), name })
+                    .then_some(EndPlace::new(tcx, p, name))
             };
             let carries = |p, at| held_by_place(p, t.start_index(at)).contains(&bi.index());
             let mut record = |mut path: Vec<HolderStep>| {
@@ -2813,10 +2827,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     for ev in evs.values_mut().flatten() {
         let Fact::BorrowEnd { loan, holder, why, .. } = &mut ev.fact else { continue };
         let Some(li) = loans.iter().find(|li| li.loan == *loan) else { continue };
-        let (mut places, paths, caller_slot) = end_provenance(ev.location, BorrowIndex::from_usize(*loan), li, None);
+        let (mut places, paths, caller_slot) = end_provenance(&mut flow, ev.location, BorrowIndex::from_usize(*loan), li, None);
         if places.is_empty() && unused.contains(loan) {
             if let Some(param) = untracked[*loan - base].param {
-                places.push(EndPlace { local: param.index(), name: cx.names.locals[&param].clone() });
+                places.push(EndPlace::new(tcx, Place::from(param), cx.names.locals[&param].clone()));
             }
         }
         if why == "non-returning call" {
@@ -2845,12 +2859,17 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
         ev.caller_slot = caller_slot;
+        if let Some(to) = ev.occurrence.successor {
+            ev.fieldless_operand = source_slots.fieldless_operand(ev.location, to).and_then(|place|
+                Some(EndPlace::new(tcx, place, cx.name(place)?)));
+        }
         ev.end_places = places;
         ev.transfer_paths = paths;
     }
     // ---- per-holder ends ---------------------------------------------------------
     // Where a direct or via-call holder stops holding a loan that goes on.
     if let Some(t) = table {
+        let killed: BTreeSet<_> = pfacts.into_iter().flat_map(|f| f.loan_killed_at.iter().copied()).collect();
         // The place a holder's name is (`h.0`, `h.inner.r`): its own field,
         // so `h.0` and `h.1` each have their own end.
         let place_of = |local: Local, fields: &str| -> Option<Place<'tcx>> {
@@ -2920,6 +2939,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             let bi = BorrowIndex::from_usize(l.loan);
             let mut seen: BTreeSet<&String> = BTreeSet::new();
+            let refs: Vec<_> = columns.iter().chain(&synth).filter(|(_, p, n)|
+                decl_place_ty(tcx, body, *p).is_ref()
+                    && (l.direct_holders.contains(n) || l.via_call.contains(n))).collect();
             let holders = l.direct_holders.iter().chain(l.via_call.iter()).filter(|h| seen.insert(*h));
             for (h, hp) in holders.flat_map(|h| {
                 let (root, fields) = h.split_once('.').unwrap_or((h, ""));
@@ -2952,8 +2974,28 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         let to_col = cx.rows.col.get(&s).copied().unwrap_or(0);
                         let mut f = cx.ev(loc, Fact::HoldEnd { loan: l.loan, holder: h.clone(), to_line, to_col });
                         f.1.occurrence.successor = Some(s);
-                        let (_, paths, _) = end_provenance(loc, bi, l, Some(hp));
-                        f.1.end_places.push(EndPlace { local: hp.local.index(), name: h.clone() });
+                        let (_, paths, _) = end_provenance(&mut flow, loc, bi, l, Some(hp));
+                        f.1.end_places.push(EndPlace::new(tcx, hp, h.clone()));
+                        // Propagation across this edge requires the same live
+                        // reference origin on both ends. The successor alone
+                        // can contain a loan introduced by another predecessor.
+                        f.1.continuing_places = refs.iter().filter_map(|(_, p, n)| {
+                            let TyKind::Ref(region, ..) = *decl_place_ty(tcx, body, *p).kind() else { return None };
+                            let origin = Origin::from(region_vid(region)?);
+                            let out = out_for(bi)?;
+                            let carries = |at| out.origin_contains_loan_at.get(&at)?.get(&origin);
+                            if !carries(t.mid_index(loc))?.contains(&bi) || !carries(t.start_index(s))?.contains(&bi)
+                                || killed.contains(&(bi, t.mid_index(loc))) { return None; }
+                            // A Copy field may have no move path of its own.
+                            // Its nearest tracked ancestor's initialization
+                            // bit excludes whole moves but ignores sibling moves.
+                            let mpi = match move_data.rev_lookup.find(p.as_ref()) {
+                                LookupResult::Exact(m) | LookupResult::Parent(Some(m)) => m,
+                                LookupResult::Parent(None) => return None,
+                            };
+                            let state = flow.state(&[loc], true, mpi);
+                            (state.may_init && !state.may_uninit).then(|| EndPlace::new(tcx, *p, n.clone()))
+                        }).collect::<BTreeSet<_>>().into_iter().collect();
                         f.1.transfer_paths = paths;
                         f.1.order.2 = 1;
                         if ends_on_row(s, row, l.loan) {
@@ -5431,7 +5473,24 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let Some(name) = cx.name(*dst) else { continue };
             let issued = loans.iter().find(|l| taken_at(l.loan) == Some(loc));
             let ids = match rv {
-                Rvalue::Ref(..) => issued.map(|l| vec![l.loan]).unwrap_or_default(),
+                Rvalue::Ref(_, _, borrowed) => {
+                    if let Some(l) = issued { vec![l.loan] }
+                    else if let Some(i) = borrowed.projection.iter().rposition(|e| e == ProjectionElem::Deref) {
+                        // Coercing a match arm can reborrow its reference
+                        // temporary into the join destination. If that
+                        // reborrow has no published loan, the loans in
+                        // the reference operand still reach this store.
+                        let input = Place { local: borrowed.local, projection: tcx.mk_place_elems(&borrowed.projection[..i]) };
+                        // Only the outer reference is dereferenced. Lifetimes
+                        // inside its pointee (including a raw pointer's
+                        // pointee) do not establish a reborrow from them.
+                        match decl_place_ty(tcx, body, input).kind() {
+                            TyKind::Ref(r, ..) => region_vid(*r).into_iter().flat_map(|v|
+                                held_in(&[Origin::from(v)], t.start_index(loc))).filter(|id| published.contains(id)).collect(),
+                            _ => Vec::new(),
+                        }
+                    } else { Vec::new() }
+                }
                 Rvalue::Use(Operand::Copy(src) | Operand::Move(src)) =>
                     held_by_place(*src, t.start_index(loc)).into_iter().filter(|l| published.contains(l)).collect(),
                 _ => held_by(dst.local, t.mid_index(loc)).into_iter().filter(|l| published.contains(l)).collect(),

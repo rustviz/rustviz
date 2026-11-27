@@ -169,6 +169,27 @@ impl<'tcx> HolderPath<'_, 'tcx> {
         None
     }
 
+    /// A switch target can be shared by several variants (including the
+    /// otherwise target). Exclude the payload only when *every* variant
+    /// selecting this actual successor is fieldless.
+    pub fn fieldless_operand(&self, at: Location, to: Location) -> Option<Place<'tcx>> {
+        if to.statement_index != 0 { return None; }
+        let (read, input) = self.discriminant_input(at)?;
+        // The switch tests the saved integer. A later write could have
+        // replaced the operand whose discriminant was read.
+        if self.body[at.block].statements[read.statement_index + 1..].iter().any(|st| match st.kind {
+            StatementKind::Nop => false,
+            StatementKind::StorageLive(l) | StatementKind::StorageDead(l) => l == input.local,
+            _ => true,
+        }) { return None; }
+        let ty = input.ty(&self.body.local_decls, self.tcx).ty;
+        let def = ty.ty_adt_def().filter(|def| def.is_enum())?;
+        let TerminatorKind::SwitchInt { targets, .. } = &self.body[at.block].terminator().kind else { return None };
+        let mut selected = def.discriminants(self.tcx).filter(|(_, d)| targets.target_for_value(d.val) == to.block).peekable();
+        selected.peek()?;
+        selected.all(|(variant, _)| def.variant(variant).fields.is_empty()).then_some(input)
+    }
+
     pub fn call_args(&self, at: Location) -> impl Iterator<Item = Place<'tcx>> + '_ {
         let bb = &self.body[at.block];
         let args = match &bb.terminator().kind {
