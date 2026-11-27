@@ -4438,16 +4438,6 @@ pub fn state_invalid(my_name: &String) -> String {
     )
 }
 
-pub fn structure(my_name: &String) -> String {
-    // update styling
-    let my_name_fmt = styled_name_html(my_name);
-
-    format!(
-        "the components in the box belong to struct {0}",
-        my_name_fmt
-    )
-}
-
 // ── Conditional join-point messages ────────────────────────────────
 //
 // Tooltip on the per-variable merge dot at the bottom of an `if` /

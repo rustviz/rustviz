@@ -36,9 +36,9 @@ const TOL: f64 = 1.0;
 const OVERLAP_PX: f64 = 12.0;
 /// Half a shaft's stroke (5 px wide).
 const SHAFT_HALF: f64 = 2.5;
-/// An arrow's head stops this close to the target dot's centre (8.2 px
-/// for a diagonal one).
-const HEAD_REACH: f64 = 10.0;
+/// An arrow's visible ends stop this close to the event dots' centres
+/// (8.2 px for a diagonal head).
+const ARROW_REACH: f64 = 10.0;
 /// An arrow's head may lie over this much of a column's slanted leg's
 /// centre line (`arrow-along-leg`): a leg ending at the dot the head
 /// points at, or crossing the head, passes under it for a few px.
@@ -51,6 +51,8 @@ struct Seg {
     hash: String,
     /// A main column's `line` (not a conditional's arm).
     main: bool,
+    arm_rows: Option<String>,
+    state: String,
     a: (f64, f64),
     b: (f64, f64),
 }
@@ -198,13 +200,18 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
                     [l, m] => (mid(l.0, m.0), mid(l.1, m.1)),
                     _ => continue,
                 };
-                g.segs.push(Seg { id, var: a("data-rv-var"), hash, main: true, a: p, b: q });
+                g.segs.push(Seg {
+                    id, var: a("data-rv-var"), hash, main: true, arm_rows: None,
+                    state: a("data-rv-state"), a: p, b: q,
+                });
             }
             "branch_line" => {
                 let Some(part @ ("line" | "side1" | "side2")) = n.attribute("data-rv-part") else { continue };
                 let order = arms.len();
                 let e = arms.entry(base.clone()).or_insert_with(|| (order, Seg {
-                    id: base, var: a("data-rv-var"), hash, main: false, a: (0.0, 0.0), b: (0.0, 0.0),
+                    id: base, var: a("data-rv-var"), hash, main: false,
+                    arm_rows: n.parent().and_then(|g| g.attribute("data-arm-rows")).map(str::to_owned),
+                    state: a("data-rv-state"), a: (0.0, 0.0), b: (0.0, 0.0),
                 }, BTreeMap::new()));
                 e.2.insert(part.to_owned(), ends(n));
             }
@@ -257,7 +264,38 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
     g
 }
 
-fn near(p: (f64, f64), q: (f64, f64)) -> bool {
+impl Geo {
+    /// Centre-line endpoints and code-panel arm rows, in drawing order.
+    pub fn branch_segments<'a>(&'a self, var: &'a str) -> impl Iterator<Item = (Pt, Pt, Option<&'a str>)> + 'a {
+        self.segs.iter().filter(move |s| !s.main && s.var == var)
+            .map(|s| (s.a, s.b, s.arm_rows.as_deref()))
+    }
+
+    /// Centre-line endpoints of main column segments in the given state.
+    pub fn main_segments<'a>(&'a self, var: &'a str, state: &'a str) -> impl Iterator<Item = (Pt, Pt)> + 'a {
+        self.segs.iter().filter(move |s| s.main && s.var == var && s.state == state)
+            .map(|s| (s.a, s.b))
+    }
+
+    /// Check that the shaft starts at the source dot and the head reaches
+    /// the target dot. Both are set back a few pixels from the dot centres.
+    pub fn arrow_connects(
+        &self,
+        var: &str,
+        to: &str,
+        line: &str,
+        (from, target): (Pt, Pt),
+        matches_tip: impl Fn(&str) -> bool,
+    ) -> bool {
+        self.arrows.iter().any(|a| {
+            a.var == var && a.to == to && a.line == line && matches_tip(&a.tip)
+                && a.pieces.first().is_some_and(|&(start, _)| len(start, from) <= ARROW_REACH)
+                && a.head.is_some_and(|head| len(head, target) <= ARROW_REACH)
+        })
+    }
+}
+
+pub fn near(p: (f64, f64), q: (f64, f64)) -> bool {
     (p.0 - q.0).abs() <= TOL && (p.1 - q.1).abs() <= TOL
 }
 
@@ -468,7 +506,7 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
             || g.logos.iter().any(|l| l.var == a.var && l.to == a.to && l.line == a.line) {
             continue;
         }
-        if !g.dots.iter().any(|d| d.var == a.to && len(h, (d.x, d.y)) <= HEAD_REACH) {
+        if !g.dots.iter().any(|d| d.var == a.to && len(h, (d.x, d.y)) <= ARROW_REACH) {
             out.push(("arrow-misses-target", format!("{} ends at {}, at no dot of {}", a.id, fmt(h), a.to)));
         }
     }

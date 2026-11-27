@@ -667,14 +667,6 @@ impl StateTable {
         Some(cell)
     }
 
-    /// Whether source row `row` of the fn starting on `fn_line` is code that
-    /// never runs, reached only by borrowck's imaginary edges (the dead
-    /// `else` of an irrefutable `if let`): its cells are that imaginary
-    /// path's (design Q9(b)).
-    pub fn dead_row(&self, fn_line: usize, row: usize) -> bool {
-        self.bodies.get(&fn_line).is_some_and(|bs| bs.iter().any(|b| b.dead_lines.contains(&row)))
-    }
-
     /// Every dead row used by the inline-arm layout.
     pub fn dead_rows(&self) -> BTreeSet<usize> {
         self.bodies.values().flatten().flat_map(|b| b.dead_lines.iter().copied()).collect()
