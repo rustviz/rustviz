@@ -829,11 +829,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // to be drawn inline, with no merge (#117).
         must_contain: &[
             "Move from String::from to s",
-            "s is live in a conditional expression ",
+            "s has no value yet",
             "s acquired ownership of a resource (in all branches above)",
             "s goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &[],
+        must_not_contain: &["s is live in a conditional expression"],
     },
 
     // ─── Smart-pointer wrappers (#76) ───────────────────────────────
@@ -3604,10 +3604,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // arm used to get all three binds and the others none, so the
         // merge said `s` was moved in some branch.
         must_contain: &[
-            "s is live in a conditional expression ",
+            "s has no value yet",
             "s acquired ownership of a resource (in all branches above)",
         ],
         must_not_contain: &[
+            "s is live in a conditional expression",
             "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
         ],
@@ -3616,10 +3617,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "if_else_next_line",
         // Used to panic (#354).
         must_contain: &[
-            "s is live in a conditional expression ",
+            "s has no value yet",
             "s acquired ownership of a resource (in all branches above)",
         ],
-        must_not_contain: &[],
+        must_not_contain: &["s is live in a conditional expression"],
     },
     // ─── Patterns in fn parameters (#331) ───────────────────────────
     TooltipExpect {
@@ -28642,10 +28643,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &["de.a isn't moved in any of the branches above"],
     },
     TooltipExpect {
-        // Inserting a borrow of s before any of the last three ifs gives
+        // Inserting a borrow of s at any of the last three ifs gives
         // E0382. Only the first if's assignment can replace the drop.
         name: "rv3_issues/1584_maybe_held_two_returning_ifs",
-        must_contain: &["The borrow checker can't prove that s holds a value when this conditional begins."],
+        must_contain: &["The borrow checker can't prove that s holds a value at this branch decision."],
         must_not_contain: &["s is live in a conditional expression"],
     },
 ];
@@ -31183,7 +31184,7 @@ fn branches_on_shared_lines_open_and_close_around_their_dots() {
     ] {
         let rv = run_with_local_backend(name);
         let timeline = rv.timeline_panel_string();
-        let split = dots_with_tooltip(&timeline, "s is live in a conditional expression ");
+        let split = dots_with_tooltip(&timeline, "s has no value yet");
         let join = dots_with_tooltip(&timeline, "s acquired ownership of a resource (in all branches above)");
         let arm_dots = dots_with_tooltip(&timeline, arm_text);
         assert_eq!((split.len(), join.len(), arm_dots.len()), (1, 1, arms), "{}: dots", name);
@@ -43410,6 +43411,135 @@ fn holder_return_waits_for_destructor_1884() {
         assert!(tip.contains("n stays borrowed while d.0 is in use"), "{name}: {tip}");
         assert!(!tip.contains("no longer mutably borrowed"), "{name}: {tip}");
     }
+}
+
+#[test]
+fn conditional_forks_use_their_own_init_state_1916() {
+    let uncertain = "The borrow checker can't prove that s holds a value at this branch decision.";
+    let live = "s is live in a conditional expression";
+    let early = "when this conditional begins";
+    for (name, inner, must_contain, must_not_contain) in [
+        // E0382 before each if when both paths still carry the maybe-move.
+        ("geometry_1907/rv3_1907_2711_10_fork_without_dot", "s@L8:dot:branch#2", uncertain, live),
+        // The write on the else path makes &s legal just before the inner if.
+        ("rv3_1916_same_row_assignment", "s@L8:dot:acquire+owner_drop_at_reassign+branch", live, uncertain),
+    ] {
+        let svg = run_with_local_backend(name).timeline_panel_string();
+        let elements = rv_elements(&svg, "s@L8:dot:");
+        for (id, want, wrong) in [("s@L8:dot:branch", uncertain, live), (inner, must_contain, must_not_contain)] {
+            let (_, tip, ..) = elements.iter().find(|(got, ..)| got == id).unwrap_or_else(|| panic!("{name}: missing {id}"));
+            assert_review_title(tip, &[want], &[wrong, early]);
+        }
+    }
+}
+
+#[test]
+fn fork_after_condition_evaluation_1916() {
+    // &s compiles before the outer condition and gives E0382 after the
+    // condition's inner if. The outer fork describes the latter point.
+    let svg = run_with_local_backend("rv3_1916_fork_after_condition").timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "s@L4:dot:branch+owner_drop_at_reassign").expect("outer fork");
+    assert_review_title(&tip, &["The borrow checker can't prove that s holds a value at this branch decision."],
+        &["when this conditional begins", "s is live in a conditional expression"]);
+}
+
+#[test]
+fn unassigned_at_fork_1916() {
+    // A borrow before the conditional gives E0381. The write is in its arm.
+    let svg = run_with_local_backend("deferred_init_one_branch").timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "s@L9:dot:branch").expect("fork");
+    assert_review_title(&tip, &["s has no value yet"], &["s is live in a conditional expression"]);
+}
+
+#[test]
+fn owner_lines_explain_a_field_loan_until_its_holder_drops_1916() {
+    let svg = run_with_local_backend("rv3_issues/1778_drop_holder_moved_in_rhs").timeline_panel_string();
+    let segments = rv_elements(&svg, "b@");
+    let tooltip = |id| segments.iter().find(|(actual, ..)| actual == id).map(|(_, tip, ..)| tip.as_str())
+        .unwrap_or_else(|| panic!("missing {id}"));
+    let duration = "The borrow checker keeps b borrowed until the old value of h is dropped";
+    let false_reason = "b stays borrowed while h.0 is in use";
+    // Even after the last read of h.0, mutating b before drop(h) or in
+    // the else gives E0502. Both ways of dropping the old H allow it.
+    for id in [
+        "b@L7-8:line:partial_privilege",
+        "b@L8:branch_line:partial_privilege",
+        "b@L12-13:branch_line:partial_privilege",
+        "b@L14:branch_line:partial_privilege",
+    ] {
+        assert_review_title(tooltip(id), &["b's resource is being shared", duration],
+            &[false_reason, "no longer immutably borrowed", "On some paths"]);
+    }
+    for id in ["b@L9-10:branch_line:full_privilege", "b@L14-16:line:full_privilege"] {
+        assert_review_title(tooltip(id), &["b is the owner of the resource"],
+            &[duration, false_reason, "b's resource is being shared"]);
+    }
+}
+
+#[test]
+fn issued_loan_can_end_on_one_incoming_path_1916() {
+    // b is borrowed before the split. A write to b after replacing h
+    // inside the arm compiles, but a write after the join gives E0502.
+    let svg = run_with_local_backend("rv3_1916_drop_holder_merge").timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "b@L11-12:line:partial_privilege").expect("line after join");
+    assert_review_title(&tip, &[
+        "The borrow checker counts a shared borrow of b here",
+        "On some paths, the borrow checker keeps b borrowed until the old value of h is dropped",
+    ], &["b stays borrowed while h.0 is in use", "b's resource is being shared by one or more variables"]);
+}
+
+#[test]
+fn one_line_arm_keeps_the_sharing_clause_1916() {
+    // Until the overwrite, a write to b in the if arm gives E0502.
+    // The else arm can write after drop(h).
+    let svg = run_with_local_backend("rv3_1916_drop_holder_one_line").timeline_panel_string();
+    let elements = rv_elements(&svg, "b@L8:branch_line:partial_privilege");
+    for id in ["b@L8:branch_line:partial_privilege#2", "b@L8:branch_line:partial_privilege#3"] {
+        let (_, tip, ..) = elements.iter().find(|(got, ..)| got == id).unwrap_or_else(|| panic!("missing {id}"));
+        assert_review_title(tip, &[
+            "b's resource is being shared by one or more variables",
+            "The borrow checker keeps b borrowed until the old value of h is dropped",
+        ], &["b stays borrowed while h.0 is in use"]);
+    }
+}
+
+#[test]
+fn short_circuit_else_has_a_drop_loan_on_both_entries_1916() {
+    // Either failed test enters the else arm, where a write to b gives
+    // E0502. b can be written after assignment completes.
+    let svg = run_with_local_backend("rv3_1916_drop_holder_short_circuit").timeline_panel_string();
+    let elements = rv_elements(&svg, "b@");
+    for id in ["b@L12-13:branch_line:partial_privilege", "b@L14:branch_line:partial_privilege"] {
+        let (_, tip, ..) = elements.iter().find(|(got, ..)| got == id).unwrap_or_else(|| panic!("missing {id}"));
+        assert_review_title(tip, &[
+            "b's resource is being shared by one or more variables",
+            "The borrow checker keeps b borrowed until the old value of h is dropped",
+        ], &["On some paths", "b stays borrowed while h.0 is in use"]);
+    }
+}
+
+#[test]
+fn short_circuit_else_can_also_enter_after_release_1916() {
+    // The false left operand skips the overwrite and its drop; the false
+    // right operand comes after it. Rustc accepts the write in the then arm and
+    // rejects the same write in the shared else arm with E0502.
+    let svg = run_with_local_backend("rv3_1916_drop_holder_short_circuit_release").timeline_panel_string();
+    for id in ["b@L10-11:branch_line:partial_privilege", "b@L12:branch_line:partial_privilege"] {
+        let tip = tooltip_of_id(&svg, id).unwrap_or_else(|| panic!("missing {id}"));
+        assert_review_title(&tip, &[
+            "The borrow checker counts a shared borrow of b here",
+            "On some paths, the borrow checker keeps b borrowed until the old value of h is dropped",
+        ], &["b stays borrowed while h.0 is in use"]);
+    }
+}
+
+#[test]
+fn field_destructor_keeps_the_outer_holders_loan_1916() {
+    // Wrap has no Drop impl but its H field is dropped at the overwrite.
+    // A write to b gives E0502 in the RHS and compiles after the overwrite.
+    assert_owner_title("rv3_1916_drop_holder_field", "b", 8, 13, Some("partial_privilege"),
+        "The borrow checker keeps b borrowed until the old value of h is dropped",
+        "b stays borrowed while h.0.0 is in use");
 }
 
 /// In patterns, next borrows the iterator and returns an Option. bb31
