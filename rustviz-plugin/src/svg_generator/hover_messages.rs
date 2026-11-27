@@ -1104,6 +1104,109 @@ pub fn event_dot_move_into_try(my_name: &String, target: Option<&String>, kind: 
     }
 }
 
+fn returned_value_containing(path: &[crate::facts::value_flow::ReturnPart], mut payload: String) -> String {
+    use crate::facts::value_flow::ReturnPart;
+    for part in path.iter().rev() {
+        payload = match part {
+            ReturnPart::Tuple(i) => match i {
+                0 => format!("a tuple whose first element is {payload}"),
+                1 => format!("a tuple whose second element is {payload}"),
+                2 => format!("a tuple whose third element is {payload}"),
+                _ => format!("a tuple with {payload} at index {i}"),
+            },
+            ReturnPart::Array(i) => format!("an array with {payload} at index {i}"),
+            ReturnPart::Variant(variant, _, 1) => format!("{} holding {payload}", ctor_value_phrase(variant)),
+            ReturnPart::Variant(variant, i, _) =>
+                format!("{} with {payload} in field {i}", ctor_value_phrase(variant)),
+            ReturnPart::Field(ty, field) =>
+                format!("{} with {payload} in field {}", ctor_value_phrase(ty), styled_name_html(field)),
+        };
+    }
+    payload
+}
+
+pub(crate) fn returned_call_value(f: &crate::svg_generator::data::Function, path: &[crate::facts::value_flow::ReturnPart]) -> String {
+    if f.result_try.is_some() {
+        return callable_result_at("the caller", f, path, None);
+    }
+    let value = function_result_value(f);
+    let returned = returned_value_containing(path, value);
+    format!("The caller receives {returned}")
+}
+
+pub(crate) fn callable_result(receiver: &str, f: &Function, acquired: Option<bool>) -> String {
+    callable_result_at(receiver, f, &f.result_path, acquired)
+}
+
+fn callable_result_at(receiver: &str, f: &Function, path: &[crate::facts::value_flow::ReturnPart], acquired: Option<bool>) -> String {
+    let callee = styled_name_html(&f.name);
+    let verb = if acquired.is_some() { "acquires ownership of" } else { "receives" };
+    let what = held(acquired.unwrap_or(true));
+    if let Some(kind) = f.result_try {
+        let (condition, payload) = match kind {
+            TryMove::Result => (format!("{callee}() returns Ok"), "the value inside it"),
+            TryMove::Option => (format!("{callee}() returns Some"), "the value inside it"),
+            TryMove::Other => (format!("the `?` produces an output from the result of {callee}()"), "that output"),
+        };
+        let value = returned_value_containing(path, payload.to_owned());
+        return format!("If {condition}, {receiver} {verb} {value}. Otherwise the `?` exits early.");
+    }
+    let value = match f.inside.as_deref() {
+        Some("") => return format!("{receiver} {verb} a {what} from the call to {callee}"),
+        Some(wrapper) => format!("a {what} inside the {wrapper} that {callee}() returns"),
+        None if acquired.is_some() && path.is_empty() && f.cast_to.is_none() =>
+            format!("the {what} {callee}() returns"),
+        None => function_result_value(f),
+    };
+    format!("{receiver} {verb} {}", returned_value_containing(path, value))
+}
+
+pub(crate) fn event_dot_try_into_returned_ctor(
+    name: &str, kind: TryMove, path: &[crate::facts::value_flow::ReturnPart], value: bool,
+) -> String {
+    let (outcome, payload, early) = match kind {
+        TryMove::Result => ("is `Ok`", "the value inside it", "is `Err`"),
+        TryMove::Option => ("is `Some`", "the value inside it", "is `None`"),
+        TryMove::Other => ("produces an output value", "that output", "produces a residual"),
+    };
+    let name = styled_name_html(name);
+    let what = if value { "value" } else { "resource" };
+    let returned = returned_value_containing(path, payload.into());
+    format!("{name}'s {what} is moved into the `?`. If {name} {outcome}, the returned value can be {returned} if execution reaches that construction. If {name} {early}, the `?` returns early.")
+}
+
+pub(crate) fn copied_operator_reference(name: &str, operator: &str) -> String {
+    let name = styled_name_html(name);
+    let op = styled_name_html(operator);
+    format!("Copy from {name} to {op}. The operator reads the value {name} points to through the copied reference")
+}
+
+pub(crate) fn copied_custom_try(binding: &str, input: &str) -> String {
+    let binding = styled_name_html(binding);
+    let input = styled_name_html(input);
+    format!("The `?` takes a copy of {input}. If it produces an output value, {binding} is initialized with that output. Otherwise the `?` returns early.")
+}
+
+pub(crate) fn returned_borrow_of(place: &str, through: Option<&str>, string_data: bool, field: Option<&str>, raw: bool, mutable: bool) -> String {
+    let reference = if mutable { "a mutable reference" } else { "a reference" };
+    let target = if string_data {
+        match (field, through) {
+            (Some(field), Some(holder)) => format!("the string data in {}, reborrowed through {},",
+                styled_name_html(field), styled_name_html(holder)),
+            (Some(field), None) => format!("the string data in {}", styled_name_html(field)),
+            (None, Some(holder)) => format!("the string data borrowed through {}", styled_name_html(holder)),
+            (None, None) => "the data of a borrowed String".to_owned(),
+        }
+    } else {
+        styled_name_html(place.strip_prefix("&mut ").or_else(|| place.strip_prefix('&')).unwrap_or(place))
+    };
+    let mut title = format!("{reference} to {target} is returned to the caller; the data it points to is not copied");
+    if raw {
+        title.push_str(". The pointee must stay valid for the lifetime of the returned reference");
+    }
+    title
+}
+
 // The other side of event_dot_move_into_try: `n` in `let n = r?;`.
 // `holds`: "is initialized with the value", "acquires ownership of the
 // resource", "is bound to the mutable reference", …
@@ -1762,6 +1865,12 @@ pub fn event_dot_mut_lend(my_name: &String, target_name: &String, holds_value: b
         "{0}'s {2} is mutably borrowed by {1}; {0} can't be used while the borrow is live",
         my_name_fmt, target_name_fmt, held(holds_value)
     )
+}
+
+pub(crate) fn event_dot_mutable_callable_lend(name: &str, callee: &str, holds_value: bool) -> String {
+    let name = styled_name_html(name);
+    let callee = styled_name_html(callee);
+    format!("{name}'s {} is mutably borrowed for the call {callee}(). {name} can't be used while the borrow is live", held(holds_value))
 }
 
 // Lender dot when the lender r is itself a reference (#313): `let r2 =
@@ -2557,8 +2666,8 @@ pub fn event_dot_copy_from_pointee(my_name: &String, target_name: &String, part:
 // the call returned (inside an Option) points to, not the call's result
 // or a value inside it (#874). The wrapper is worded as in
 // `event_dot_init_from_call`.
-pub fn event_dot_copy_pointee_of_call(my_name: &String, callee: &String, inside: Option<&str>, part: bool) -> String {
-    let reference = reference_inside_call(callee, callee, inside);
+pub fn event_dot_copy_pointee_of_call(my_name: &String, callee: &String, inside: Option<&str>, part: bool, is_call: bool, constructor: bool) -> String {
+    let reference = reference_inside_call(callee, callee, inside, is_call, constructor);
     if part {
         format!("{0} is initialized with a copy of a value inside the value pointed to by {1}", my_name, reference)
     } else {
@@ -2569,11 +2678,12 @@ pub fn event_dot_copy_pointee_of_call(my_name: &String, callee: &String, inside:
 /// "the reference inside the Option get() returns": where a `&`
 /// sub-pattern on a call's result finds its reference (#874). `shown` is
 /// the callee as displayed (styled or not), `callee` its plain name.
-fn reference_inside_call(shown: &str, callee: &str, inside: Option<&str>) -> String {
-    let last = callee.rsplit("::").next().unwrap_or(callee);
-    if last.starts_with(|c: char| c.is_uppercase()) {
-        let article = if last.starts_with(|c: char| "AEIOU".contains(c)) { "an" } else { "a" };
-        return format!("the reference inside {} {} value", article, last);
+fn reference_inside_call(shown: &str, callee: &str, inside: Option<&str>, is_call: bool, constructor: bool) -> String {
+    if constructor {
+        return format!("the reference inside {}", ctor_value_phrase(callee));
+    }
+    if !is_call {
+        return "a reference inside this value".to_owned();
     }
     match inside {
         Some(w @ ("Ok" | "Some")) => format!("the reference inside the {} that {}() returns", w, shown),
@@ -2609,6 +2719,26 @@ pub fn ctor_value_phrase(ctor: &str) -> String {
 
 // `let x = Some(one());`: x holds a Some value built around the value the
 // call returns, not that value itself (#1183).
+fn call_result_value(callee: &str, cast_to: Option<&str>) -> String {
+    match cast_to {
+        Some(ty) => format!("the value {callee}() returns, converted to {}", styled_name_html(ty)),
+        None => format!("the value {callee}() returns"),
+    }
+}
+
+pub(crate) fn function_result_value(f: &Function) -> String {
+    let name = styled_name_html(&f.name);
+    if f.operator {
+        return format!("the result of the {name} expression");
+    }
+    call_result_value(&name, f.cast_to.as_deref())
+}
+
+pub(crate) fn function_logo_title(f: &Function) -> String {
+    let name = styled_name_html(&f.name);
+    if f.operator { format!("The {name} operator") } else { name }
+}
+
 pub fn event_dot_init_from_call_in_ctor(my_name: &String, callee: &String, ctor: &str, cast_to: Option<&str>) -> String {
     let value = match cast_to {
         Some(ty) => format!("the value {}() returns, converted to {}", callee, ty),
@@ -2617,13 +2747,12 @@ pub fn event_dot_init_from_call_in_ctor(my_name: &String, callee: &String, ctor:
     format!("{} is initialized with {} holding {}", my_name, ctor_value_phrase(ctor), value)
 }
 
-pub fn event_dot_init_from_call(my_name: &String, callee: &String, cast_to: Option<&str>, inside: Option<&str>) -> String {
-    let ctor = callee.rsplit("::").next().unwrap_or(callee).starts_with(|c: char| c.is_uppercase());
+pub fn event_dot_init_from_call(my_name: &String, callee: &String, cast_to: Option<&str>, inside: Option<&str>, constructor: bool) -> String {
     match inside {
         Some("") => return event_dot_acquire_copyable(my_name),
         // A constructor written in the pattern's scrutinee (`Some(5)`)
         // isn't a call that "returns" (#758).
-        Some(_) if ctor => {
+        Some(_) if constructor => {
             let last = callee.rsplit("::").next().unwrap_or(callee);
             let article = if last.starts_with(|c: char| "AEIOU".contains(c)) { "an" } else { "a" };
             return format!("{0} is initialized with the value inside {2} {1} value", my_name, last, article);
@@ -2633,7 +2762,7 @@ pub fn event_dot_init_from_call(my_name: &String, callee: &String, cast_to: Opti
         None => {}
     }
     let last = callee.rsplit("::").next().unwrap_or(callee);
-    if last.starts_with(|c: char| c.is_uppercase()) {
+    if constructor {
         let article = if last.starts_with(|c: char| "AEIOU".contains(c)) { "an" } else { "a" };
         return format!("{0} is initialized with {2} {1} value", my_name, last, article);
     }
@@ -3750,8 +3879,8 @@ pub fn state_imaginary_ref(name: &String, mutable: bool, shared: bool, may: bool
     }
 }
 
-pub fn state_moved_out(name: &str) -> String {
-    format!("{}'s value was moved out, so it can't be used here", styled_name_html(name))
+pub fn state_moved_out(name: &str, holds_value: bool) -> String {
+    format!("{}'s {} was moved out, so it can't be used here", styled_name_html(name), held(holds_value))
 }
 
 /// RustViz 3: a value that borrows (an iterator, a `Vec<&str>`, an
@@ -5148,11 +5277,12 @@ pub fn event_dot_go_out_of_scope_init_all_moved(my_name: &String) -> String {
 
 // The assignment in the loop body, drawn as a drop on its dot (the
 // acquire's text is listed with it).
-pub fn event_dot_init_drops_earlier_iteration(my_name: &String) -> String {
+pub fn event_dot_init_drops_earlier_iteration(my_name: &String, flag: bool) -> String {
     format!(
         "On a later iteration of the loop, the resource an earlier iteration gave {0} is dropped \
-         here first, if {0} still holds it (Rust tracks this with a runtime drop flag).",
-        styled_name_html(my_name)
+         here first, if {0} still holds it{1}.",
+        styled_name_html(my_name),
+        if flag { " (Rust tracks this with a runtime drop flag)" } else { "" }
     )
 }
 
@@ -6940,23 +7070,26 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     if let (ExternalEvent::Copy { into_closure: false, pointee: Some(part), .. }, ResourceTy::Value(ResourceAccessPoint::Function(f))) = (external_event, from) {
         let what = if *part { "a value inside the value" } else { "the value" };
         title = format!("Copy of {} pointed to by {} to {}", what,
-            reference_inside_call(&styled_from_string, &f.name, f.inside.as_deref()), styled_to_string);
+            reference_inside_call(&styled_from_string, &f.name, f.inside.as_deref(), f.mir_result, f.mir_constructor), styled_to_string);
     }
-    if let (ExternalEvent::Copy { into_closure: false, .. }, ResourceTy::Value(f @ ResourceAccessPoint::Function(_))) = (external_event, from) {
-        let callee = f.name();
+    if let (ExternalEvent::Copy { into_closure: false, .. }, ResourceTy::Value(ResourceAccessPoint::Function(f))) = (external_event, from) {
+        let callee = &f.name;
         let last = callee.rsplit("::").next().unwrap_or(&callee);
-        if !last.starts_with(|c: char| c.is_uppercase()) && !callee.ends_with('!') && title.starts_with("Copy from ") {
+        if (f.mir_result || !last.starts_with(|c: char| c.is_uppercase()) && !callee.ends_with('!')) && title.starts_with("Copy from ") {
             // When `to` gets only part of the result (a pattern or
             // `?`), mirror the dot's wording (#733): never claim the
             // call returns the copied value itself.
-            let inside = match from { ResourceTy::Value(ResourceAccessPoint::Function(f)) => f.inside.as_deref(), _ => None };
+            let inside = f.inside.as_deref();
             // `let x = Some(one());`: the value goes into a Some value
             // that x holds (#1183).
             let wrapped = match external_event {
                 ExternalEvent::Copy { into_ctor: Some(c), .. } => Some(ctor_value_phrase(c)),
                 _ => None,
             };
+            let value = function_result_value(f);
             title = match (inside, wrapped) {
+                (None, Some(w)) if f.mir_result => format!("{styled_to_string} receives {w} holding {value}"),
+                (None, None) if f.mir_result => format!("{styled_to_string} receives {value}"),
                 (None, Some(w)) => format!("Copy of the value {}() returns into {} held by {}", styled_from_string, w, styled_to_string),
                 (None, None) => format!("Copy of the value {}() returns to {}", styled_from_string, styled_to_string),
                 (Some(""), _) => format!("Copy to {}", styled_to_string),
@@ -6969,7 +7102,14 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     // another owner of the same value; the value isn't moved
     // or copied (#373).
     if matches!(external_event, ExternalEvent::Move { .. }) {
-        if let Some(call) = rc_call_of(from) {
+        if let Some(f) = from.callable_result() {
+            let acquired = match to {
+                ResourceTy::Value(binding) if !binding.is_fn() && !binding.is_ref() && !binding.is_copy_owner() =>
+                    Some(binding.holds_value()),
+                _ => None,
+            };
+            title = callable_result(&styled_to_string, f, acquired);
+        } else if let Some(call) = rc_call_of(from) {
             title = arrow_rc_call(&from.name(), &to.name(), call);
         }
     }
@@ -7047,6 +7187,9 @@ pub fn event_dot_field_lenders_end(my_name: &String, lenders: &[String]) -> Stri
 pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, from_variable: &ResourceTy) -> String {
     let styled_fn_name = styled_name_html(&function.name);
     let styled_from_name = styled_name_html(&from_variable.name());
+    if function.mutable_call_receiver {
+        return format!("{styled_from_name} is passed to the call {styled_fn_name}() by mutable reference. The call may read or write it");
+    }
     // `k[0].push('!')` with k an array of `&mut String` (#1319): push
     // writes through the reference in k[0], not through k's value.
     let styled_via = match external_event {
