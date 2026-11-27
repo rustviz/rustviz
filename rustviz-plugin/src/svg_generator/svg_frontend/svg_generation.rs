@@ -2468,7 +2468,7 @@ mod tests {
         };
         let inner = arm(vec![(6, end.clone())], BTreeMap::from([(6, vec![end.clone()])]));
         let branch = ExternalEvent::Branch {
-            body: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(), join_span: None,
+            body: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(), join_id: None,
             live_vars: HashSet::new(), skipped_holds: BTreeMap::new(), on_exhaustion: BTreeSet::new(),
             branches: vec![inner], branch_type: BranchType::If(vec!["If".into()], vec![(6, 8)]),
             split_point: 6, merge_point: 8, maybe_init: HashSet::new(), loop_assigned: HashSet::new(),

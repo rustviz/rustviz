@@ -11,7 +11,7 @@
 use super::{SourceArm, SwitchEdge};
 use rustc_hir::def_id::DefId;
 use rustc_data_structures::fx::FxIndexMap;
-use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, Lent, PartialDrop, Parts, State};
+use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, JoinChange, Lent, PartialDrop, Parts, State};
 pub use super::schema::MixedInit;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -123,6 +123,15 @@ impl Cell {
     }
 }
 
+/// Ownership at a conditional's continuation, paired with what the
+/// executable incoming paths did inside the conditional.
+#[derive(Clone, Debug)]
+pub struct JoinCell {
+    pub cell: Cell,
+    pub change: JoinChange,
+    pub maybe_empty_box: bool,
+}
+
 type Cells = BTreeMap<String, Cell>;
 
 /// Source bounds of a drawn leg for layout, in 1-based character positions.
@@ -194,7 +203,6 @@ struct BodyTable {
     function_body_start: Option<(usize, usize)>,
     rows: BTreeMap<usize, RowCells>,
     successor_counts: BTreeMap<rustc_middle::mir::Location, usize>,
-    joins: BTreeMap<rustc_span::Span, Cells>,
     branch_entries: FxIndexMap<rustc_hir::HirId, Cells>,
     arm_boundaries: FxIndexMap<rustc_hir::HirId, BTreeMap<usize, ArmBoundaryCells>>,
     /// Column names, in the facts' order.
@@ -256,6 +264,13 @@ impl DropWording {
     }
 }
 
+#[derive(Debug)]
+struct BodyJoins {
+    joins: FxIndexMap<rustc_hir::HirId, BTreeMap<String, JoinCell>>,
+    /// Compiler places for projected columns whose RAP carries no local.
+    unique_places: BTreeMap<String, Option<rustc_middle::mir::Local>>,
+}
+
 /// The state table of a crate: per fn body, per row (and arm), per
 /// column. Rows are source lines: a renderer that hides or inserts lines
 /// maps its visual rows back (`VisualizationData::row_lines`) before it
@@ -270,6 +285,7 @@ pub struct StateTable {
     pub store_order: BTreeMap<usize, (usize, usize)>,
     bodies: FxIndexMap<DefId, BodyTable>,
     drop_wording: FxIndexMap<DefId, DropWording>,
+    joins: FxIndexMap<DefId, BodyJoins>,
     imaginary_arms: BTreeMap<super::ImaginaryEdgeId, ImaginaryArm>,
 }
 
@@ -298,18 +314,22 @@ impl StateTable {
             })).collect();
         let drop_wording = facts.bodies.iter().filter(|b| b.kind == "fn")
             .map(|b| (b.def_id, DropWording::from_body(b))).collect();
-        StateTable { bodies, drop_wording, imaginary_arms, ..Default::default() }
+        let joins = facts.bodies.iter().filter(|b| !b.joins.is_empty())
+            .map(|b| (b.def_id, body_joins(b))).collect();
+        StateTable { bodies, drop_wording, joins, imaginary_arms, ..Default::default() }
     }
 
     /// Hidden code still has MIR scope ends and residual exits. Keep the
-    /// drop wording and move its row keys with the code panel.
+    /// drop wording and move its row keys with the code panel. Joins use
+    /// compiler identities, so they are independent of the SVG rows.
     pub fn hide_rows(&mut self, keep: impl Fn(usize) -> bool, shift: impl Fn(usize) -> usize) {
         let mut drop_wording = std::mem::take(&mut self.drop_wording);
         for wording in drop_wording.values_mut() {
             wording.scope_partials = std::mem::take(&mut wording.scope_partials).into_iter()
                 .filter(|(row, _)| keep(*row)).map(|(row, parts)| (shift(row), parts)).collect();
         }
-        *self = Self { drop_wording, ..Self::default() };
+        let joins = std::mem::take(&mut self.joins);
+        *self = Self { drop_wording, joins, ..Self::default() };
     }
 
     /// The state of `column` of the MIR body `function` after `row`,
@@ -456,8 +476,16 @@ impl StateTable {
         Some(cell)
     }
 
-    pub fn join_cell(&self, function: FunctionStart, column: &str, span: rustc_span::Span) -> Option<&Cell> {
-        self.bodies.get(&function.body)?.joins.get(&span)?.get(column)
+    pub(crate) fn join_cell(
+        &self, body: DefId, id: rustc_hir::HirId,
+        column: &crate::svg_generator::data::ResourceAccessPoint,
+    ) -> Option<&JoinCell> {
+        let body = self.joins.get(&body)?;
+        let place = body.joins.get(&id)?.get(column.name())?;
+        let local = column.owner_local().or_else(|| column.ref_local()).or_else(|| {
+            body.unique_places.get(column.name()).copied().flatten()
+        })?;
+        (place.cell.local == Some(local)).then_some(place)
     }
 
     pub fn incoming_cell(&self, function: FunctionStart, column: &str, row: usize) -> Option<&Cell> {
@@ -949,7 +977,25 @@ fn body_table(b: &BodyFacts) -> BodyTable {
             join: bounds.join.as_ref().map(cells_of),
         })).collect())
     }).collect();
-    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), joins: b.joins.iter().map(|(s, j)| (*s, cells_of(&j.state))).collect(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+}
+
+fn body_joins(b: &BodyFacts) -> BodyJoins {
+    let joins = b.joins.iter().map(|(&id, join)| {
+        let places = cells_of(&join.state).into_iter().map(|(name, cell)| {
+            let change = join.changes.get(&name).copied().unwrap_or_default();
+            let maybe_empty_box = join.state.maybe_empty_box.contains(&name);
+            (name, JoinCell { cell, change, maybe_empty_box })
+        }).collect();
+        (id, places)
+    }).collect();
+    let mut unique_places = BTreeMap::new();
+    for column in &b.columns {
+        unique_places.entry(column.name.clone()).and_modify(|local| {
+            if *local != Some(column.local) { *local = None; }
+        }).or_insert(Some(column.local));
+    }
+    BodyJoins { joins, unique_places }
 }
 
 #[cfg(test)]
@@ -991,6 +1037,7 @@ mod tests {
             argument_stores: Default::default(), receiver_loans: Default::default(), restored_reborrows: Default::default(),
             inline_holder_ends: vec![],
             evaluated_spans: Vec::new(),
+            implicit_mut_reborrows: Default::default(),
             constructed_vecs: Default::default(),
             def_id: def(1),
             take_calls: BTreeSet::new(),
@@ -1040,7 +1087,7 @@ mod tests {
             temps: Vec::new(),
             notes: Vec::new(),
             binding_sources: Vec::new(),
-            joins: BTreeMap::new(),
+            joins: Default::default(),
             branch_entries: Default::default(),
             arm_boundaries: Default::default(),
             dead_lines: BTreeSet::new(),

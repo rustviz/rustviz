@@ -6,10 +6,10 @@
 use super::rows::real_successor_blocks;
 use super::schema::{SwitchEdge, SwitchExit};
 use rustc_hir::{Arm, ExprKind, HirId, Node};
-use rustc_middle::mir::{BasicBlock, Body, Location, Operand, TerminatorKind};
+use rustc_middle::mir::{BasicBlock, Body, Location, Operand, StatementKind, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 use rustc_utils::BodyExt;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceArm {
@@ -242,6 +242,235 @@ fn tested_pattern<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, switch: Location, 
         found
     })?;
     Some(index)
+}
+
+/// Read the Gotos emitted at arm completion by rustc's MIR builder.
+/// The compiler puts the if's exact span on both of those Gotos. For
+/// match it copies the arm's last SourceInfo (or uses the closing brace
+/// for an empty final block, including the block after a return).
+pub(super) fn conditional_joins<'hir>(
+    tcx: TyCtxt<'_>, body: &Body<'_>, rows: &super::rows::RowModel,
+    exprs: &[&'hir rustc_hir::Expr<'hir>], checked: &BTreeSet<BasicBlock>,
+    bindings: &super::BodyBindings, switches: &[SwitchExit],
+) -> Vec<(HirId, Location)> {
+    let mut gotos = BTreeMap::<_, BTreeSet<_>>::new();
+    for data in body.basic_blocks.iter() {
+        let term = data.terminator();
+        if let TerminatorKind::Goto { target } = term.kind {
+            if !data.is_cleanup {
+                gotos.entry(term.source_info.span).or_default().insert(target);
+            }
+        }
+    }
+    let mut spans = BTreeMap::<_, usize>::new();
+    for e in exprs {
+        *spans.entry(e.span).or_default() += 1;
+    }
+    let mut joins = Vec::new();
+    for expr in exprs {
+        let target = match expr.kind {
+            ExprKind::If(..) | ExprKind::Block(_, Some(_)) if spans[&expr.span] == 1 => {
+                let targets = gotos.get(&expr.span);
+                targets.and_then(|targets| (targets.len() == 1).then(|| *targets.first().unwrap()))
+            }
+            ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal) => {
+                let brace = expr.span.with_lo(expr.span.hi() - rustc_span::BytePos(1));
+                let bound_locals: Vec<BTreeSet<_>> = arms.iter().map(|arm| {
+                    let mut locals = BTreeSet::new();
+                    arm.pat.each_binding_or_first(&mut |_, id, _, _| {
+                        locals.extend(bindings.declarations.get(&id).copied());
+                    });
+                    locals
+                }).collect();
+                let mut candidates = body.basic_blocks.indices().filter(|&target| {
+                    let preds = &body.basic_blocks.predecessors()[target];
+                    if preds.is_empty() || !checked.contains(&target) { return false; }
+                    let destination = body.source_info(target.start_location()).span;
+                    if arms.iter().any(|arm| arm.span.contains(destination.source_callsite())) { return false; }
+                    let mut picked = BTreeSet::new();
+                    let mut empty = 0;
+                    let completes_match = preds.iter().all(|&p| {
+                        let data = &body[p];
+                        let term = data.terminator();
+                        let at = body.terminator_loc(p);
+                        let from_arm = |source: rustc_span::Span| {
+                            arms.iter().position(|arm| arm.span.source_callsite().contains(source.source_callsite()))
+                        };
+                        // SimplifyCfg can fold the arm's empty Goto block
+                        // into the successful edge of its final call.
+                        if matches!(term.kind, TerminatorKind::Call { target: Some(to), .. } if to == target) {
+                            return from_arm(term.source_info.span).is_some_and(|i| picked.insert(i));
+                        }
+                        if !matches!(term.kind, TerminatorKind::Goto { target: to } if to == target) {
+                            return false;
+                        }
+                        if data.statements.is_empty() && term.source_info.span == brace {
+                            empty += 1;
+                            return true;
+                        }
+                        if rows.exit_only.contains(&at) || rows.early_exit.contains_key(&at) {
+                            return false;
+                        }
+                        let Some(last) = data.statements.last() else { return false; };
+                        if last.source_info.span != term.source_info.span
+                            && !from_arm(term.source_info.span).is_some_and(|i| matches!(arms[i].body.kind, ExprKind::Loop(..)))
+                        { return false; }
+                        let local = match last.kind {
+                            StatementKind::StorageDead(local) => Some(local),
+                            _ => None,
+                        };
+                        let direct = from_arm(last.source_info.span).or_else(|| {
+                            let local = local?;
+                            bound_locals.iter().position(|locals| locals.contains(&local))
+                                .or_else(|| from_arm(body.local_decls[local].source_info.span))
+                        });
+                        let traced = || {
+                            // An arm can end with generated storage cleanup.
+                            // Walk its MIR predecessors to a compiler arm
+                            // scope or an edge committing to the same arm.
+                            let mut work = vec![p];
+                            let mut seen = BTreeSet::new();
+                            let mut found = None;
+                            while let Some(bb) = work.pop() {
+                                if !seen.insert(bb) { continue; }
+                                let loc = body.terminator_loc(bb);
+                                let scope = body.location_to_hir_id(loc);
+                                let arm = enclosing_arms(tcx, scope, false).into_iter()
+                                    .find(|a| a.branch == expr.hir_id)
+                                    .or_else(|| candidate(tcx, body, loc).filter(|a| a.branch == expr.hir_id));
+                                if let Some(arm) = arm {
+                                    if found.replace(arm.index).is_some_and(|i| i != arm.index) { return None; }
+                                    continue;
+                                }
+                                let source = body.source_info(loc).span.source_callsite();
+                                if !expr.span.contains(source) || bb == rustc_middle::mir::START_BLOCK { return None; }
+                                for pred in super::rows::real_predecessors(body, bb) {
+                                    let edge = SwitchEdge { switch: body.terminator_loc(pred), successor: bb };
+                                    if let Some(arm) = entered(switches, edge).filter(|a| a.branch == expr.hir_id) {
+                                        if found.replace(arm.index).is_some_and(|i| i != arm.index) { return None; }
+                                    } else {
+                                        work.push(pred);
+                                    }
+                                }
+                            }
+                            found
+                        };
+                        direct.or_else(traced).is_some_and(|i| picked.insert(i))
+                    });
+                    completes_match && (empty > 0 || picked.len() == arms.len() || destination == brace
+                        || picked.len() > 1)
+                });
+                candidates.next().filter(|_| candidates.next().is_none())
+            }
+            _ => None,
+        };
+        // SimplifyCfg absorbs a join with one predecessor into that
+        // predecessor. For a statement-valued conditional, MIR still
+        // ends the storage of its result temporary at the closing brace.
+        // The same temporary can also go dead on a returning edge.
+        let boundary = target.map(BasicBlock::start_location).or_else(|| {
+            let ExprKind::Match(scrutinee, _, rustc_hir::MatchSource::Normal) = expr.kind else { return None; };
+            let brace = expr.span.with_lo(expr.span.hi() - rustc_span::BytePos(1));
+            let mut drops = body.basic_blocks.iter_enumerated().filter_map(|(block, data)| {
+                let term = data.terminator();
+                let TerminatorKind::Drop { place, .. } = term.kind else { return None; };
+                let at = body.terminator_loc(block);
+                (checked.contains(&block) && term.source_info.span == brace
+                    && !rows.exit_only.contains(&at) && !rows.early_exit.contains_key(&at)
+                    && place.as_local().is_some_and(|l| body.local_decls[l].source_info.span == scrutinee.span))
+                    .then_some(at)
+            });
+            drops.next().filter(|_| drops.next().is_none())
+        }).or_else(|| {
+            if !matches!(expr.kind, ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) {
+                return None;
+            }
+            let brace = expr.span.with_lo(expr.span.hi() - rustc_span::BytePos(1));
+            let mut candidates = body.basic_blocks.iter_enumerated().filter(|(bb, _)| checked.contains(bb))
+                .flat_map(|(block, data)| data.statements.iter().enumerate().filter_map(move |(statement_index, st)| {
+                    let at = Location { block, statement_index };
+                    if matches!(expr.kind, ExprKind::If(_, _, None)) {
+                        return (st.source_info.span == expr.span.shrink_to_hi()
+                            && matches!(&st.kind, StatementKind::Assign(a) if matches!(&a.1,
+                                rustc_middle::mir::Rvalue::Use(Operand::Constant(c)) if c.const_.ty().is_unit())))
+                            .then(|| at.successor_within_block());
+                    }
+                    let StatementKind::StorageDead(local) = st.kind else { return None; };
+                    (statement_index > 0
+                        && body.local_decls[local].source_info.span == expr.span
+                        && st.source_info.span == brace
+                        && !rows.exit_only.contains(&at)
+                        && !rows.early_exit.contains_key(&at))
+                        .then_some(at)
+                }));
+            candidates.next().filter(|_| candidates.next().is_none())
+        }).or_else(|| {
+            // A replacement may be the first effect after a folded RHS join.
+            if !matches!(expr.kind, ExprKind::If(..) | ExprKind::Match(_, _, rustc_hir::MatchSource::Normal)) { return None; }
+            let mut drops = body.basic_blocks.iter_enumerated().filter_map(|(block, data)| {
+                let TerminatorKind::Drop { place, target, .. } = data.terminator().kind else { return None; };
+                let StatementKind::Assign(a) = &body[target].statements.first()?.kind else { return None; };
+                let rustc_middle::mir::Rvalue::Use(Operand::Move(result)) = a.1 else { return None; };
+                (checked.contains(&block) && a.0 == place && result.as_local()
+                    .is_some_and(|l| body.local_decls[l].source_info.span == expr.span))
+                    .then(|| body.terminator_loc(block))
+            });
+            drops.next().filter(|_| drops.next().is_none())
+        }).or_else(|| {
+            // A conditional initializing a simple binding can have its
+            // only completed arm merged into the caller's block. Rustc
+            // still emits the initializer's FakeRead of that exact local.
+            let Node::LetStmt(stmt) = tcx.hir_node(tcx.parent_hir_id(expr.hir_id)) else { return None; };
+            if stmt.init.map(|e| e.hir_id) != Some(expr.hir_id) { return None; }
+            let rustc_hir::PatKind::Binding(_, decl, _, None) = stmt.pat.kind else { return None; };
+            let &local = bindings.declarations.get(&decl)?;
+            let mut reads = body.basic_blocks.iter_enumerated().filter(|(bb, _)| checked.contains(bb))
+                .flat_map(|(block, data)| data.statements.iter().enumerate().filter_map(move |(statement_index, st)| {
+                    let StatementKind::FakeRead(read) = &st.kind else { return None; };
+                    (matches!(read.0, rustc_middle::mir::FakeReadCause::ForLet(_))
+                        && read.1.as_local() == Some(local)).then_some(Location { block, statement_index })
+                }));
+            reads.next().filter(|_| reads.next().is_none())
+        });
+        if let Some(at) = boundary { joins.push((expr.hir_id, at)); }
+    }
+    // The successful path of a let-else reaches the pattern stores.
+    // When all of its bindings are made in one MIR block, read the
+    // boundary immediately after its last such store. The builder uses
+    // the binding's pattern span as the SourceInfo of its initial store.
+    let by_let = switches.iter().filter_map(|exit| {
+        let branch = exit.branch?;
+        matches!(tcx.hir_node(branch), Node::LetStmt(stmt) if stmt.els.is_some()).then_some(branch)
+    }).collect::<rustc_data_structures::fx::FxIndexSet<_>>();
+    for id in by_let {
+        let Node::LetStmt(stmt) = tcx.hir_node(id) else { continue; };
+        let mut locals = BTreeSet::new();
+        stmt.pat.each_binding_or_first(&mut |_, decl, _, _| {
+            locals.extend(bindings.declarations.get(&decl).copied());
+        });
+        if locals.is_empty() { continue; }
+        let mut writes = BTreeMap::new();
+        for (block, data) in body.basic_blocks.iter_enumerated().filter(|(bb, _)| checked.contains(bb)) {
+            for (statement_index, st) in data.statements.iter().enumerate() {
+                if let StatementKind::Assign(a) = &st.kind {
+                    if let Some(local) = a.0.as_local().filter(|l| locals.contains(l)
+                        && stmt.pat.span.contains(st.source_info.span))
+                    {
+                        writes.entry(local).or_insert_with(Vec::new).push(Location { block, statement_index });
+                    }
+                }
+            }
+        }
+        let Some(stores) = locals.iter().map(|local| match writes.get(local)?.as_slice() {
+            [at] => Some(*at),
+            _ => None,
+        }).collect::<Option<Vec<_>>>() else { continue; };
+        let Some(&last) = stores.iter().max() else { continue; };
+        if stores.iter().all(|at| at.block == last.block) {
+            joins.push((id, last.successor_within_block()));
+        }
+    }
+    joins
 }
 
 pub(super) fn switch_exits<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, bindings: &super::BodyBindings) -> Vec<SwitchExit> {

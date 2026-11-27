@@ -2616,7 +2616,7 @@ pub enum ExternalEvent {
     // they allow for events to be tree-like
     Branch {
       body: rustc_hir::def_id::DefId,
-      join_span: Option<rustc_span::Span>,
+      join_id: Option<rustc_hir::HirId>,
       live_vars: HashSet<ResourceAccessPoint>, // variables who were defined outside of the branch but are live inside it
       /// Holds ending on the MIR edge that skips an if without an else.
       skipped_holds: BTreeMap<u64, SkippedHold>,
@@ -2902,7 +2902,7 @@ pub enum Event {
 
     // Mirrors the ExternalEvent Branch
     Branch {
-      join_span: Option<rustc_span::Span>,
+      join: Option<std::rc::Rc<crate::facts::table::JoinCell>>,
       is: ResourceTy,
       branch_history: Vec<BranchData>,
       ty: BranchType,
@@ -6196,7 +6196,7 @@ impl Visualizable for VisualizationData {
     fn append_branch_event(&self, event: &ExternalEvent, line_number: usize, is: &ResourceTy, b_history: &mut Vec<(usize, Event)>) {
         let rap = is.extract_rap().unwrap();
         match event {
-            ExternalEvent::Branch { join_span, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, skipped_holds, on_exhaustion, id, .. } => {
+            ExternalEvent::Branch { body, join_id, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, skipped_holds, on_exhaustion, id, .. } => {
                 if live_vars.contains(rap) {
                     let mut new_branches: Vec<BranchData> = Vec::new();
                     for b in branches.iter() {
@@ -6222,7 +6222,9 @@ impl Visualizable for VisualizationData {
                     }
 
                     b_history.push((line_number,  
-                        Event::Branch { join_span: *join_span, is: is.clone(),
+                        Event::Branch {
+                                        join: join_id.and_then(|id| self.state_table.join_cell(*body, id, rap)).cloned().map(std::rc::Rc::new),
+                                        is: is.clone(),
                                         branch_history: new_branches, 
                                         ty: branch_type.clone(), 
                                         split_point: *split_point, 
@@ -6449,7 +6451,7 @@ impl Visualizable for VisualizationData {
                 maybe_append_event(self, &to_ro.clone(), Event::Copy{from : from_ro.to_owned(), is: to_ro.clone(), of, id: id, break_alt: break_alt.clone()}, line_number);
                 maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure, of: source_of, id: id, break_alt}, line_number);
             },
-            ExternalEvent::Branch { join_span, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, skipped_holds, on_exhaustion, id, .. } => {
+            ExternalEvent::Branch { body, join_id, live_vars, branches, branch_type, split_point, merge_point, maybe_init, loop_assigned, maybe_held, skipped_holds, on_exhaustion, id, .. } => {
                 // need to add events with more granularity for Branches
                 for var in in_decl_order(&live_vars) { // for all the live variables in the branch (declaration order, #211)
                     let is = ResourceTy::Value(var.clone());
@@ -6485,7 +6487,8 @@ impl Visualizable for VisualizationData {
                         }, e_data: b_history, width: 0, states: Vec::new(), diverges: branch.diverges, entry_state: None, exits: branch.exits.clone() });
                     }
                     maybe_append_event(self, &is.clone(), Event::Branch { 
-                                        join_span, is,
+                                        join: join_id.and_then(|id| self.state_table.join_cell(body, id, var)).cloned().map(std::rc::Rc::new),
+                                        is,
                                         branch_history: branch_history, 
                                         ty: branch_type.clone(), 
                                         split_point: split_point, 

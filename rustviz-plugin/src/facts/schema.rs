@@ -161,6 +161,9 @@ pub struct BodyFacts {
     pub inline_holder_ends: Vec<(usize, Ev)>,
     #[serde(skip)]
     pub evaluated_spans: Vec<rustc_span::Span>,
+    /// Mutable reborrows of a whole referent at the operand's MIR source span.
+    #[serde(skip)]
+    pub implicit_mut_reborrows: BTreeSet<(rustc_span::Span, rustc_middle::mir::Local)>,
     /// Borrow issues whose references are staged directly in an aggregate.
     #[serde(skip)]
     pub issued_operand_loans: BTreeSet<usize>,
@@ -228,8 +231,8 @@ pub struct BodyFacts {
     #[serde(skip)]
     pub binding_sources: Vec<BindingSource>,
     /// The state at a conditional's normal MIR continuation, before its first instruction.
-    #[serde(skip)]
-    pub joins: BTreeMap<rustc_span::Span, Join>,
+    #[serde(serialize_with = "conditional_joins", skip_serializing_if = "rustc_data_structures::fx::FxIndexMap::is_empty")]
+    pub joins: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, Join>,
     /// The state at the first MIR decision of a drawn conditional.
     #[serde(skip)]
     pub branch_entries: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, State>,
@@ -244,12 +247,56 @@ pub struct ArmBoundaries {
     pub join: Option<State>,
 }
 
+fn conditional_joins<S: serde::Serializer>(
+    joins: &rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, Join>, s: S,
+) -> Result<S::Ok, S::Error> {
+    s.collect_seq(joins.values())
+}
+
+#[derive(Serialize)]
 pub struct Join {
+    #[serde(serialize_with = "location")]
+    pub at: Location,
+    #[serde(flatten)]
     pub state: State,
+    /// Checked incoming edges, including any edges that cannot execute.
+    pub incoming: Vec<JoinEdge>,
+    /// Effects within the conditional on paths that reach its join.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub changes: BTreeMap<String, JoinChange>,
     /// A real write reaches this join on one edge. The other leaves the
     /// place empty (false), or skips initialization only in borrowck (true).
+    #[serde(skip)]
     pub assignments: BTreeMap<String, bool>,
+    #[serde(skip)]
     pub dead_implicit_else: bool,
+}
+
+#[derive(Serialize)]
+pub struct JoinEdge {
+    #[serde(serialize_with = "location")]
+    pub from: Location,
+    pub runs: bool,
+    pub state: BTreeMap<String, &'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct JoinChange {
+    pub moved: bool,
+    pub moves_on_all_paths: bool,
+    pub wrote: bool,
+    pub writes_on_all_paths: bool,
+    pub entry_maybe: bool,
+    /// Some continuing path can write a replacement after moving the old value.
+    pub replaces_moved: bool,
+    /// The join produced a value in a staging place which this destination receives.
+    pub staged_result: bool,
+    /// The condition or match guard itself moved this place.
+    pub test_moved: bool,
+    pub test_wrote: bool,
+    pub test_writes_on_all_paths: bool,
+    pub writes_away: bool,
+    pub entry_own: bool,
 }
 
 pub struct BindingSource {
@@ -681,6 +728,9 @@ pub struct State {
     /// was moved out on some paths only (`parts` can't list it).
     #[serde(skip)]
     pub unnamed_maybe: BTreeSet<String>,
+    /// A Box whose payload is missing on some incoming paths.
+    #[serde(skip)]
+    pub maybe_empty_box: BTreeSet<String>,
     /// Named values whose origins contain a live loan at this boundary.
     #[serde(skip)]
     pub holder_sources: BTreeMap<String, BTreeSet<String>>,
