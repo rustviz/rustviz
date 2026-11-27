@@ -448,7 +448,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         if matches!(fact, Fact::BorrowEnd { .. }) {
             order.2 = 1;
         }
-        let ev = Ev { location: l, drop_route: DropRoute::Normal, col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None, successor: None };
+        let ev = Ev { location: l, drop_route: DropRoute::Normal, end_successor: None, col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order, site: None };
         (row, ev)
     }
 }
@@ -1663,9 +1663,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
                 ended_edges.insert((loc, *s, b.index()));
                 let f = Fact::BorrowEnd { loan: b.index(), lender: li.lender.clone(), holder, why, to_line, to_col };
-                let mut ev = cx.ev(loc, f);
-                ev.1.successor = Some(cx.rows.order(*s));
-                push(&mut evs, ev);
+                let mut end = cx.ev(loc, f);
+                end.1.end_successor = Some(*s);
+                push(&mut evs, end);
             }
         }
     }
@@ -2107,6 +2107,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         let to_line = cx.r.next_row(&cx.rows, s, row);
                         let to_col = cx.rows.col.get(&s).copied().unwrap_or(0);
                         let mut f = cx.ev(loc, Fact::HoldEnd { loan: l.loan, holder: h.clone(), to_line, to_col });
+                        f.1.end_successor = Some(s);
                         f.1.order.2 = 1;
                         if !ends_on_row(s, row, l.loan) {
                             push(&mut evs, f);
@@ -3469,7 +3470,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         // Only the same fact from the same MIR location is a duplicate (two
         // evaluations of one argument are two events), on the same exit site
         // (a drop two early exits share is one event per exit).
-        fs.dedup_by(|a, b| a.fact == b.fact && a.order == b.order && a.site == b.site && a.successor == b.successor);
+        // and edge. Distinct successors can have the same display coordinates.
+        fs.dedup_by(|a, b| a.same_occurrence(b));
         row.facts = fs;
         out_rows.push(row);
     }

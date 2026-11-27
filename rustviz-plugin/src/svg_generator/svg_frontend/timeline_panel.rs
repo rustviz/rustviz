@@ -1,4 +1,5 @@
 extern crate handlebars;
+use crate::svg_generator::data::state_after_loop_exits;
 use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
@@ -1395,12 +1396,12 @@ fn render_branch_dots(
             // column goes on after the loop, in the state those branches
             // left it (`compute_branch_states`), from a dot here, so it
             // doesn't start in mid-air below the arms' stop bars (#1296).
-            let mut broke: Vec<State> = branch_history.iter()
+            let broke: Vec<State> = branch_history.iter()
                 .filter(|b| breaks_out_only(&b.exits))
                 .filter_map(|b| b.states.last().map(|s| s.2.clone()))
                 .collect();
-            broke.sort();
-            if broke.first().map(convert_back).is_some_and(|s| seg_drawn(rap, &s)) {
+            let (state, exhausted) = state_after_loop_exits(&broke, matches!(event, Event::Branch { on_exhaustion: true, .. }), branch_history);
+            if seg_drawn(rap, &state) {
                 // The branches it goes on from: those that break still
                 // holding something (not one that dropped it, #410).
                 let breaking = branch_history.iter()
@@ -1412,7 +1413,11 @@ fn render_branch_dots(
                     hash: *hash as u64,
                     dot_x: timeline_data.x_val,
                     dot_y: cy,
-                    title: hover_messages::event_dot_branch_merge_after_break(&is.real_name(), breaking),
+                    title: if exhausted {
+                        "The iterator's next() returned None, so the loop exits instead of starting another iteration.".to_owned()
+                    } else {
+                        hover_messages::event_dot_branch_merge_after_break(&is.real_name(), breaking)
+                    },
                 };
                 append_dot(m_data, timeline_data, dots, None, rv_attrs::BRANCH_JOIN, *merge_point);
             }
@@ -1564,7 +1569,7 @@ fn render_branch_dots(
                 rap.is_mut(),
                 reassigned,
             ))
-        } else if partly_initialized {
+        } else if partly_initialized && !matches!(event, Event::Branch { skipped_hold: true, .. }) {
             // No path that gets here gave s a value (#919): a branch
             // that did returned or panicked (`if c { s = …; return; }`,
             // a let-else's `else` block), or none did. Anything else
@@ -1631,7 +1636,8 @@ fn render_branch_dots(
             } else {
                 None
             }
-        } else if mixed_moved {
+        } else if mixed_moved || (matches!(event, Event::Branch { skipped_hold: true, .. }) &&
+            branch_history.iter().any(|b| !b.diverges && matches!(b.states.last().map(|s| &s.2), Some(State::ResourceMoved { .. })))) {
             // Mixed: at least one branch moved, at least
             // one didn't (counting the implicit untouched
             // else of an `if` without an else as a
@@ -11878,7 +11884,7 @@ mod tests {
             maybe_init: false,
             loop_assigned: false,
             maybe_held: false,
-            fork_above: false,
+            fork_above: false, skipped_hold: false, on_exhaustion: false,
             id: 0,
         })];
         compute_width(&mut events);

@@ -28403,6 +28403,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &["o.inner's value is no longer mutably borrowed"],
         must_not_contain: &[],
     },
+    TooltipExpect {
+        name: "field_write_in_arm_end_659",
+        must_contain: &["This path has no further use of other.r. The borrow checker keeps t4 borrowed until the last use of o4."],
+        must_not_contain: &["other.r's immutable borrow ends"],
+    },
+    TooltipExpect {
+        name: "exit_loop_body_all_exit",
+        must_contain: &["The iterator's next() returned None, so the loop exits instead of starting another iteration."],
+        must_not_contain: &["When the iterator has no next item, the loop ends without entering its body."],
+    },
 ];
 
 /// A figure's timeline elements whose `data-rv-id` starts with `prefix`:
@@ -28435,6 +28445,127 @@ fn rv_elements(tl: &str, prefix: &str) -> Vec<(String, String, (f64, f64), (f64,
         out.push((n.attribute("data-rv-id").unwrap().to_owned(), tip, range(&xs), range(&ys)));
     }
     out
+}
+
+/// Moving `other` transfers its field on the taken arm. On the skipped
+/// arm that field's hold ends, while borrowck keeps t4 lent until o4's use.
+#[test]
+fn skipped_field_move_ends_its_hold_1869() {
+    let name = "field_write_in_arm_end_659";
+    let last_use = r#"println!("{}", o4.n);"#;
+    assert_skipped_field_hold(&run_with_local_backend(name), "other.r", "t4", "o4", last_use);
+    // The false edge still has its own leg when the whole if shares a source row.
+    let src = read_corpus(name);
+    let compact = src.replace("if c {\n        o4.inner = other;\n        drop(x4);\n    }", "if c { o4.inner = other; drop(x4); }");
+    assert_ne!(compact, src);
+    assert_skipped_field_hold(&Rustviz::new(&compact).expect("render one-line field move"), "other.r", "t4", "o4", last_use);
+}
+
+#[test]
+fn negated_guard_skips_field_move_1869() {
+    let rv = run_with_local_backend("skip_field_move_guards_1869");
+    assert_skipped_field_hold(&rv, "other.r", "t", "o", r#"println!("negated {}", o.n);"#);
+}
+
+#[test]
+fn short_circuit_guard_has_one_skip_leg_1869() {
+    let rv = run_with_local_backend("skip_field_move_guards_1869");
+    assert_skipped_field_hold(&rv, "combined.r", "t", "o", r#"println!("combined {}", o.n);"#);
+}
+
+#[test]
+fn move_of_field_also_moves_its_reference_1869() {
+    let rv = run_with_local_backend("skip_field_move_guards_1869");
+    assert_skipped_field_hold(&rv, "other.inner.r", "t", "o", r#"println!("partial {}", o.n);"#);
+}
+
+#[test]
+fn skipped_hold_of_fresh_loop_value_1869() {
+    let rv = run_with_local_backend("skip_field_move_fresh_loop_1869");
+    assert_skipped_field_hold(&rv, "other.r", "t", "o", r#"println!("{}", o.n);"#);
+}
+
+#[test]
+fn borrow_end_keeps_distinct_mir_successors_1869() {
+    let rv = run_with_local_backend("borrow_end_same_display_successors_1869");
+    let body = fact_body(rv.facts().expect("the plugin gave no facts"), "number");
+    let ends: Vec<_> = fact_row(body, 14)["facts"].as_array().unwrap().iter()
+        .filter(|e| e["ev"] == "BorrowEnd" && e["holder"] == "r" && e["lender"] == "n")
+        .collect();
+    assert_eq!(ends.len(), 3, "one end for each real successor of the match switch: {ends:?}");
+    assert!(ends.iter().all(|e| e["to_line"] == 15 && e["to_col"] == ends[0]["to_col"]));
+}
+
+fn assert_skipped_field_hold(rv: &Rustviz, field: &str, lender: &str, holder: &str, last_use: &str) {
+    let (code, tl) = (rv.code_panel_string(), rv.timeline_panel_string());
+    let dots = rv_elements(&tl, &format!("{field}@")).into_iter().filter(|d| d.0.contains(":dot:")).collect::<Vec<_>>();
+    let split = dots.iter().find(|d| d.0.ends_with(":branch")).unwrap();
+    let moved = dots.iter().find(|d| d.0.ends_with(":move")).unwrap();
+    let skipped_use = format!("This path has no further use of {field}.");
+    let ends: Vec<_> = dots.iter().filter(|d| d.1.contains(&skipped_use)).collect();
+    assert_eq!(ends.len(), 1, "one dot on the path that skips the move: {dots:?}");
+    assert!(moved.2.0 < split.2.0 && split.2.0 < ends[0].2.0, "the move and own end belong to opposite arms");
+    let last_use_y = code_row_y(&code, last_use);
+    let branch_end_y = code_rows_y(&code, "}").into_iter().rfind(|&y| split.3.0 < y && y < last_use_y);
+    let end_y = ends[0].3.0;
+    assert!(split.3.0 <= end_y && end_y < last_use_y && branch_end_y.is_none_or(|close| end_y <= close),
+        "the skipped end lies within the branch: {dots:?}");
+    assert!(ends[0].1.contains(&format!("The borrow checker keeps {lender} borrowed until the last use of {holder}.")));
+    let moved_at_join = format!("{field} was moved in at least one branch above, so it can't be used after the branches");
+    let scope_end = dots.iter().find(|d| d.0.contains("ref_go_out_of_scope") && d.3.0 > last_use_y).unwrap();
+    assert!(scope_end.1.contains(&moved_at_join), "the scope-end dot carries the post-join restriction: {dots:?}");
+    let give_backs: Vec<_> = dot_ys(&tl, &format!("{lender}'s resource is no longer immutably borrowed")).into_iter()
+        .filter(|&y| split.3.0 <= y && y <= scope_end.3.0).collect();
+    assert_eq!(give_backs, vec![last_use_y]);
+}
+
+/// The iterator's borrow ends on break or exhaustion. Continue takes the
+/// back edge to next(), which needs the borrow for another iteration.
+#[test]
+fn loop_exhaustion_end_has_a_live_column_1864() {
+    let name = "exit_loop_body_all_exit";
+    let rv = run_with_local_backend(name);
+    let (code, tl) = (rv.code_panel_string(), rv.timeline_panel_string());
+    let end = "xs's immutable borrow ends";
+    let dots = rv_elements(&tl, "xs@").into_iter().filter(|d| d.0.contains(":dot:") && d.1.contains(end)).collect::<Vec<_>>();
+    assert_eq!(dots.len(), 2, "{dots:?}");
+    assert_eq!(dots[0].3.0, code_row_y(&code, "break;"));
+    assert!(dots[1].0.starts_with("xs@L15:"), "the separate end on iterator exhaustion: {dots:?}");
+    let resumed = rv_elements(&tl, "xs@L14:dot:branch_join");
+    assert!(resumed.iter().any(|d| d.1.contains("next() returned None, so the loop exits instead of starting another iteration")),
+        "missing exhaustion path: {resumed:?}");
+    let violations = common::invariants::check(&common::invariants::parse(&tl), &read_corpus(name));
+    assert!(violations.iter().all(|(inv, _)| *inv != "event-on-dead-column"), "{violations:?}");
+}
+
+#[test]
+fn wildcard_item_has_iterator_exhaustion_end_1864() {
+    assert_loop_exhaustion_path(10, 11, &[7]);
+}
+
+#[test]
+fn sibling_arm_use_keeps_iterator_exhaustion_end_1864() {
+    assert_loop_exhaustion_path(24, 25, &[21]);
+}
+
+#[test]
+fn two_breaks_keep_iterator_exhaustion_end_1864() {
+    assert_loop_exhaustion_path(41, 42, &[36, 38]);
+}
+
+fn assert_loop_exhaustion_path(body_end: usize, close: usize, break_ends: &[usize]) {
+    let name = "loop_exhaustion_paths_1864";
+    let tl = run_with_local_backend(name).timeline_panel_string();
+    let resumed = rv_elements(&tl, &format!("xs@L{body_end}:dot:branch_join"));
+    assert!(!resumed.is_empty(), "missing restart before loop close L{close}");
+    assert_eq!(resumed.len(), 1);
+    assert!(resumed[0].1.contains("next() returned None"));
+    for line in break_ends.iter().copied().chain([close]) {
+        let dots = rv_elements(&tl, &format!("xs@L{line}:dot:"));
+        assert!(dots.iter().any(|d| d.1.contains("xs's immutable borrow ends")), "missing end at L{line}: {dots:?}");
+    }
+    let violations = common::invariants::check(&common::invariants::parse(&tl), &read_corpus(name));
+    assert!(violations.iter().all(|(inv, _)| *inv != "event-on-dead-column"), "{violations:?}");
 }
 
 /// #1866's review, after design Q1 (P1-6B): `let maybe = if choose {

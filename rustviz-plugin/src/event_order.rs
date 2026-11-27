@@ -712,7 +712,8 @@ impl Order<'_, '_> {
                 continue;
             }
             let dominates = self.body.basic_blocks.dominators();
-            let leg = |block: usize| successors.iter().position(|bb| dominates.dominates(*bb, blocks[block]));
+            let leg_bb = |bb: rustc_middle::mir::BasicBlock| successors.iter().position(|s| dominates.dominates(*s, bb));
+            let leg = |block: usize| leg_bb(blocks[block]);
             // Relate each HIR arm to a switch successor using its located
             // MIR effects. Empty or ambiguous arms supply no evidence.
             let witness: Vec<_> = branches
@@ -760,7 +761,7 @@ impl Order<'_, '_> {
                 let mut dests = BTreeMap::new();
                 for edge in &edges {
                     let entry = (edge.order.0, edge.order.1) == (rank, at);
-                    let Some(which) = (if entry { edge.successor.and_then(|p| leg(p.0)) } else { leg(edge.order.0) })
+                    let Some(which) = (if entry { edge.end_successor.and_then(|l| leg_bb(l.block)) } else { leg(edge.order.0) })
                     else {
                         break;
                     };
@@ -937,7 +938,7 @@ impl Order<'_, '_> {
                 }
             }
         }
-        if let E::MutableDie { id, from, to, static_lender, still_borrowed_by, of_ref_var } = ev {
+        if let E::MutableDie { id, from, to, static_lender, still_borrowed_by, of_ref_var, exhaustion } = ev {
             // A call may keep a shared input beside a mutable input. Use
             // the returned loan's kind for the particular input slot.
             if (*of_ref_var || to.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref()))
@@ -955,6 +956,7 @@ impl Order<'_, '_> {
                     static_lender: static_lender.clone(),
                     still_borrowed_by: still_borrowed_by.clone(),
                     of_ref_var: true,
+                    exhaustion: exhaustion.clone(),
                 };
             }
         }

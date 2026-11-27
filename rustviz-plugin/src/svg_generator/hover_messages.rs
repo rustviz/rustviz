@@ -1953,6 +1953,17 @@ pub fn event_dot_lend_to_undrawn_place(my_name: &String, is_mut: bool, omit_read
     }
 }
 
+pub fn event_dot_skipped_field_use(field: &str, until: Option<&(String, String)>) -> String {
+    let field = styled_name_html(field);
+    let restriction = if let Some((lender, holder)) = until {
+        format!("The borrow checker keeps {} borrowed until the last use of {}.",
+            styled_name_html(lender), styled_name_html(holder))
+    } else {
+        "The borrow checker still keeps the loan active.".to_owned()
+    };
+    format!("This path has no further use of {field}. {restriction}")
+}
+
 // 0   1
 //     |
 // o<--o

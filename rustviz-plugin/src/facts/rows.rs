@@ -238,13 +238,7 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         if l.statement_index < data.statements.len() {
             return vec![l.successor_within_block()];
         }
-        let term = data.terminator();
-        let targets = match term.kind {
-            TerminatorKind::FalseEdge { real_target, .. } | TerminatorKind::FalseUnwind { real_target, .. } => vec![real_target],
-            _ => term.successors().collect(),
-        };
-        targets.into_iter()
-            .filter(|s| !self.body.basic_blocks[*s].is_cleanup && !is_unreachable(self.body, *s))
+        real_successor_blocks(self.body, l.block).into_iter()
             .map(|block| Location { block, statement_index: 0 })
             .collect()
     }
@@ -902,6 +896,18 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
 
         RowModel { rpo, row, event_row, early_exit, shared_exits, exit_only, col, exits, arms }
     }
+}
+
+/// The non-cleanup successors the terminator can take at runtime.
+pub(crate) fn real_successor_blocks(body: &Body<'_>, bb: BasicBlock) -> Vec<BasicBlock> {
+    let term = body.basic_blocks[bb].terminator();
+    let targets = match term.kind {
+        TerminatorKind::FalseEdge { real_target, .. } | TerminatorKind::FalseUnwind { real_target, .. } => vec![real_target],
+        _ => term.successors().collect(),
+    };
+    targets.into_iter()
+        .filter(|s| !body.basic_blocks[*s].is_cleanup && !is_unreachable(body, *s))
+        .collect()
 }
 
 /// A block from which every path ends in MIR's `unreachable` (the
