@@ -42365,7 +42365,6 @@ fn loan_ends_before_conflicting_use_1529_1516() {
               "The old value at *m is dropped and the replacement is stored there"][..],
             &["r3 no longer borrows the resource m points to",
               "The old value at *m is dropped and the replacement is stored there"][..],
-              "*m acquires ownership of a new resource; its previous resource is dropped"][..],
             &["m.a's resource is no longer immutably borrowed",
               "The old value at m.a is dropped and the replacement is stored there"][..],
         ][..]),
