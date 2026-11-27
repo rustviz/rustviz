@@ -1562,6 +1562,9 @@ pub struct RowLayout {
     pub(crate) pattern_payloads: BTreeMap<usize, (String, &'static str)>,
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
     pub(crate) temporary_staged_moves: BTreeMap<u64, BTreeSet<String>>,
+    pub(crate) collection_reborrow_ends: BTreeSet<usize>,
+    pub(crate) yielded_reference_ends: BTreeSet<usize>,
+    pub(crate) iterator_end_notes: BTreeMap<usize, String>,
     pub(crate) shadowed_borrow_lenders: BTreeMap<usize, String>,
     pub(crate) returned_call_titles: BTreeMap<usize, String>,
     pub(crate) argument_results: BTreeSet<usize>,
@@ -1637,6 +1640,9 @@ impl RowLayout {
         self.temp_moves.append(&mut other.temp_moves);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.temporary_staged_moves.append(&mut other.temporary_staged_moves);
+        self.collection_reborrow_ends.append(&mut other.collection_reborrow_ends);
+        self.yielded_reference_ends.append(&mut other.yielded_reference_ends);
+        self.iterator_end_notes.append(&mut other.iterator_end_notes);
         self.shadowed_borrow_lenders.append(&mut other.shadowed_borrow_lenders);
         self.returned_call_titles.append(&mut other.returned_call_titles);
         self.argument_results.append(&mut other.argument_results);

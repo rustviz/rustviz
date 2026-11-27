@@ -6322,7 +6322,7 @@ fn cond_fail_dropped(dropped: &[String], what: &str) -> String {
 
 // "t.0 or t.1", "t.0, t.1 or t.2": the places an or-pattern binds a
 // name from (#533).
-fn or_list(sources: &[String]) -> String {
+pub(crate) fn or_list(sources: &[String]) -> String {
     let names: Vec<String> = sources.iter().map(|n| styled_name_html(n)).collect();
     match names.as_slice() {
         [] => String::new(),

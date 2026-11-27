@@ -31,6 +31,7 @@ pub(crate) use control::{enclosing_arms, location_arms};
 mod call_stores;
 pub(crate) mod call_wording;
 mod holder_path;
+mod iterators;
 mod places;
 pub(crate) mod repoints;
 mod direct_holders;
