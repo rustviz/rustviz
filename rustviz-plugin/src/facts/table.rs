@@ -870,7 +870,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
                     }
                 }
                 Fact::Init { path, reassign, maybe_had, .. } => add(path, Why::Assigned { reassign: *reassign, maybe_had: *maybe_had }),
-                Fact::Drop { path, how, early_exit, at_reassign, .. } => add(path, Why::Dropped {
+                Fact::Drop { path, how, early_exit, at_reassign, .. } if ev.drop_route != DropRoute::Unwind => add(path, Why::Dropped {
                     how, early_exit: *early_exit, at_reassign: *at_reassign, route: ev.drop_route,
                 }),
                 Fact::Borrow { loan, .. } => {
@@ -932,6 +932,7 @@ mod tests {
             constructed_vecs: Default::default(),
             def_id: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(),
             take_calls: BTreeSet::new(),
+            skipped_closure_returns: Default::default(),
             func: func.into(),
             kind: "fn",
             parent: None,

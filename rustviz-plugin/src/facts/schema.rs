@@ -3,6 +3,7 @@
 //! [`VERSION`]. Every map is a `BTreeMap` and every list is in MIR
 //! evaluation order or sorted, so the dump is deterministic.
 
+use rustc_middle::mir::{BasicBlock, Location};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -97,6 +98,10 @@ pub struct BodyFacts {
     /// Source spans of real MIR calls to the standard ManuallyDrop::take.
     #[serde(skip)]
     pub take_calls: BTreeSet<rustc_span::Span>,
+    /// Blocks only reached by assuming a local non-returning closure can
+    /// return, with the initiating call when there is only one.
+    #[serde(skip)]
+    pub skipped_closure_returns: BTreeMap<BasicBlock, Option<Location>>,
     /// `main`, `Foo::bar`, `main::{closure#0}`.
     pub func: String,
     /// "fn" or "closure".
@@ -496,23 +501,33 @@ pub struct Arm {
     pub after: State,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DropRoute {
     #[default]
     Normal,
     Shared,
     ExitOnly,
+    Unwind,
+}
+
+impl DropRoute {
+    fn is_not_unwind(&self) -> bool {
+        *self != Self::Unwind
+    }
 }
 
 /// A fact with its position on the row.
 #[derive(Serialize, Clone, PartialEq, Eq)]
 pub struct Ev {
     /// MIR site used when placing this event in the drawing. On an early
-    /// exit this is the exit itself, even if its drop runs in a shared block.
+    /// exit this is the exit itself, even if its drop runs in a shared block;
+    /// for an unwind drop it is the initiating call.
     #[serde(skip)]
     pub location: rustc_middle::mir::Location,
-    /// Reachability of a scope drop without traversing its early exits.
-    #[serde(skip)]
+    /// Path of a drop. An unwind drop is positioned at the initiating call
+    /// and is conditional on unwinding reaching that cleanup.
+    #[serde(skip_serializing_if = "DropRoute::is_not_unwind")]
     pub drop_route: DropRoute,
     /// Successor on which this borrow or hold ends. Two edges can lead to the same display row.
     #[serde(skip)]
@@ -529,8 +544,8 @@ pub struct Ev {
     /// `BorrowEnd` comes after the location's other events.
     #[serde(skip)]
     pub order: (usize, usize, u8),
-    /// For a copy of a shared drop on one early exit's row: that exit's own
-    /// location (its order), so copies on two exits stay two events.
+    /// For a shared drop placed on an exit's row: that exit's own location
+    /// (its order), so copies on two exits stay two events.
     #[serde(skip)]
     pub site: Option<(usize, usize, u8)>,
 }

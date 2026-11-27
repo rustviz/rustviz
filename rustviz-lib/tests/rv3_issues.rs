@@ -217,6 +217,7 @@ struct DropA {
     place: String,
     #[serde(default = "any_how")]
     how: String,
+    route: Option<DropRoute>,
     #[serde(default)]
     absent: bool,
     src: String,
@@ -224,6 +225,17 @@ struct DropA {
     func: Option<String>,
     #[serde(default)]
     why: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum DropRoute {
+    Normal,
+    Unwind,
+}
+
+fn is_unwind(f: &Value) -> bool {
+    f["drop_route"] == "unwind"
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -342,7 +354,7 @@ enum Check {
     Lent { row: u32, place: String, kind: Option<String>, holder: Option<String>, lender: Option<String>, absent: bool },
     Holds { row: u32, place: String, lender: String, absent: bool },
     Loan(LoanA),
-    Drop { row: u32, place: String, how: String, absent: bool },
+    Drop { row: u32, place: String, how: String, route: Option<DropRoute>, absent: bool },
     Event { row: u32, ev: String, absent: bool },
     Order { row: u32, events: Vec<String>, exact_drops: bool },
 }
@@ -390,8 +402,13 @@ fn assertions(c: &Case) -> Vec<Assertion> {
         });
     }
     for d in &c.drop {
-        out.push(Assertion { src: d.src.clone(), func: f(&d.func), what: format!("{}drop ({}) of {} on row {}", if d.absent { "no " } else { "" }, d.how, d.place, d.row),
-            check: Check::Drop { row: d.row, place: d.place.clone(), how: d.how.clone(), absent: d.absent } });
+        let route = match d.route {
+            Some(DropRoute::Normal) => "normal ",
+            Some(DropRoute::Unwind) => "unwind ",
+            None => "",
+        };
+        out.push(Assertion { src: d.src.clone(), func: f(&d.func), what: format!("{}{route}drop ({}) of {} on row {}", if d.absent { "no " } else { "" }, d.how, d.place, d.row),
+            check: Check::Drop { row: d.row, place: d.place.clone(), how: d.how.clone(), route: d.route, absent: d.absent } });
     }
     for e in &c.event {
         out.push(Assertion { src: e.src.clone(), func: f(&e.func), what: format!("{}`{}` on row {}", if e.absent { "no " } else { "" }, e.ev, e.row),
@@ -1318,13 +1335,16 @@ fn check(a: &Assertion, facts: &[BodyF]) -> Result<(), String> {
             };
             if l.absent { if cands.is_empty() { Ok(()) } else { Err(got) } } else if hit { Ok(()) } else { Err(got) }
         }
-        Check::Drop { row, place, how, absent } => {
+        Check::Drop { row, place, how, route, absent } => {
             let fs = row_facts(b, *row);
             let drops: Vec<&Value> = fs.events().filter(|f| {
                 let ev = f["ev"].as_str().unwrap_or("");
                 (ev == "Drop" || ev == "ScopeEnd") && f["path"].as_str() == Some(place.as_str())
             }).collect();
             let hit = drops.iter().any(|f| {
+                if route.is_some_and(|r| matches!(r, DropRoute::Unwind) != is_unwind(f)) {
+                    return false;
+                }
                 let h = f["how"].as_str().unwrap_or("");
                 let scope_end = f["ev"] == "ScopeEnd";
                 match how.as_str() {
@@ -1335,7 +1355,7 @@ fn check(a: &Assertion, facts: &[BodyF]) -> Result<(), String> {
                     _ => !scope_end && h != "nothing_to_drop",
                 }
             });
-            if *absent && !hit && fs.may_drop(place) {
+            if *absent && !hit && !matches!(route, Some(DropRoute::Unwind)) && fs.may_drop(place) {
                 return Err(format!("shared drop of {place} has no drop kind for this exit"));
             }
             let got = format!("{:?}", drops.iter().map(|f| f.to_string()).collect::<Vec<_>>());
@@ -1356,7 +1376,9 @@ fn check(a: &Assertion, facts: &[BodyF]) -> Result<(), String> {
                 return Err("spike dumps sort events by kind and have no arm membership to prove order on one path".into());
             }
             let pats: Vec<Pat> = events.iter().map(|e| Pat::parse(e)).collect::<Result<_, _>>()?;
-            let fs = row_facts(b, *row).located;
+            // Unwind drops have a call's row and arm, but they cannot be
+            // ordered with that call's normal continuation by row and arm.
+            let fs: Vec<_> = row_facts(b, *row).located.into_iter().filter(|f| !is_unwind(f)).collect();
             // A v1 producer moved an early-exit drop to the exit row but took
             // its `arm` at the original cleanup location.
             if b.version == Some(1) && fs.iter().any(|f| f["early_exit"].is_u64()) {
@@ -1758,7 +1780,7 @@ fn rv3_harness_adapter() {
     assert_eq!(drops(4), vec!["s", "t"]);
     assert_eq!(drops(6), vec!["t", "u"], "s's drop runs only on the exit");
     let drop_u = Assertion { src: "issue".into(), func: "A::run".into(), what: String::new(),
-        check: Check::Drop { row: 6, place: "u".into(), how: "definite".into(), absent: false } };
+        check: Check::Drop { row: 6, place: "u".into(), how: "definite".into(), route: None, absent: false } };
     assert!(check(&drop_u, &f).is_err(), "nothing_to_drop is no destructor");
     assert!(facts_of(Some("/nonexistent/rv3-facts"), "x", "", None).is_err(), "a missing RV3_FACTS_DIR is an error");
     let bad: Value = serde_json::from_str(r#"{"version": 1, "bodies": [], "errors": ["main: panicked"]}"#).unwrap();
@@ -1886,6 +1908,22 @@ fn exact_drops_rejects_a_drop_the_order_does_not_name() {
     let order = |exact_drops| Check::Order { row: 5, events: vec!["move a -> n".into(), "drop b".into()], exact_drops };
     assert!(check_fixture(dump.clone(), order(false)).is_ok());
     assert!(check_fixture(dump, order(true)).is_err());
+}
+
+#[test]
+fn an_unwind_drop_cannot_order_with_a_normal_transfer() {
+    // In #1779 the move belongs to the call's hypothetical return.
+    // The cleanup that drops call_s only runs if the call unwinds.
+    let dump = serde_json::json!({"version":4,"bodies":[{"func":"main","rows":[
+        {"line":8,"facts":[
+            {"ev":"Move","path":"call_s","to":"cv"},
+            {"ev":"Drop","path":"call_s","how":"drops","drop_route":"unwind"}]}]}]});
+    assert!(check_fixture(dump.clone(), Check::Order {
+        row: 8, events: vec!["move call_s -> cv".into(), "drop call_s".into()], exact_drops: false,
+    }).is_err());
+    assert!(check_fixture(dump, Check::Order {
+        row: 8, events: vec!["move call_s -> cv".into()], exact_drops: true,
+    }).is_ok());
 }
 
 #[test]

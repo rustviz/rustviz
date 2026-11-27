@@ -7059,7 +7059,7 @@ pub fn event_dot_process_exit(name: &String, owns: Option<bool>, exit: &NoDropEx
     }
 }
 
-pub const UNREACHED_TRANSFER: &str = "Rust checks this transfer on the preceding closure's return path. The closure never returns, so the transfer never runs.";
+pub const UNREACHED_TRANSFER: &str = "Rust checks this transfer assuming the preceding calls return. A preceding closure call never returns, so the transfer never runs.";
 
 /* Approximation notes (`ApproxNote`): what a figure simplifies, added to
    the tooltip of a dot drawn on the construct anyway. Each is one

@@ -3,7 +3,7 @@
 //! A source span identifies the emitting expression; its byte position is
 //! never an evaluation order.
 use crate::expr_visitor::ExprVisitor;
-use crate::facts::schema::{BodyFacts, Ev, Fact, LoanInfo, Row};
+use crate::facts::schema::{BodyFacts, DropRoute, Ev, Fact, LoanInfo, Row};
 use crate::svg_generator::data::{ExternalEvent as E, ResourceTy};
 use rustc_middle::mir::{Body, Location, TerminatorKind};
 use rustc_span::Span;
@@ -13,6 +13,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 // Releasing the value in a slot precedes the write at the same location.
 type Point = (usize, usize, i8);
 const BEFORE_STORE: i8 = -1;
+
+fn normal_facts(row: &Row) -> impl Iterator<Item = &Ev> + Clone {
+    row.facts.iter().filter(|e| e.drop_route != DropRoute::Unwind)
+}
+
+fn field_store_search_across_rows(row: &Row, straight_line: bool) -> bool {
+    straight_line && normal_facts(row).next().is_none()
+}
 
 fn fact_point(f: &Ev) -> Point {
     (f.order.0, f.order.1, f.order.2 as i8)
@@ -137,13 +145,13 @@ impl Order<'_, '_> {
         };
         if let Some(field) = field.filter(|r| r.is_member() && (r.is_ref() || r.holds_borrow())) {
             let root = self.storage_of(field.name());
-            let search_across_rows = row.facts.is_empty() && straight_line;
+            let search_across_rows = field_store_search_across_rows(row, straight_line);
             let mut stores = self
                 .facts
                 .rows
                 .iter()
                 .filter(|r| r.line == row.line || search_across_rows)
-                .flat_map(|r| &r.facts)
+                .flat_map(normal_facts)
                 .filter(|e| {
                     let Fact::Init { path, reassign: true, .. } = &e.fact else {
                         return false;
@@ -164,7 +172,7 @@ impl Order<'_, '_> {
                 }
                 // A user destructor may still read this field. The normal
                 // successor installs the new value only after it returns.
-                let drops = row.facts.iter().filter(|e| {
+                let drops = normal_facts(row).filter(|e| {
                     matches!(&e.fact,
                     Fact::Drop {path,at_reassign:true,..} if path==root)
                         && self.earlier(fact_point(e), fact_point(store))
@@ -174,7 +182,7 @@ impl Order<'_, '_> {
                         .facts
                         .rows
                         .iter()
-                        .flat_map(|r| &r.facts)
+                        .flat_map(normal_facts)
                         .filter(|f| self.matches(ev, f) && matches!(f.fact, Fact::BorrowEnd { .. }));
                     if let Some(first) = ends
                         .next()
@@ -191,13 +199,13 @@ impl Order<'_, '_> {
                 return Some(fact_point(store));
             }
         }
-        let mut candidates: Vec<_> = row.facts.iter().filter(|e| self.matches(ev, e)).collect();
+        let mut candidates: Vec<_> = normal_facts(row).filter(|e| self.matches(ev, e)).collect();
         // Closure captures passed to calls have a presentation-only
         // function column. Resolve the actual MIR capture by its expression
         // and its place when that identifies a single borrow.
         if candidates.is_empty() {
             if let E::PassByStaticReference { from, to, .. } | E::PassByMutableReference { from, to, .. } = ev {
-                candidates.extend(row.facts.iter().filter(|f| {
+                candidates.extend(normal_facts(row).filter(|f| {
                     let Fact::Borrow { loan, .. } = &f.fact else {
                         return false;
                     };
@@ -231,7 +239,7 @@ impl Order<'_, '_> {
             if let Some((_, ids)) = self.field_generation(ev, row) {
                 // Replacing a slot and releasing its lender need not
                 // coincide. This arrow gives the resource back.
-                let mut releases = row.facts.iter().filter_map(|f| match &f.fact {
+                let mut releases = normal_facts(row).filter_map(|f| match &f.fact {
                     Fact::BorrowEnd { loan, .. }
                         if ids.contains(loan) && self.loan(*loan).is_some_and(|l| names_lender(endpoints(ev).1, l)) =>
                     {
@@ -250,7 +258,7 @@ impl Order<'_, '_> {
                 // A slot can stop holding its old value at a store while
                 // a copy keeps the old loan live. Repoint identifies both
                 // generations even when there is no BorrowEnd here.
-                let mut stores = row.facts.iter().filter(|f| {
+                let mut stores = normal_facts(row).filter(|f| {
                     matches!(&f.fact, Fact::Repoint {
                     holder: path, old, new, .. } if *path == holder && old.iter().any(|id|
                         !new.contains(id) && self.ends.get(&ev.get_id()).is_none_or(|ids| ids.contains(id)) && self.loan(*id).is_some_and(|l| names_lender(lender,l))))
@@ -263,14 +271,14 @@ impl Order<'_, '_> {
                         return false;
                     };
                     self.loan(*loan).is_some_and(|l| names_lender(lender, l))
-                        && row.facts.iter().any(|other| {
+                        && normal_facts(row).any(|other| {
                             other.order == f.order
                                 && matches!(&other.fact, Fact::BorrowEnd {
                             lender: root, holder: returned, .. } if root == &holder && returned == via)
                         })
                 };
                 if candidates.is_empty() {
-                    candidates.extend(row.facts.iter().filter(|f| via_holder(f)));
+                    candidates.extend(normal_facts(row).filter(|f| via_holder(f)));
                 }
             }
             let gives_back = matches!(ev, E::StaticDie { still_borrowed_by, .. } | E::MutableDie { still_borrowed_by, .. }
@@ -297,9 +305,7 @@ impl Order<'_, '_> {
                     })
                     .collect();
                 if !returned.is_empty() {
-                    let repoints: Vec<_> = row
-                        .facts
-                        .iter()
+                    let repoints: Vec<_> = normal_facts(row)
                         .filter(|e| {
                             matches!(&e.fact,
                         Fact::Repoint { holder, new, .. } if holder == &p && returned.iter().any(|l| new.contains(l)))
@@ -316,9 +322,7 @@ impl Order<'_, '_> {
             // original edge only if it is unambiguous and precedes a
             // store to the same slot along this path.
             if let Some(holder) = place(endpoints(ev).0) {
-                let stores: Vec<_> = row
-                    .facts
-                    .iter()
+                let stores: Vec<_> = normal_facts(row)
                     .filter(|e| match &e.fact {
                         Fact::Init { path, reassign: true, .. } | Fact::Repoint { holder: path, .. } => {
                             *path == holder || path == self.storage_of(&holder)
@@ -327,7 +331,7 @@ impl Order<'_, '_> {
                     })
                     .collect();
                 if !stores.is_empty() {
-                    let mut ends = self.facts.rows.iter().flat_map(|r| &r.facts).filter(|f| self.matches(ev, f));
+                    let mut ends = self.facts.rows.iter().flat_map(normal_facts).filter(|f| self.matches(ev, f));
                     if let Some(first) = ends.next().filter(|e| ends.all(|f| f.order == e.order)) {
                         if stores.iter().any(|store| self.earlier(fact_point(first), fact_point(store))) {
                             candidates.push(first);
@@ -338,14 +342,14 @@ impl Order<'_, '_> {
         }
         if candidates.is_empty() {
             if let E::GoOutOfScope { ro, .. } = ev {
-                let mut deaths = self.facts.rows.iter().flat_map(|r| &r.facts).filter(|f| matches!(&f.fact,
+                let mut deaths = self.facts.rows.iter().flat_map(normal_facts).filter(|f| matches!(&f.fact,
                     Fact::ScopeEnd { path, .. } | Fact::Drop { path, at_reassign: false, .. } if path == self.storage_of(ro.name())));
                 if let Some(death) = deaths.next().map(|f| f.order).filter(|d| deaths.all(|f| f.order == *d)) {
                     return Some((death.0, death.1, death.2 as i8));
                 }
                 // At a diverging call the walk draws unwind scope exits.
                 // MIR has no StorageDead on a normal return path there.
-                let mut exits = row.facts.iter().filter_map(|e| {
+                let mut exits = normal_facts(row).filter_map(|e| {
                     let b = e.order.0;
                     let data = &self.body.basic_blocks[*blocks.get(b)?];
                     matches!(data.terminator().kind, TerminatorKind::Call { target: None, .. }).then_some((
@@ -378,7 +382,7 @@ impl Order<'_, '_> {
                 if let Fact::Borrow { loan, .. } = site.fact {
                     if let Some(&call) = self.activations.get(&loan) {
                         let receiver = place(endpoints(ev).0);
-                        if row.facts.iter().any(|f| {
+                        if normal_facts(row).any(|f| {
                             self.earlier(fact_point(site), fact_point(f))
                                 && self.earlier(fact_point(f), call)
                                 && match &f.fact {
@@ -400,7 +404,7 @@ impl Order<'_, '_> {
             // A pattern can fail before its binding ever acquires the loan.
             // The end on that edge is not an end on the binding's column.
             let holder = place(endpoints(ev).0)?;
-            let mut starts = row.facts.iter().filter(|e| {
+            let mut starts = normal_facts(row).filter(|e| {
                 matches!(&e.fact,
                 Fact::Init { path, reassign: false, .. } if *path == holder)
             });
@@ -511,7 +515,7 @@ impl Order<'_, '_> {
         }
         let dst = place(to)?;
         let source = self.spans.get(&ev.get_id())?;
-        let mut reads = row.facts.iter().filter(|e| {
+        let mut reads = normal_facts(row).filter(|e| {
             let loc = self.location(e);
             if !source.contains(self.body.source_info(loc).span) {
                 return false;
@@ -580,7 +584,7 @@ impl Order<'_, '_> {
         }
         let parent = place(endpoints(b).0);
         let indirect = endpoints(a).0.extract_rap().map(|r| ResourceTy::Deref(r.clone()).name());
-        !row.facts.iter().any(|f| {
+        !normal_facts(row).any(|f| {
             let Fact::Init { path, reassign: true, .. } = &f.fact else {
                 return false;
             };
@@ -645,13 +649,13 @@ impl Order<'_, '_> {
                 if ids.is_empty()
                     || !ids.iter().all(|id| {
                         let mut ends =
-                            row.facts.iter().filter(|f| matches!(f.fact,Fact::BorrowEnd{loan,..} if loan==*id));
+                            normal_facts(row).filter(|f| matches!(f.fact,Fact::BorrowEnd{loan,..} if loan==*id));
                         ends.next().is_some_and(|f| fact_point(f) == at) && ends.all(|f| fact_point(f) == at)
                     })
                 {
                     continue;
                 }
-                if row.facts.iter().any(|f| {
+                if normal_facts(row).any(|f| {
                     matches!(&f.fact,Fact::Repoint{holder,..} if place(endpoints(e).0).as_ref()==Some(holder))
                         && self.earlier(at, fact_point(f))
                         && self.earlier(fact_point(f), fork)
@@ -757,9 +761,7 @@ impl Order<'_, '_> {
                 }
                 let holder = place(endpoints(e).0);
                 let lender = place(endpoints(e).1);
-                let edges: Vec<_> = row
-                    .facts
-                    .iter()
+                let edges: Vec<_> = normal_facts(row)
                     .filter(|f| match &f.fact {
                         Fact::BorrowEnd { loan, holder: from, lender: to, .. } => {
                             *loan == id && holder.as_ref() == Some(from) && lender.as_ref() == Some(to)
@@ -783,7 +785,7 @@ impl Order<'_, '_> {
                 if !edges.is_empty()
                     && dests.len() == edges.len()
                     && edges.len()
-                        == row.facts.iter().filter(|f| matches!(f.fact, Fact::BorrowEnd{loan,..} if loan==id)).count()
+                        == normal_facts(row).filter(|f| matches!(f.fact, Fact::BorrowEnd{loan,..} if loan==id)).count()
                 {
                     edits.push((e.clone(), dests));
                 }
@@ -837,15 +839,13 @@ impl Order<'_, '_> {
     fn field_generation<'a>(&'a self, ev: &E, row: &'a Row) -> Option<(&'a Ev, &'a [usize])> {
         let (from, to) = endpoints(ev);
         let field = (if end(ev) { from } else { to }).extract_rap().filter(|r| r.is_member() && r.is_ref())?;
-        let mut stores = row
-            .facts
-            .iter()
+        let mut stores = normal_facts(row)
             .filter_map(|f| match &f.fact {
                 Fact::Repoint { holder, old, new, .. } if holder == field.name() => Some((f, old, new)),
                 _ => None,
             })
             .filter(|(f, _, _)| {
-                row.facts.iter().any(|g| {
+                normal_facts(row).any(|g| {
                     matches!(&g.fact, Fact::Repoint{holder,..} if holder==field.name())
                         && f.arm == g.arm
                         && (self.earlier(fact_point(f), fact_point(g)) || self.earlier(fact_point(g), fact_point(f)))
@@ -897,7 +897,7 @@ impl Order<'_, '_> {
             // actually lasts beyond it. Merely overwriting a slot cannot
             // tell us that its lender is available again.
             if effect.is_some_and(|at| {
-                row.facts.iter().any(|f| {
+                normal_facts(row).any(|f| {
                     matches!(&f.fact, Fact::Repoint{holder: other,..} if other == holder)
                         && f.arm == store.arm
                         && self.earlier(fact_point(f), at)
@@ -912,9 +912,7 @@ impl Order<'_, '_> {
         };
         // Both generations can remain live for borrowck and end at the
         // same later read. Preserve their individual lender names there.
-        let ended: BTreeSet<_> = row
-            .facts
-            .iter()
+        let ended: BTreeSet<_> = normal_facts(row)
             .filter_map(|f| match &f.fact {
                 Fact::BorrowEnd { loan, .. }
                     if self.loan(*loan).is_some_and(|l| l.direct_holders.contains(field.name())) =>
@@ -925,7 +923,7 @@ impl Order<'_, '_> {
             })
             .collect();
         if ended.len() > 1
-            && self.facts.rows.iter().flat_map(|r| &r.facts).any(|e| {
+            && self.facts.rows.iter().flat_map(normal_facts).any(|e| {
                 matches!(&e.fact,Fact::Repoint {holder,old,new,..} if holder == field.name()
                 && old.iter().any(|id| ended.contains(id) && !new.contains(id))
                 && new.iter().any(|id| ended.contains(id) && !old.contains(id)))
@@ -938,9 +936,7 @@ impl Order<'_, '_> {
     fn annotate(&self, ev: &mut E, row: &Row, layout: &mut RowLayout) {
         if let E::MutableBorrow { from, to, is_partial, is_reborrow, break_alt, via, id, .. } = ev {
             if from.extract_rap().is_some_and(|r| r.is_ref() && !r.is_mutref()) {
-                let candidates: Vec<_> = row
-                    .facts
-                    .iter()
+                let candidates: Vec<_> = normal_facts(row)
                     .filter_map(|f| match &f.fact {
                         Fact::Borrow { lender, loan, .. } if Some(lender) == place(from).as_ref() => {
                             self.loan(*loan).filter(|l| place(to).is_some_and(|p| l.via_call.contains(&p)))
@@ -985,9 +981,7 @@ impl Order<'_, '_> {
             }
         }
         if let E::RefDie { from, to, id, .. } = ev {
-            let holds: Vec<_> = row
-                .facts
-                .iter()
+            let holds: Vec<_> = normal_facts(row)
                 .filter_map(|f| match &f.fact {
                     Fact::HoldEnd { loan, holder, .. } if Some(holder) == place(from).as_ref() => {
                         self.loan(*loan).filter(|l| names_lender(to, l)).map(|l| (f, l))
@@ -996,15 +990,13 @@ impl Order<'_, '_> {
                 })
                 .collect();
             let copied = holds.iter().any(|(hold, _)| {
-                row.facts.iter().any(|f| {
+                normal_facts(row).any(|f| {
                     hold.order.0 == f.order.0
                         && hold.order.1 == f.order.1
                         && matches!(&f.fact, Fact::Copy { path, .. } if Some(path) == place(from).as_ref())
                 })
             });
-            let repointed = row
-                .facts
-                .iter()
+            let repointed = normal_facts(row)
                 .any(|f| matches!(&f.fact, Fact::Repoint { holder, .. } if Some(holder) == place(from).as_ref()));
             if copied
                 && repointed
@@ -1030,10 +1022,10 @@ impl Order<'_, '_> {
                         .facts
                         .rows
                         .iter()
-                        .flat_map(|r| &r.facts)
+                        .flat_map(normal_facts)
                         .filter(|f| matches!(f.fact,Fact::BorrowEnd{loan,..} if loan==*id));
                     ends.next().is_some_and(|f| {
-                        row.facts.contains(f) && self.earlier(fact_point(f), at) && ends.next().is_none()
+                        normal_facts(row).any(|other| other == f) && self.earlier(fact_point(f), at) && ends.next().is_none()
                     })
                 }) {
                     layout.ended_before_call.entry(*id).or_default().insert(holder.to_owned());
@@ -1041,14 +1033,14 @@ impl Order<'_, '_> {
             }
         }
         if let (Some(call_at), E::PassByMutableReference { id, from, .. }) = (call, ev) {
-            if let Some((loan, at)) = row.facts.iter().find_map(|f| match f.fact {
+            if let Some((loan, at)) = normal_facts(row).find_map(|f| match f.fact {
                 Fact::Borrow { loan, .. } if self.activations.get(&loan).copied().is_some_and(|p| Some(p) == call) => {
                     Some((loan, fact_point(f)))
                 }
                 _ => None,
             }) {
                 if self.loan(loan).is_some_and(|l| l.through == place(from))
-                    && row.facts.iter().any(|f| {
+                    && normal_facts(row).any(|f| {
                         matches!(&f.fact,Fact::Repoint{holder,..} if Some(holder)==place(from).as_ref())
                             && self.earlier(at, fact_point(f))
                             && self.earlier(fact_point(f), call_at)
@@ -1138,10 +1130,8 @@ impl Order<'_, '_> {
             let has_boundary =
                 indices.iter().any(|&i| end(&events[i].1) || matches!(events[i].1, E::OwnerDropAtReassign { .. }));
             if !has_boundary
-                && !row.facts.iter().any(|f| matches!(f.fact, Fact::Repoint { .. }))
-                && !row
-                    .facts
-                    .iter()
+                && !normal_facts(row).any(|f| matches!(f.fact, Fact::Repoint { .. }))
+                && !normal_facts(row)
                     .any(|f| matches!(f.fact,Fact::Borrow{loan,..} if self.activations.contains_key(&loan)))
             {
                 continue;
@@ -1447,5 +1437,33 @@ pub(crate) fn replay(placed: &mut [(usize, E)], sequence: &HashMap<usize, usize>
         for (&i, ev) in indices.iter().zip(vals) {
             placed[i].1 = ev;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unwind_only_row_allows_the_normal_field_store_lookup() {
+        let mut row = Row {
+            facts: vec![Ev {
+                location: Location::START,
+                drop_route: DropRoute::Unwind,
+                end_successor: None,
+                col: 1,
+                arm: None,
+                fact: Fact::Drop {
+                    path: "call_s".into(), how: "drops", at_reassign: false, early_exit: None, also_on_exits: Vec::new(),
+                },
+                order: (0, 0, 0),
+                site: None,
+            }],
+            ..Row::default()
+        };
+        assert!(field_store_search_across_rows(&row, true));
+        assert!(!field_store_search_across_rows(&row, false));
+        row.facts[0].drop_route = DropRoute::Normal;
+        assert!(!field_store_search_across_rows(&row, true));
     }
 }

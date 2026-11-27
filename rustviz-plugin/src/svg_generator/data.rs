@@ -4837,7 +4837,7 @@ pub enum ApproxNote {
     /// in `lines` (inclusive).
     At { hash: u64, lines: (usize, usize), text: String },
     /// rustc checks this transfer after a closure call whose body cannot return.
-    UnreachedTransfer { id: usize, scope_ends: Vec<(u64, usize)> },
+    UnreachedTransfer { id: usize, scope_ends: Vec<(u64, usize)>, unwind_drop: Option<&'static str> },
     UnreachedValue { hash: u64 },
     VecElement { id: usize, staged: bool, drops_on_exit: bool, repeat: bool, nested: bool },
     IteratorElement { id: usize },

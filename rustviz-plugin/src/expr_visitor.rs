@@ -5880,7 +5880,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       matches!(&e.fact, crate::facts::Fact::Drop { path, at_reassign: true, .. } if path == target.name()));
     let &(row, e) = drops.next()?;
     if drops.next().is_some() { return None; }
-    Some((row, !crate::facts::after_diverging_closure(self.tcx, self.mir_body, e.location)))
+    Some((row, !self.body_facts.is_some_and(|b| b.skipped_closure_returns.contains_key(&e.location.block))))
   }
 
   pub(crate) fn unfinished_vec(&self, expr: &'tcx Expr<'tcx>) -> bool {
@@ -5919,20 +5919,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let moved_whole = matches!(kind, Evt::Move) && matches!(src, ResourceTy::Value(_))
       && matches!(&to, ResourceTy::Value(r) if !r.is_fn() && !r.is_temporary() && !r.is_closure());
     if let Some(rap) = src.extract_rap() { self.update_rap(&rap, row); }
-    if crate::facts::after_diverging_closure(self.tcx, self.mir_body, location) {
+    if let Some((b, call)) = self.body_facts.and_then(|b| b.skipped_closure_returns.get(&location.block).map(|call| (b, *call))) {
       let endpoints: Vec<_> = [src.extract_rap(), to.extract_rap()].into_iter().flatten().collect();
       let mut scope_ends = Vec::new();
-      for r in self.body_facts.into_iter().flat_map(|b| &b.rows) {
+      let mut unwind_drop = None;
+      for r in &b.rows {
         for ev in &r.facts {
-          let crate::facts::Fact::Drop { path, at_reassign: false, early_exit: None, .. } = &ev.fact else { continue };
+          let crate::facts::Fact::Drop { path, how, at_reassign: false, early_exit: None, .. } = &ev.fact else { continue };
+          if ev.drop_route == crate::facts::DropRoute::Unwind {
+            if Some(ev.location) == call && path == &src.name() { unwind_drop = Some(*how); }
+            continue;
+          }
           if let Some(rap) = endpoints.iter().find(|rap| rap.name() == path) {
-            if crate::facts::after_diverging_closure(self.tcx, self.mir_body, ev.location) {
+            if b.skipped_closure_returns.contains_key(&ev.location.block) {
               scope_ends.push((*rap.hash(), r.line));
             }
           }
         }
       }
-      self.approx_notes.push(ApproxNote::UnreachedTransfer { id: *self.unique_id, scope_ends });
+      self.approx_notes.push(ApproxNote::UnreachedTransfer { id: *self.unique_id, scope_ends, unwind_drop });
     }
     let staged = dest == "<temp>";
     let drops_on_exit = staged && self.body_facts.is_some_and(|b|
@@ -10631,11 +10636,11 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // Earlier elements may already have moved into MIR temporaries. The
       // assignment itself never happens if an element returns or diverges.
       let Some(row) = self.body_facts.and_then(|b| b.constructed_vecs.get(&rhs.span.ctxt().outer_expn())) else { return };
-      if let Some(rap) = lhs.extract_rap().filter(|rap| self.body_facts.is_some_and(|b|
-        b.vars.iter().any(|v| v.name == *rap.name() && v.local > self.mir_body.arg_count && v.capture.is_none()))) {
-        let mut inits = self.body_facts.into_iter().flat_map(|b| &b.rows).flat_map(|r| &r.facts)
+      if let Some((b, rap)) = self.body_facts.zip(lhs.extract_rap()).filter(|(b, rap)|
+        b.vars.iter().any(|v| v.name == *rap.name() && v.local > self.mir_body.arg_count && v.capture.is_none())) {
+        let mut inits = b.rows.iter().flat_map(|r| &r.facts)
           .filter(|e| matches!(&e.fact, crate::facts::Fact::Init { path, .. } if path == rap.name())).peekable();
-        if inits.peek().is_some() && inits.all(|e| crate::facts::after_diverging_closure(self.tcx, self.mir_body, e.location)) {
+        if inits.peek().is_some() && inits.all(|e| b.skipped_closure_returns.contains_key(&e.location.block)) {
           self.approx_notes.push(ApproxNote::UnreachedValue { hash: *rap.hash() });
         }
       }

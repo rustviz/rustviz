@@ -61,7 +61,7 @@ impl DotNote {
         match self {
             DotNote::Loop(declares, at_most_once) => hover_messages::approx_note_loop(*declares, *at_most_once),
             DotNote::Other(t) => t.clone(),
-            DotNote::UnreachedScopeExit => "This dot describes normal scope exit. The closure never returns, so this exit never runs. If it unwinds, values still owned here are dropped during unwinding.".to_owned(),
+            DotNote::UnreachedScopeExit => "This dot describes normal scope exit. A preceding closure call never returns, so this exit never runs. If the call panics, values still owned at the call are dropped if unwinding reaches their cleanup.".to_owned(),
         }
     }
 }
@@ -375,7 +375,7 @@ fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
         if dot.call {
             format!("The call shown here never runs because {name} is never initialized")
         } else {
-            format!("The closure never returns, so {name} is never initialized and has no value to drop")
+            format!("A preceding closure call never returns, so {name} is never initialized and has no value to drop")
         }
     } else {
         with_approx_notes(merged_dot_title(&dot.lines), &dot.notes)
@@ -2918,8 +2918,21 @@ fn render_dot(
                 _ => {}
             }
         }
-        if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedTransfer { id, .. } if *id == event.get_id())) {
+        if let Some(ApproxNote::UnreachedTransfer { unwind_drop, .. }) = visualization_data.approx_notes.iter()
+            .find(|n| matches!(n, ApproxNote::UnreachedTransfer { id, .. } if *id == event.get_id())) {
             data.title = format!("{} {}", hover_messages::UNREACHED_TRANSFER, data.title);
+            if let Event::Move { is, .. } = event {
+                let name = styled_name_html(&is.name());
+                let drop = match unwind_drop {
+                    Some("drops") => format!("{name}'s resource is dropped"),
+                    Some("drops_if_init") => format!("{name}'s resource is dropped if it still holds one"),
+                    Some("drops_rest") => format!("whatever {name} still holds is dropped"),
+                    _ => String::new(),
+                };
+                if !drop.is_empty() {
+                    data.title.push_str(&format!("&lt;br&gt;If the closure call panics and unwinding reaches {name}, {drop}."));
+                }
+            }
         }
         if let Some(title) = visualization_data.row_layout.aggregate_titles.get(&event.get_id()) {
             data.title.clone_from(title);
@@ -10335,7 +10348,7 @@ fn render_timeline(
                 }
             };
             let title = if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedValue { hash: h } if h == hash)) {
-                format!("{} is never initialized because the closure never returns", styled_name_html(rap.name()))
+                format!("{} is never initialized because a preceding closure call never returns", styled_name_html(rap.name()))
             } else { title };
             match pieces.last_mut() {
                 Some(last) if last.1 == w[0] && last.3 == title && std::mem::discriminant(&last.2) == std::mem::discriminant(&st) => last.1 = w[1],
