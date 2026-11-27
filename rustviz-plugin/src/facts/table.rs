@@ -67,7 +67,7 @@ pub enum Why {
     Assigned { reassign: bool, maybe_had: bool },
     /// Its old value dropped ("drops", "drops_if_init", "drops_rest",
     /// "nothing_to_drop"), on this row's path or an early exit's.
-    Dropped { local: Option<rustc_middle::mir::Local>, how: &'static str, early_exit: Option<usize>, at_reassign: bool, route: DropRoute, flag: bool },
+    Dropped { local: Option<rustc_middle::mir::Local>, how: &'static str, early_exit: Option<usize>, at_reassign: bool, route: DropRoute, flag: bool, whole_flag: bool },
 }
 
 /// One column on one row (or one arm of a row).
@@ -557,6 +557,14 @@ impl StateTable {
                     if *at_reassign == reassign && (local.is_none() || *l == local))))
     }
 
+    /// A flag guarding the entire old value also guards its fields.
+    pub(crate) fn uses_whole_reassignment_drop_flag(&self, function: FunctionStart, column: &str, row: usize, local: rustc_middle::mir::Local) -> bool {
+        self.bodies.get(&function.body).and_then(|b| b.rows.get(&row)).and_then(|r| r.why.get(column))
+            .is_some_and(|events| events.iter().any(|(_, why)| matches!(why,
+                Why::Dropped { local: Some(l), at_reassign: true, early_exit: None, whole_flag: true, .. }
+                    if *l == local)))
+    }
+
     fn drop_kind(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>, reassign: bool) -> Option<&'static str> {
         let events = self.bodies.get(&function.body)?.rows.get(&row)?.why.get(column)?.iter()
             .filter(|(_, why)| matches!(why, Why::Dropped { local: l, at_reassign, .. }
@@ -983,6 +991,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
                 Fact::Init { path, reassign, maybe_had, .. } => add(path, Why::Assigned { reassign: *reassign, maybe_had: *maybe_had }),
                 Fact::Drop { path, how, early_exit, at_reassign, .. } if ev.drop_route != DropRoute::Unwind => add(path, Why::Dropped {
                     local: ev.place_local, how, early_exit: *early_exit, at_reassign: *at_reassign, route: ev.drop_route, flag: b.drop_flags.contains(&ev.location) || b.drop_part_flags.contains(&(ev.location, path.clone())),
+                    whole_flag: b.drop_flags.contains(&ev.location),
                 }),
                 Fact::Borrow { loan, .. } => {
                     for c in loan_cols.get(loan).into_iter().flat_map(|v| v.iter()) {
@@ -1065,6 +1074,7 @@ mod tests {
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
             scope_ends: Default::default(),
+            value_flow: Default::default(),
             residual_drops: Vec::new(),
             short_call_borrows: Default::default(),
             drop_holders: Default::default(),

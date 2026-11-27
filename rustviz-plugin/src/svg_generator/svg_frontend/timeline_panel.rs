@@ -672,6 +672,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     dots.cols = marks.cols;
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry, &mut dots.brackets); // reference lines
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &mut dots, &registry); // arrows
+    let width = render_argument_results(&mut output, visualization_data, &mut dots, &registry, width);
     // A join or scope-end mark can sit below the last code baseline.
     // Include the whole glyph, including the drop marker on call dots.
     let dot_bottom = dots.dots.iter().map(|d| d.y + if d.call && d.drop { 17 } else { 5 }).max().unwrap_or(0);
@@ -2582,7 +2583,18 @@ fn render_dot(
                         hover_messages::event_dot_owner_drop_at_reassign_box_contents_moved(&name)
                     } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), .. } = event {
                         // Its first assignment, in a loop body (#786).
-                        hover_messages::event_dot_init_drops_earlier_iteration(&name)
+                        let ro = &visualization_data.timelines[hash].resource_access_point;
+                        let flag = visualization_data.fn_source_lines.get(hash)
+                            .zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines))
+                            .is_some_and(|(&function, row)| {
+                                let table = &visualization_data.state_table;
+                                table.uses_drop_flag(function, ro.name(), row, ro.owner_local(), true)
+                                    || (ro.is_member() && ro.owner_local().is_some_and(|local|
+                                        visualization_data.timelines.get(&ro.get_owner()).is_some_and(|owner|
+                                            table.uses_whole_reassignment_drop_flag(
+                                                function, owner.resource_access_point.name(), row, local))))
+                            });
+                        hover_messages::event_dot_init_drops_earlier_iteration(&name, flag)
                     } else if matches!(event, Event::OwnerDropAtReassign { maybe_moved: true, loop_head: true, parts: None, payload: false, .. }) {
                         // Maybe-moved only because the loop can come
                         // back round after a move further down (#992).
@@ -3070,6 +3082,13 @@ fn render_dot(
         }
         let rap = &visualization_data.timelines[hash].resource_access_point;
         let stacked = visualization_data.row_layout.stack_points.contains_key(&event.get_id());
+        if matches!(event, Event::Acquire { from, .. }
+            if matches!(from, ResourceTy::Anonymous) || from.extract_rap().is_some_and(|r| r.is_fn())) {
+            for input in visualization_data.row_layout.temporary_staged_moves.get(hash).into_iter().flatten() {
+                data.title.push_str(&format!(". {} is moved into this temporary and then moved out as an argument",
+                    styled_name_html(input)));
+            }
+        }
         if let Some(state) = one_dot_holder_state(history, i, rap, &visualization_data.row_layout) {
             let tip = timeline_segment_title(&state, rap, visualization_data, None);
             let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
@@ -7309,7 +7328,7 @@ fn render_arrow (
         // fn's first column (columns start at x = 70), with the same L
         // up to the caller as a returned variable's.
         ExternalEvent::Move { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. }
-        | ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. } => render_function_result_arrow(line_number, external_event, f, output, registry, dots),
+        | ExternalEvent::Copy { from: ResourceTy::Value(ResourceAccessPoint::Function(f)), to: ResourceTy::Caller, .. } => render_function_result_arrow(line_number, external_event, f, output, visualization_data, registry, dots),
         // Move/Copy out to the caller (function tail expression):
         // L on the dot's *right* side, matching the InitRefParam
         // L's positioning so callers and returns occupy the same
@@ -7504,7 +7523,7 @@ fn render_generic_arrow(
                 x: logo_x,
                 y: y2 + 5,
                 hash: from_function.hash.to_owned() as u64,
-                title: styled_name_html(&from_function.name),
+                title: hover_messages::function_logo_title(from_function),
                 rv: Rv::new(rv_attrs::FN).event(rv_attrs::external_event_name(external_event))
                     .var(&from_function.name).to(&rv_attrs::party_name(to_variable)).row(*line_number).attrs(),
             };
@@ -7563,7 +7582,7 @@ fn render_generic_arrow(
             );
         }
         (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(to_function)), _e) => { // (Some(variable), Some(function), _)
-            let styled_fn_name = styled_name_html(&to_function.name);
+            let styled_fn_name = hover_messages::function_logo_title(to_function);
             //  ro1 (to_function) <- ro2 (from_variable)
             let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
             // Marker-end terminates near the function logo
@@ -7734,9 +7753,68 @@ fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id:
         }
 }
 
+/// A transfer between calls has no column endpoint. Give these transfers
+/// room alongside the timelines so their marks do not cover branch legs,
+/// borrow arrows or the gutter's arrows to the caller.
+fn render_argument_results(
+    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    visualization_data: &VisualizationData,
+    dots: &mut DotLayer,
+    registry: &Handlebars,
+    width: i32,
+) -> i32 {
+    let results = &visualization_data.row_layout.argument_results;
+    if results.is_empty() {
+        return width;
+    }
+    let mut arrows = Vec::new();
+    arrows_with_rows(&visualization_data.external_events, &mut arrows);
+    let mut per_row = BTreeMap::<usize, i64>::new();
+    let out = &mut output.get_mut(&-1).unwrap().0;
+    const SPACING: i64 = 82;
+    for (row, event) in arrows {
+        if !results.contains(&event.get_id()) {
+            continue;
+        }
+        let (from, to) = ResourceAccessPoint_extract(event);
+        let (ResourceTy::Value(ResourceAccessPoint::Function(from)), ResourceTy::Value(ResourceAccessPoint::Function(to))) =
+            (from, to) else { continue };
+        let slot = per_row.entry(row).or_default();
+        let x = i64::from(width) + 10 + *slot * SPACING;
+        *slot += 1;
+        let y = get_y_axis_pos(row) as i64;
+        let destination = styled_name_html(&to.name);
+        let title = if from.result_try.is_some() {
+            hover_messages::callable_result(&destination, from, None)
+        } else {
+            let value = hover_messages::function_result_value(from);
+            format!("The {} is passed to {destination}", value.trim_start_matches("the "))
+        };
+        let kind = rv_attrs::external_event_name(event);
+        let rv = |mark| Rv::new(mark).event(kind).var(&from.name).to(&to.name).row(row).attrs();
+        let shaft = format!("{} {y} {} {y}", x + 16, x + 38);
+        let head = format!("{},{} {},{y} {},{}", x + 38, y - 5, x + 48, x + 38, y + 5);
+        out.arrows.push_str(&format!(
+            "<g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{}><polyline class=\"arrow-shaft\" stroke-width=\"5px\" points=\"{shaft}\" style=\"fill: none;\"/><polygon points=\"{head}\" class=\"arrow-head\"/></g>\n",
+            rv(rv_attrs::ARROW),
+        ));
+        let producer = FunctionLogoData {
+            x, y: y + 5, hash: from.hash, title: hover_messages::function_logo_title(from), rv: rv(rv_attrs::FN),
+        };
+        let consumer = FunctionLogoData {
+            x: x + 58, y: y + 5, hash: to.hash, title: hover_messages::function_logo_title(to), rv: rv(rv_attrs::FN),
+        };
+        for logo in [producer, consumer] {
+            out.dots.push_str(&registry.render("function_logo_template", &logo).unwrap());
+        }
+        dots.lanes.painted_bottom = dots.lanes.painted_bottom.max((y + 7) as f64);
+    }
+    width + (per_row.values().copied().max().unwrap_or(0) * SPACING) as i32
+}
+
 /// `render_arrow` for a call's result handed to the caller (#783): the
 /// function's logo in the gutter and the L up to the caller.
-fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEvent, f: &crate::svg_generator::data::Function, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, registry: &Handlebars, dots: &mut DotLayer) {
+fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEvent, f: &crate::svg_generator::data::Function, output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>, visualization_data: &VisualizationData, registry: &Handlebars, dots: &mut DotLayer) {
         let row_y = get_y_axis_pos(*line_number) as f64;
         let key = (external_event.get_id(), *line_number);
         dots.lanes.record(key, row_y as i64, FN_RESULT_LOGO_X - 2.0, FN_RESULT_BEND_X + 6.0, LaneKind::FnResult);
@@ -7755,9 +7833,34 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
         let styled_fn = styled_name_html(&f.name);
         let last = f.name.rsplit("::").next().unwrap_or(&f.name);
         let named_call = !last.starts_with(|c: char| c.is_uppercase()) && !f.name.ends_with('!');
-        let title = if f.callable_result && matches!(external_event, ExternalEvent::Move { .. }) {
+        let mut title = if let Some(title) = visualization_data.row_layout.returned_call_titles.get(&key.0) {
+            title.clone()
+        } else if f.mir_result && matches!(external_event, ExternalEvent::Copy { .. }) {
+            let inside = match external_event {
+                ExternalEvent::Copy { into_ctor: Some(name), .. } => Some(hover_messages::ctor_value_phrase(name)),
+                _ => None,
+            };
+            let result = hover_messages::function_result_value(f);
+            match inside {
+                Some(value) => format!("The caller receives {value} holding {result}"),
+                None => format!("The caller receives {result}"),
+            }
+        } else if f.callable_result && matches!(external_event, ExternalEvent::Move { .. }) {
             format!("Move of the result of {styled_fn}() to the caller")
         } else { hover_messages::arrow_fn_return_title(matches!(external_event, ExternalEvent::Copy { .. }), named_call, &styled_fn) };
+        if f.callable_result {
+            let alt = match external_event {
+                ExternalEvent::Move { break_alt, .. } | ExternalEvent::Copy { break_alt, .. } => break_alt.as_ref(),
+                _ => None,
+            };
+            if let Some(alt) = alt {
+                if let Some(skipped) = hover_messages::skipped_break_alt(alt) {
+                    title = skipped;
+                } else {
+                    title.push_str(&hover_messages::break_alt_if_suffix(alt));
+                }
+            }
+        }
         let ev = rv_attrs::external_event_name(external_event);
         let rv = Rv::new(rv_attrs::ARROW).event(ev).var(&f.name).to("caller").row(*line_number).attrs();
         let rendered = format!(
@@ -7771,7 +7874,7 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
             x: logo_x as i64,
             y: y as i64 + 5,
             hash: f.hash as u64,
-            title: styled_fn,
+            title: hover_messages::function_logo_title(f),
             rv: Rv::new(rv_attrs::FN).event(ev).var(&f.name).to("caller").row(*line_number).attrs(),
         };
         dots.lanes.capture(Drawn {
@@ -7861,6 +7964,8 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
         let title = match external_event {
             ExternalEvent::Move { carried_with: Some((parent, _)), .. } =>
                 hover_messages::event_dot_copy_field_returned(rap.name(), parent),
+            ExternalEvent::Move { via_try: Some(kind), .. } =>
+                hover_messages::event_dot_move_into_try(rap.name(), Some(&"the caller".into()), *kind, rap.holds_value()),
             // `&self.s` returned: a reborrow through `self` (#784).
             ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _, _), .. } if place.starts_with('&') =>
                 hover_messages::event_dot_reborrow_to_caller(r.name(), place),
@@ -10521,7 +10626,7 @@ fn imaginary_move_note(
     let (_, cells) = arm.after.range(..=row).next_back()?;
     let cell = cells.get(rap.name())?;
     let title = match cell.init {
-        Init::Moved => hover_messages::state_moved_out(rap.name()),
+        Init::Moved => hover_messages::state_moved_out(rap.name(), rap.is_ref() || rap.holds_value()),
         Init::Maybe if cell.cause == Some("moved") || cell.mixed_init.is_some() => hover_messages::state_maybe_init(rap.name(), cell),
         _ => {
             let parts = cell.parts.as_ref().filter(|parts| Some(*parts) != entry.parts.as_ref())?;
@@ -11595,7 +11700,7 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
         // The segment still connects the layout's dots (a pattern move
         // can be marked on the binding, below its MIR move). Its title
         // describes the cell at the source boundary.
-        Init::Moved => return Some((layout.clone(), hover_messages::state_moved_out(name))),
+        Init::Moved => return Some((layout.clone(), hover_messages::state_moved_out(name, rap.is_ref() || rap.holds_value()))),
         Init::Unassigned => return Some((layout.clone(), hover_messages::state_uninitialized(name))),
         Init::Maybe => {
             let title = if cell.mixed_init.is_some() {

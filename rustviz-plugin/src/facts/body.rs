@@ -7169,8 +7169,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         _ => None,
     }).collect();
     scope_ends.terminal_calls = terminal_calls;
+    let value_flow = super::value_flow::collect(tcx, body, &cx.names, &runs, &checked, &cx.rows.event_row);
     BodyFacts {
         scope_ends,
+        value_flow,
         residual_drops,
         short_call_borrows,
         drop_holders,

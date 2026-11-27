@@ -197,8 +197,8 @@ impl<'a, 'tcx> Order<'a, 'tcx> {
         if ends.iter().all(|b| !b.release) {
             if let Some(store) = self.references.replaced_by.get(&id) {
                 if store.fact.occurrence.at == first.fact.occurrence.at || precedes(self.body, store.fact, first.fact) {
-                    let (bb, i, _) = fact_point(store.fact);
-                    return Some(((bb, i, super::BEFORE_STORE), store.fact.occurrence));
+                    let (bb, i, _, _) = fact_point(store.fact);
+                    return Some(((bb, i, super::BEFORE_STORE, 0), store.fact.occurrence));
                 }
             }
         }
@@ -331,12 +331,12 @@ impl<'a, 'tcx> Order<'a, 'tcx> {
                         && matches!(&block.terminator().kind, TerminatorKind::Call { args, .. }
                             if args.iter().any(|arg| arg.span.source_equal(span) && arg.node.place() == Some(assign.0)))
                     {
-                        return Some((rank, at.statement_index - 1, 0));
+                        return Some((rank, at.statement_index - 1, 0, 0));
                     }
                 }
             }
         }
-        Some((rank, at.statement_index, 0))
+        Some((rank, at.statement_index, 0, 0))
     }
 
     /// A displayed transfer can combine several MIR operations (for
@@ -376,7 +376,7 @@ impl<'a, 'tcx> Order<'a, 'tcx> {
                     && args.iter().any(|arg| arg.span.source_equal(*span)
                         && (reads(&arg.node) || matches!(arg.node, Operand::Constant(_))))
                 {
-                    return Some((blocks.iter().position(|bb| *bb == at.block)?, at.statement_index, 0));
+                    return Some((blocks.iter().position(|bb| *bb == at.block)?, at.statement_index, 0, 0));
                 }
             }
         }
@@ -403,7 +403,7 @@ impl<'a, 'tcx> Order<'a, 'tcx> {
                     matches!(&data.terminator().kind, TerminatorKind::Call { destination, .. }
                         if dest.is_some() && destination.as_local() == dest)
                 };
-                matches.then_some((rank, i, 0))
+                matches.then_some((rank, i, 0, 0))
             })
         });
         let point = sites.next()?;

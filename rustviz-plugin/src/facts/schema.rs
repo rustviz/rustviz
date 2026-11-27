@@ -140,6 +140,8 @@ pub struct BodyFacts {
     /// storage with no drop glue. Each binding keeps its own MIR identity.
     #[serde(skip)]
     pub(crate) scope_ends: ScopeEnds,
+    #[serde(skip)]
+    pub(crate) value_flow: super::value_flow::ValueFlow,
     /// Places a callee can write through a mutable operand, paired with
     /// the loans carried by the source operand at that exact MIR call.
     #[serde(skip)]

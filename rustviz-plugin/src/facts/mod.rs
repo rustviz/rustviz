@@ -37,6 +37,7 @@ mod rows;
 mod runtime;
 pub mod schema;
 pub mod table;
+pub(crate) mod value_flow;
 
 use rustc_hir::def::DefKind;
 use rustc_middle::ty::TyCtxt;

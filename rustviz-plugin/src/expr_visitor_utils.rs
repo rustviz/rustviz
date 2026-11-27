@@ -1738,52 +1738,6 @@ pub fn unary_op_operand<'tcx>(
   }
 }
 
-/// What a call `callee(args)` returns, as far as the `raps` map goes,
-/// when `callee` might be a local variable. See `local_callee_result_key`.
-pub enum LocalCallee {
-  /// The callee isn't a local variable (a fn item, a path to a
-  /// constructor, a method, ...): look the call up by its callee's name.
-  NotLocal,
-  /// A local whose call leaves it in place (an `Fn` / `FnMut` closure,
-  /// a fn pointer or item bound to a local): the result comes from the
-  /// call, i.e. the Function RAP under this key (`fn_key("f")`).
-  Call(String),
-  /// A local that the call consumes (`FnOnce::call_once`, e.g. a
-  /// closure that moves a captured value out): the value comes out of
-  /// the variable itself, which is moved.
-  Consumed,
-}
-
-/// Whether the value `call` returns is `Copy`.
-pub fn call_result_is_copy(call: &Expr, tcx: &TyCtxt) -> bool {
-  let typeck = tcx.typeck(call.hir_id.owner);
-  typeck.expr_ty_opt(call).is_some_and(|ty|
-    tcx.type_is_copy_modulo_regions(typing_env(*tcx, call.hir_id.owner), ty))
-}
-
-/// Classify the callee of `call` (an `ExprKind::Call`). Only a path to
-/// a local binding (`Res::Local`) counts as local.
-pub fn local_callee_result_key(call: &Expr, tcx: &TyCtxt) -> LocalCallee {
-  let ExprKind::Call(callee, _) = call.kind else { return LocalCallee::NotLocal };
-  let ExprKind::Path(QPath::Resolved(None, path)) = callee.kind else { return LocalCallee::NotLocal };
-  if !matches!(path.res, Res::Local(_)) {
-    return LocalCallee::NotLocal;
-  }
-  // rustc records a call through a closure or a generic `F: Fn*` as a
-  // call of the trait method it resolved to; `call_once` takes the
-  // callee by value.
-  let typeck = tcx.typeck(call.hir_id.owner);
-  if let Some(method) = typeck.type_dependent_def_id(call.hir_id) {
-    // A concrete closure can return one of its own captures. For an
-    // opaque callable the result comes from the call; its body is unknown.
-    if matches!(typeck.expr_ty(callee).kind(), rustc_middle::ty::Closure(..))
-        && matches!(tcx.trait_of_assoc(method), Some(t) if Some(t) == tcx.lang_items().fn_once_trait()) {
-      return LocalCallee::Consumed;
-    }
-  }
-  LocalCallee::Call(fn_key(tcx.hir_name(path.segments[0].hir_id).as_str()))
-}
-
 /// Which `Rc` / `Arc` / `Weak` kind `ty` is, by std diagnostic item.
 fn rc_kind_of_ty(tcx: &TyCtxt, ty: rustc_middle::ty::Ty) -> Option<RcKind> {
   use rustc_span::sym;
@@ -1830,12 +1784,6 @@ pub fn rc_call_of_expr(call: &Expr, tcx: &TyCtxt) -> Option<RcCall> {
 /// The function RAP for `call`'s result, with `Rc` clone / downgrade
 /// calls marked as such.
 pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt) -> ResourceAccessPoint {
-  let mut rap = rap;
-  if let ResourceAccessPoint::Function(f) = &mut rap {
-    let typeck = tcx.typeck(call.hir_id.owner);
-    f.callable_result = typeck.type_dependent_def_id(call.hir_id)
-      .is_some_and(|method| tcx.trait_of_assoc(method) == tcx.lang_items().fn_once_trait());
-  }
   let rap = match rc_call_of_expr(call, tcx) {
     Some(rc_call) => rap.with_rc_call(rc_call),
     None => rap,
@@ -1926,22 +1874,8 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> ResourceTy {
     // from_expansion). Both situations should fall back to Anonymous
     // rather than crash, mirroring the Path / Field arms above.
     ExprKind::Call(fn_expr, _) => {
-      // A call through a local (`f(1)` with `f` a closure or fn
-      // pointer) yields the call's result, not `f`'s own value: name
-      // the call's Function RAP, never the variable (#254, #299).
-      let key = match local_callee_result_key(expr, tcx) {
-        LocalCallee::Call(key) => Some(key),
-        // A Copy result of an `FnOnce` call (`Some(f())`, `wrap(f())`
-        // with `f: FnOnce() -> i32`) isn't a copy of anything `f`
-        // holds: it comes from the call, like `let n = f();` (#271,
-        // #1140).
-        LocalCallee::Consumed if call_result_is_copy(expr, tcx) =>
-          hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
-        // The variable itself (`f₂` for a shadowing `let f`).
-        LocalCallee::Consumed => raps.place_name(fn_expr, tcx),
-        LocalCallee::NotLocal => hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n)),
-      };
-      key.and_then(|n| raps.get(&n).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
+      hirid_to_var_name(fn_expr.hir_id, tcx)
+        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::MethodCall(name_and_generic_args, ..) => {
