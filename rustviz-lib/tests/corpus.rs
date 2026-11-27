@@ -40000,6 +40000,7 @@ fn nested_one_line_forks_are_aligned_1874() {
         ("one_line_diamond_1306_1308_1309", 35, &["f", "g", "h"], &["g", "h"], true),
         ("one_line_diamond_1306_1308_1309", 38, &["f", "g", "h"], &["f", "g"], true),
         ("edition2024/chain_block_if_1287", 37, &["s", "z"], &["s", "z", "a"], false),
+        ("one_line_nested_if_return_1534", 18, &["s2"], &["s2"], true),
     ];
     let mut problems = Vec::new();
     for &(name, line, outer, inner, outer_one_line) in cases {
@@ -40009,7 +40010,8 @@ fn nested_one_line_forks_are_aligned_1874() {
             let suffix = if nested && outer.contains(&var) { "#2" } else { "" };
             let id = format!("{var}@L{line}:dot:branch{suffix}");
             dots.iter().find(|(_, _, found)| found == &id
-                || (var == "a" && found.starts_with(&format!("a@L{line}:dot:"))
+                || (nested && matches!(var, "a" | "s2") && found.starts_with(&format!("{var}@L{line}:dot:"))
+                    && found != &format!("{var}@L{line}:dot:branch")
                     && found.split(':').next_back().is_some_and(|events| events.split('+').any(|event| event == "branch"))))
                 .unwrap_or_else(|| panic!("{name}: no {id}")).1
         };
@@ -40018,8 +40020,11 @@ fn nested_one_line_forks_are_aligned_1874() {
         if inner_ys.iter().any(|&y| y != inner_ys[0] || outer_ys.iter().any(|&outer_y| outer_y >= y)) {
             problems.push(format!("{name} L{line}: outer {outer_ys:?}, inner {inner_ys:?}"));
         }
-        if outer_one_line && outer_ys.iter().any(|&y| y != outer_ys[0] || inner_ys[0] != y + 30.0) {
-            problems.push(format!("{name} L{line}: outer forks {outer_ys:?}"));
+        if outer_ys.iter().any(|&y| y != outer_ys[0]) {
+            problems.push(format!("{name} L{line}: unaligned outer forks {outer_ys:?}"));
+        }
+        if outer_one_line && inner_ys[0] != outer_ys[0] + 30.0 {
+            problems.push(format!("{name} L{line}: expected a full row between {outer_ys:?} and {inner_ys:?}"));
         }
         if !outer_one_line {
             let src = dots.iter().find(|(_, _, id)| id == "y@L37:dot:duplicate").unwrap().1;
@@ -40032,6 +40037,72 @@ fn nested_one_line_forks_are_aligned_1874() {
     assert_eq!(problems, Vec::<String>::new());
 }
 
+// The path past is_empty()/len() keeps owning s2. The paths that return
+// drop it and bypass this connector (the MIR has separate drop edges).
+#[test]
+fn continuing_nested_arm_join_keeps_owner_text_1874() {
+    let tl = run_with_local_backend("one_line_nested_if_return_1534").timeline_panel_string();
+    let (dots, _, _) = marks_and_headers(&tl);
+    let legs = branch_leg_centrelines(&tl);
+    let lines = start_tags(&tl, "line");
+    let must_not_contain = ["This segment leads from", "to where the branches join"];
+    for row in [10, 18, 26, 30, 39] {
+        let join = |suffix: &str| {
+            let id = format!("s2@L{row}:dot:branch_join{suffix}");
+            let dot = dots.iter().find(|(_, _, found)| *found == id).unwrap();
+            (dot.0, dot.1)
+        };
+        let ((ix, iy), (ox, oy)) = (join(""), join("#2"));
+        let (_, id, _) = legs.iter().find(|(_, id, [x1, y1, x2, y2])|
+            id.starts_with(&format!("s2@L{row}:"))
+                // The empty else also goes to the outer join with s2.
+                && (if row == 18 { *x1 > ox } else { (x1 - ix).abs() < 0.5 && (y1 - iy).abs() < 0.5 })
+                && (x2 - ox).abs() < 0.5 && (y2 - oy).abs() < 0.5)
+            .unwrap_or_else(|| panic!("L{row}: missing leg between the join dots"));
+        let base = id.strip_suffix("/sides").or_else(|| id.strip_suffix("/line")).unwrap();
+        let tag = lines.iter().find(|tag| attr(tag, "data-rv-id").is_some_and(|id|
+            id.strip_suffix("/side1").or_else(|| id.strip_suffix("/line")) == Some(base))).unwrap();
+        let tip = tooltip_lines(tag)[0].join(" ");
+        assert!(tip.contains("s2 is the owner of the resource")
+            && must_not_contain.iter().all(|s| !tip.contains(s)), "L{row}: {tip}");
+        assert_eq!(attr(tag, "style"), Some("stroke-dasharray: none;"), "L{row}");
+    }
+}
+
+// The let-chain's padding contains no else code to underline. On the
+// inner switch's false path, MIR moves s to take on the let-chain line.
+#[test]
+fn padded_else_hover_needs_a_code_row_1874() {
+    let rv = run_with_local_backend("edition2024/chain_block_if_1287");
+    let code = rv.code_panel_string();
+    let tl = rv.timeline_panel_string();
+    let must_not_contain = "The underlined code is not part of that branch.";
+    let code_y: Vec<f64> = start_tags(&code, "text").into_iter()
+        .filter(|tag| attr(tag, "data-rv-kind") == Some("code_line"))
+        .filter_map(|tag| attr(tag, "y")?.parse::<f64>().ok().map(|y| y - 5.0))
+        .collect();
+    assert!(!code_y.is_empty());
+    let mut unlit = 0;
+    for tag in start_tags(&tl, "polygon") {
+        if !attr(tag, "data-rv-id").is_some_and(|id| id.starts_with("s@L37:branch_line:")) {
+            continue;
+        }
+        let Some(tip) = tooltip_lines(tag).into_iter().next().map(|lines| lines.join(" ")) else { continue };
+        if !tip.starts_with("This segment is for the else branch.") { continue; }
+        let hits_code = attr(tag, "data-underline-y").is_some_and(|range| {
+            let (top, bot) = range.split_once(' ').unwrap();
+            let (top, bot) = (top.parse::<f64>().unwrap(), bot.parse::<f64>().unwrap());
+            code_y.iter().any(|&y| top - 2.0 <= y && y <= bot + 2.0)
+        });
+        if !hits_code {
+            assert!(!tip.contains(must_not_contain), "hover with no code row: {tip}");
+            assert_eq!(attr(tag, "data-underline"), Some("none"));
+            unlit += 1;
+        }
+    }
+    assert!(unlit > 0);
+}
+
 /// #1876: MIR's first break moves k out and drops j on its way out of
 /// the loop. k's stop bar is on that arm's row, where j's drop is drawn.
 /// The first return copies n, so its live column reaches a bar just below
@@ -40042,10 +40113,12 @@ fn diverging_first_arm_stops_on_its_own_row_1876() {
     for (name, bar_id, dot_id, offset) in [
         ("loop_break_several_locals", "k@L11:stop_bar", "j@L11:dot:owner_go_out_of_scope", 0.0),
         ("one_line_diverging_arm_1295", "n@L11:stop_bar", "n@L11:dot:duplicate", 15.0),
+        ("nested_sibling_exit_1876", "n@L6:stop_bar", "n@L6:dot:duplicate", 15.0),
+        ("nested_sibling_exit_1876", "(temporary)@L11:stop_bar", "(temporary)@L11:dot:static_lend+static_reacquire", 15.0),
     ] {
         let tl = run_with_local_backend(name).timeline_panel_string();
         let (dots, _, _) = marks_and_headers(&tl);
-        let own_y = dots.iter().find(|(_, _, id)| id == dot_id).unwrap().1;
+        let (dot_x, own_y, _) = dots.iter().find(|(_, _, id)| id == dot_id).unwrap();
         let bar = start_tags(&tl, "line").into_iter().find(|tag| attr(tag, "data-rv-id") == Some(bar_id))
             .unwrap_or_else(|| panic!("{name}: missing {bar_id}"));
         let coord = |key| attr(bar, key).unwrap().parse::<f64>().unwrap();
@@ -40054,11 +40127,22 @@ fn diverging_first_arm_stops_on_its_own_row_1876() {
             problems.push(format!("{name}: {bar_id} at {bar_y}, expected {}", own_y + offset));
         }
         let hash = attr(bar, "data-hash").unwrap();
-        assert!(branch_leg_centrelines(&tl).iter().any(|(h, _, [_, _, x2, y2])|
-            h == hash && (*x2 - bar_x).abs() < 1.0 && (*y2 - bar_y).abs() < 1.0),
-            "{name}: no leg reaches {bar_id}");
+        if !branch_leg_centrelines(&tl).iter().any(|(h, _, [x1, y1, x2, y2])|
+            h == hash && (*x2 - bar_x).abs() < 1.0 && (*y2 - bar_y).abs() < 1.0
+                && (offset == 0.0 || ((x1 - dot_x).abs() < 1.0 && (y1 - own_y).abs() < 1.0))) {
+            problems.push(format!("{name}: no leg reaches {bar_id} from its expected start"));
+        }
     }
     assert_eq!(problems, Vec::<String>::new());
+}
+
+// spin's MIR loops back to itself, and the call has no return target.
+#[test]
+fn never_call_stop_bar_describes_divergence_1876() {
+    let tl = run_with_local_backend("never_fn_call_1553").timeline_panel_string();
+    let tip = tooltip_of_id(&tl, "n@L87:stop_bar\"").unwrap();
+    let must_not_contain = "it returns, panics, breaks or continues";
+    assert!(tip.contains("it never reaches where the branches join") && !tip.contains(must_not_contain), "{tip}");
 }
 
 /// Centres of the `<circle>`s (event dots) and anchors of the function

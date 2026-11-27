@@ -4738,6 +4738,8 @@ pub struct VisualizationData {
     /// got rows of their own (`OneLineArmGaps`), set by `render_svg`.
     /// Every column forks on the row above its first arm (design Q9).
     pub fork_above: HashSet<usize>,
+    /// Branch event id and arm index with a reachable exit on its split row.
+    pub exits_at_split: BTreeSet<(usize, usize)>,
 
     /// Source rows of code that never runs (reached only by borrowck's
     /// imaginary edges, `StateTable::dead_row`) that 2.x draws inline, in no

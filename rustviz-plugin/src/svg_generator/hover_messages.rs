@@ -4428,7 +4428,10 @@ pub fn event_dot_branch_merge_elems_moved(my_name: &String, moved: &[String], le
 /// `continue`, `unreachable!()`) on a variable's column: the path
 /// stops here and never reaches the code after the conditional (#317).
 /// The bar sits on the column, so the message doesn't name it.
-pub fn branch_never_reaches_merge() -> String {
+pub fn branch_never_reaches_merge(other_exit: bool) -> String {
+    if other_exit {
+        return "This branch stops here: it never reaches where the branches join".to_owned();
+    }
     "This branch stops here: it returns, panics, breaks or continues, so it never \
      reaches the end of the conditional"
         .to_string()

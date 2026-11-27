@@ -417,6 +417,13 @@ pub struct Arm {
     /// one of those locations terminates execution in this body.
     #[serde(skip)]
     pub has_exit: bool,
+    #[serde(skip)]
+    pub switch_col: usize,
+    #[serde(skip)]
+    pub code_spans: BTreeSet<(usize, usize)>,
+    /// State on the continuing exits of an arm with a nested switch.
+    #[serde(skip)]
+    pub continuing: Option<State>,
     #[serde(flatten)]
     pub after: State,
 }
