@@ -93,6 +93,8 @@ struct DotLayer {
     /// (`render_branches`): an arrow's head lying along one hides the end
     /// of the leg (#1476).
     legs: Vec<Piece>,
+    /// Vertical portions of the branch timelines, also kept in `cols`.
+    branch_cols: Vec<Piece>,
     /// The columns' vertical stretches (`render_timeline`,
     /// `render_branches`): an arrow's head coming steeply up (or down)
     /// into a dot lies along the column under (or over) it (#1488).
@@ -109,10 +111,15 @@ struct DotLayer {
 struct ColumnMarks {
     bars: Vec<(f64, f64)>,
     legs: Vec<Piece>,
+    branch_cols: Vec<Piece>,
     cols: Vec<Piece>,
 }
 
 impl DotLayer {
+    fn branch_stretches(&self) -> impl Iterator<Item = Piece> + '_ {
+        self.legs.iter().chain(&self.branch_cols).copied()
+    }
+
     fn trunk_restart_y(&self, row: usize, hash: u64, owner_key: i64, is_descendant: impl Fn(&str) -> bool) -> Option<i64> {
         self.dots.iter()
             .filter(|dot| dot.event && dot.row == row
@@ -522,6 +529,8 @@ struct ArrowData {
     key: (usize, usize),
     #[serde(skip)]
     names: (String, String),
+    #[serde(skip)]
+    columns: (Option<u64>, Option<u64>),
     /// An arrow from a column to itself (a literal's or static's borrow
     /// ending, drawn beside the column) drawn on the dot's right instead
     /// of its left (`ArrowLanes::self_right`).
@@ -661,6 +670,7 @@ pub fn render_timeline_panel(visualization_data : & mut VisualizationData) -> (S
     render_labels_string(&mut output, &resource_owners_layout, &visualization_data.fn_start_lines, &visualization_data.raised_headers, &registry); // headers
     dots.bars = marks.bars;
     dots.legs = marks.legs;
+    dots.branch_cols = marks.branch_cols;
     dots.cols = marks.cols;
     render_ref_line(&mut output, visualization_data, &resource_owners_layout, &registry, &mut dots.brackets); // reference lines
     render_arrows_string_external_events_version(&mut output, visualization_data, &resource_owners_layout, &mut dots, &registry); // arrows
@@ -5691,10 +5701,10 @@ fn tail_off_dot(tail: (f64, f64), next: (f64, f64), dots: &DotPositions) -> (f64
 /// Arrows are drawn after dots, so an arrow running straight through
 /// a dot covers it, and the arrow's tooltip wins the hover: the dot's
 /// own tooltip can't be reached. Each dot strictly between the two
-/// ends gets a half-circle hop above it instead.
+/// ends gets a half-circle hop around it instead.
 ///
 /// `x1` is where the head lands, `x2` the source column (the caller's
-/// convention). Returns `None` when no dot is in the way; the caller
+/// convention). Returns `None` when there are no crossings; the caller
 /// then draws the usual polyline, so those arrows are unchanged.
 /// Also returns what it draws (`Drawn`: its straight pieces, the arcs
 /// left out, and its head).
@@ -5702,30 +5712,52 @@ fn render_hopping_arrow(
     x1: i64, y: i64, x2: i64,
     title: &str,
     rv: &str,
-    dot_positions: &DotPositions,
+    dots: &DotLayer,
     head_offset: f64,
     legs: &[Piece],
-) -> Option<(String, Vec<Piece>, Vec<(f64, f64)>, Vec<(f64, f64)>)> {
+    turn: Option<i64>,
+    branch_hops: bool,
+) -> Option<(String, Vec<Piece>, Vec<(f64, f64)>, Vec<Hop>)> {
     let (lo_x, hi_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+    let dot_positions = &dots.positions;
 
     // Pull every (x, y) dot position that sits at this arrow's y
     // and strictly between source/target x. Source and target dots
     // (at exactly lo_x or hi_x) aren't intervening — they're the
     // endpoints we're connecting. Ascending and duplicate-free,
     // since `DotPositions` is a set ordered by (x, y).
-    let overlap_xs: Vec<i64> = dot_positions
+    let mut overlap_xs: BTreeSet<i64> = dot_positions
         .iter()
         .filter_map(|(dx, dy)| {
             if *dy == y && *dx > lo_x && *dx < hi_x { Some(*dx) } else { None }
         })
         .collect();
+    if branch_hops {
+        let y = y as f64;
+        let direction = (x1 - x2).signum() as f64;
+        let tail = x2 as f64 + TAIL_CLEARANCE * direction;
+        let base = x1 as f64 - head_offset * direction;
+        let shaft = ((tail, y), (base, y));
+        let crossings: BTreeSet<_> = dots.branch_stretches()
+            .filter_map(|leg| horizontal_crossing_x(shaft, leg))
+            .map(|x| x.round() as i64).collect();
+        for x in crossings {
+            // A hop needs its full diameter. Where crossings are close,
+            // keep the arc already protecting the event dot or leg.
+            let room = HOP_RADIUS as i64;
+            if direction * (x as f64 - tail) > HOP_RADIUS && direction * (base - x as f64) > HOP_RADIUS
+                && overlap_xs.range(x - 2 * room..=x + 2 * room).next().is_none() {
+                overlap_xs.insert(x);
+            }
+        }
+    }
     if overlap_xs.is_empty() { return None; }
 
     // The arrowhead is 12.75 units long and pulled back 18 from the
     // dot center (matching the polyline path) so the tip lands on
     // the dot's near edge. Sign of `head_dir` tells the head
     // polygon which way to point.
-    let r: f64 = 10.0; // hop radius — clears a 5px dot plus stroke comfortably
+    let r = HOP_RADIUS;
     let y_f = y as f64;
     let source_x = x2 as f64;
 
@@ -5738,17 +5770,11 @@ fn render_hopping_arrow(
     } else {
         x1 as f64 + head_offset
     };
-    // The hop must bulge upward (smaller y). SVG's sweep flag 1 means
-    // increasing angle, which with y pointing down is clockwise on
-    // screen: left -> top -> right. So travelling right needs 1 and
-    // travelling left needs 0.
-    let sweep = if goes_right { "1" } else { "0" };
-
     // Order the hops by path direction so we draw L/A segments in
     // travel order. `overlap_xs` is ascending; reverse when going
     // right-to-left.
     let hops: Vec<i64> = if goes_right {
-        overlap_xs
+        overlap_xs.into_iter().collect()
     } else {
         overlap_xs.into_iter().rev().collect()
     };
@@ -5766,15 +5792,13 @@ fn render_hopping_arrow(
         let oxf = *ox as f64;
         let near = if goes_right { oxf - r } else { oxf + r };
         let far  = if goes_right { oxf + r } else { oxf - r };
+        let up = hop_opens_up((*ox, y), true, dot_positions);
+        let sweep = u8::from(goes_right == up);
         // Straight on to just before the dot, then a half-circle
         // arc over it, then continue.
-        d.push_str(&format!(" L {} {}", near, y_f));
+        append_arrow_shaft(&mut d, &mut pieces, ((at, y_f), (near, y_f)), legs, turn);
         d.push_str(&format!(" A {} {} 0 0 {} {} {}", r, r, sweep, far, y_f));
-        pieces.push(((at, y_f), (near, y_f)));
-        arcs.extend((0..=12).map(|k| {
-            let a = std::f64::consts::PI * k as f64 / 12.0;
-            (oxf - r * a.cos(), y_f - r * a.sin())
-        }));
+        arcs.push(Hop { center: (oxf, y_f), up, right: goes_right });
         at = far;
     }
     let mut base = (end_x_pulled, y_f);
@@ -5805,8 +5829,7 @@ fn render_hopping_arrow(
             break;
         }
     }
-    d.push_str(&format!(" L {} {}", base.0, base.1));
-    pieces.push((tail, base));
+    append_arrow_shaft(&mut d, &mut pieces, (tail, base), legs, turn);
     let (v1, v2, v3) = (triangle[0], triangle[1], triangle[2]);
 
     Some((format!(
@@ -5817,6 +5840,24 @@ fn render_hopping_arrow(
         v1.0, v1.1, v2.0, v2.1, v3.0, v3.1,
         title = title, d = d, rv = rv,
     ), pieces, vec![v1, v2, v3], arcs))
+}
+
+fn append_arrow_shaft(
+    path: &mut String, pieces: &mut Vec<Piece>, (from, to): Piece, legs: &[Piece], turn: Option<i64>,
+) {
+    let route = [from, to];
+    let jog;
+    let route = if let Some(dy) = turn {
+        jog = turn_across_legs(&route, legs, dy as f64);
+        jog.as_slice()
+    } else {
+        route.as_slice()
+    };
+    for points in route.windows(2) {
+        let (p, q) = (points[0], points[1]);
+        path.push_str(&format!(" L {} {}", q.0, q.1));
+        pieces.push((p, q));
+    }
 }
 
 /// What one arrow (or function logo with its short arrow) covers on a
@@ -5909,6 +5950,8 @@ struct ArrowLanes {
     logo_rows: HashMap<(usize, usize), i64>,
     /// Vertical clearance for a local turn across a shallow fork leg.
     leg_turn: HashMap<ArrowKey, i64>,
+    /// Event-row routes that mark crossings of branch stretches.
+    branch_hops: BTreeSet<ArrowKey>,
 }
 
 /// A straight piece of an arrow's shaft.
@@ -5926,12 +5969,11 @@ struct Drawn {
     /// `data-rv-var` / `data-rv-to`.
     var: String,
     to: String,
+    columns: (Option<u64>, Option<u64>),
     pieces: Vec<Piece>,
     tri: Vec<(f64, f64)>,
     logo: Option<(f64, f64)>,
-    /// Points along a hop's arcs (not shafts to the checks, but a head on
-    /// one still lies on the arrow).
-    arcs: Vec<(f64, f64)>,
+    arcs: Vec<Hop>,
     /// How many dots its track (off its dots' row) hops (`track_hops`):
     /// `untangle` tries another track for it first.
     track_hops: usize,
@@ -6236,7 +6278,7 @@ impl ArrowLanes {
         } else if !self.recording {
             self.painted_bottom = d.pieces.iter()
                 .map(|&(a, b)| a.1.max(b.1) + 2.5)
-                .chain(d.arcs.iter().map(|p| p.1 + 2.5))
+                .chain(d.arcs.iter().map(|arc| arc.center.1 + if arc.up { 2.5 } else { HOP_RADIUS + 2.5 }))
                 .chain(d.tri.iter().map(|p| p.1))
                 .chain(d.logo.map(|(_, y)| y + 3.0))
                 .fold(self.painted_bottom, f64::max);
@@ -6249,6 +6291,7 @@ impl ArrowLanes {
             leg_dx: self.leg_dx.clone(), far: self.far.clone(), self_right: self.self_right.clone(),
             level_in: self.level_in.clone(),
             leg_turn: self.leg_turn.clone(),
+            branch_hops: self.branch_hops.clone(),
         }
     }
 
@@ -6261,6 +6304,7 @@ impl ArrowLanes {
         self.self_right = s.self_right;
         self.level_in = s.level_in;
         self.leg_turn = s.leg_turn;
+        self.branch_hops = s.branch_hops;
     }
 
     /// The other ways `untangle` may draw the arrow or logo `key`, given
@@ -6449,6 +6493,32 @@ impl ArrowLanes {
         }
         out
     }
+
+    /// Event-row crossings and local bends before moving a whole track.
+    fn local_routes(&self, key: ArrowKey) -> Vec<LaneSettings> {
+        let Some(&((tx, ty), (fx, fy), _)) = self.ends.get(&key) else { return Vec::new() };
+        if tx == fx || ty != fy {
+            return Vec::new();
+        }
+        let mut row = self.settings();
+        row.lane_y.insert(key, ty);
+        row.far.remove(&key);
+        row.level_in.remove(&key);
+        row.leg_turn.remove(&key);
+        let mut routes = vec![row.clone()];
+        routes.extend(row.with_local_turns(key));
+        routes
+    }
+
+    fn repair_alternatives(&self, key: ArrowKey, drawn: &[Drawn], ys: (i64, i64), far: bool, local: bool) -> Vec<LaneSettings> {
+        let mut routes = if local { self.local_routes(key) } else { Vec::new() };
+        if local && !routes.first().is_some_and(|s| s.lane_y.get(&key) == self.lane_y.get(&key)
+            && !self.far.contains(&key) && !self.level_in.contains_key(&key)) {
+            routes.extend(self.settings().with_local_turns(key));
+        }
+        routes.extend(self.alternatives(key, drawn, ys, far, false));
+        routes
+    }
 }
 
 /// The ways `ArrowLanes::alternatives` brings a head in level (#1499):
@@ -6472,10 +6542,28 @@ struct LaneSettings {
     self_right: std::collections::HashSet<(usize, usize)>,
     level_in: HashMap<(usize, usize), i64>,
     leg_turn: HashMap<ArrowKey, i64>,
+    branch_hops: BTreeSet<ArrowKey>,
+}
+
+impl LaneSettings {
+    fn with_local_turns(&self, key: ArrowKey) -> [Self; 2] {
+        [12, -12].map(|dy| {
+            let mut route = self.clone();
+            route.leg_turn.insert(key, dy);
+            route
+        })
+    }
 }
 
 fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
     (b.0 - a.0).hypot(b.1 - a.1)
+}
+
+fn off_piece(c: (f64, f64), (p, q): Piece) -> f64 {
+    let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+    let l = dist(p, q);
+    let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * dx + (c.1 - p.1) * dy) / (l * l)).clamp(0.0, 1.0) };
+    dist(c, (p.0 + t * dx, p.1 + t * dy))
 }
 
 /// Points 1 px apart along `pieces`.
@@ -6516,11 +6604,7 @@ fn off_tri(t: &[(f64, f64)], p: (f64, f64)) -> f64 {
     if inside_tri(t, p) >= 0.0 {
         return 0.0;
     }
-    tri_edges(t).iter().map(|&(a, b)| {
-        let l = dist(a, b).max(1e-9);
-        let u = (((p.0 - a.0) * (b.0 - a.0) + (p.1 - a.1) * (b.1 - a.1)) / (l * l)).clamp(0.0, 1.0);
-        dist(p, (a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u))
-    }).fold(f64::INFINITY, f64::min)
+    tri_edges(t).into_iter().map(|edge| off_piece(p, edge)).fold(f64::INFINITY, f64::min)
 }
 
 /// Where `p` lies along the segment a–b, in px from a, if it's within
@@ -6604,14 +6688,13 @@ fn same_arrow(a: &Drawn, b: &Drawn, ends: &Ends) -> bool {
 /// Whether `a`'s head lies on `b`'s shaft. A shaft passing by a head may
 /// not touch it (its 5 px stroke within 1 px of the triangle); one that
 /// starts or ends at the head's column, or hops over the dot it points
-/// at, may. (A hop's 13 arc points run from one side of the dot to the
-/// other: their chord's midpoint is its centre.)
+/// at, may.
 fn head_on_shaft(a: &Drawn, b: &Drawn) -> bool {
     if a.tri.len() < 3 {
         return false;
     }
     let related = b.var == a.to || b.to == a.to
-        || b.arcs.chunks(13).any(|c| dist(((c[0].0 + c[c.len() - 1].0) / 2.0, (c[0].1 + c[c.len() - 1].1) / 2.0), a.tri[1]) < 8.0);
+        || b.arcs.iter().any(|arc| dist(arc.center, a.tri[1]) < 8.0);
     samples(&b.pieces).into_iter()
         .any(|p| inside_tri(&a.tri, p) > -1.5 || (!related && off_tri(&a.tri, p) < 3.5))
 }
@@ -6707,37 +6790,179 @@ fn arrow_mark_hits(drawn: &[Drawn], ends: &Ends) -> Vec<(usize, usize, ArrowMark
 /// arrow's index into `drawn`) per mark: a dot not its own end (#1316's
 /// `y -> a` past z's dot), or a column's stop bar (#1344). A hop's arc
 /// isn't a shaft.
-fn through_marks(drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)]) -> Vec<usize> {
-    dot_and_bar_hits(drawn, dots, bars, false).into_iter().map(|(i, _, _)| i).collect()
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MarkClearance {
+    Shaft,
+    Head,
+    DotGap,
 }
 
-fn dot_and_bar_hits(
-    drawn: &[Drawn], dots: &DotPositions, bars: &[(f64, f64)], include_head: bool,
-) -> Vec<(usize, bool, usize)> {
-    let off = |c: (f64, f64), (p, q): Piece| {
-        let l = dist(p, q);
-        let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
-        dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
+const SHAFT_HALF: f64 = 2.5;
+// The dot's 5 px radius plus half its stroke and 1 px of visible space.
+const DOT_CLEARANCE: f64 = 6.5;
+const DOT_SHAFT_CLEARANCE: f64 = DOT_CLEARANCE + SHAFT_HALF;
+const HOP_RADIUS: f64 = 10.0;
+
+/// The horizontal semicircle emitted by both hop renderers.
+#[derive(Clone, Copy, Debug)]
+struct Hop {
+    center: (f64, f64),
+    up: bool,
+    right: bool,
+}
+
+impl Hop {
+    fn ends(self) -> Piece {
+        let (x, y) = self.center;
+        let dx = if self.right { HOP_RADIUS } else { -HOP_RADIUS };
+        ((x - dx, y), (x + dx, y))
+    }
+
+    fn head_overlaps(self, tri: &[(f64, f64)]) -> bool {
+        const TOLERANCE: f64 = 1.5;
+        let (x, y) = self.center;
+        if inside_tri(tri, self.center) < -HOP_RADIUS - TOLERANCE {
+            return false;
+        }
+        let (start, end) = self.ends();
+        let in_head = |p| inside_tri(tri, p) >= -TOLERANCE - 1e-9;
+        if in_head(start) || in_head(end) {
+            return true;
+        }
+        // If neither endpoint is inside the expanded triangle, the arc
+        // must cross one of its three offset edges to enter it.
+        let area = (tri[1].0 - tri[0].0) * (tri[2].1 - tri[0].1)
+            - (tri[2].0 - tri[0].0) * (tri[1].1 - tri[0].1);
+        tri_edges(tri).into_iter().any(|(a, b)| {
+            let length = dist(a, b);
+            if length < 1e-9 {
+                return false;
+            }
+            let tangent = ((b.0 - a.0) / length, (b.1 - a.1) / length);
+            let normal = (-tangent.1 * area.signum(), tangent.0 * area.signum());
+            let offset = (a.0 - x) * normal.0 + (a.1 - y) * normal.1 - TOLERANCE;
+            if offset.abs() > HOP_RADIUS {
+                return false;
+            }
+            let along = (HOP_RADIUS * HOP_RADIUS - offset * offset).sqrt();
+            [-along, along].into_iter().any(|s| {
+                let p = (x + offset * normal.0 + s * tangent.0, y + offset * normal.1 + s * tangent.1);
+                (if self.up { p.1 <= y } else { p.1 >= y }) && in_head(p)
+            })
+        })
+    }
+}
+
+/// Each sharp join's two outer stroke edges. The shaft distance already
+/// covers the rest of the join, including a bevel when the miter limit
+/// (four stroke halves from the vertex) is exceeded.
+fn shaft_miters(pieces: &[Piece], arcs: &[Hop]) -> Vec<Piece> {
+    let mut edges = Vec::new();
+    let mut join = |at: (f64, f64), incoming: (f64, f64), outgoing: (f64, f64)| {
+        let (dx, dy) = incoming;
+        let (ex, ey) = outgoing;
+        let cross = dx * ey - dy * ex;
+        if cross.abs() < 1e-9 {
+            return;
+        }
+        let reach = SHAFT_HALF * cross.signum();
+        let scale = reach / (1.0 + dx * ex + dy * ey);
+        let offset = ((dy + ey) * scale, -(dx + ex) * scale);
+        if offset.0.hypot(offset.1) <= 4.0 * SHAFT_HALF {
+            let tip = (at.0 + offset.0, at.1 + offset.1);
+            edges.extend([((at.0 + dy * reach, at.1 - dx * reach), tip),
+                (tip, (at.0 + ey * reach, at.1 - ex * reach))]);
+        }
     };
+    let unit = |(p, q): Piece| {
+        let length = dist(p, q);
+        (length > 1e-9).then(|| ((q.0 - p.0) / length, (q.1 - p.1) / length))
+    };
+    let mut lines = pieces.iter().copied().filter_map(|p| unit(p).map(|u| (p, u))).peekable();
+    while let Some(((p, q), u)) = lines.next() {
+        if let Some(&(_, v)) = lines.peek().filter(|((start, _), _)| *start == q) {
+            join(q, u, v);
+        }
+        for arc in arcs {
+            let (start, end) = arc.ends();
+            let side = if arc.up { -1.0 } else { 1.0 };
+            if q == start {
+                join(q, u, (0.0, side));
+            }
+            if p == end {
+                join(p, (0.0, -side), u);
+            }
+        }
+    }
+    edges
+}
+
+fn off_hop(point: (f64, f64), center: (f64, f64), up: bool) -> f64 {
+    if (point.1 <= center.1) == up || point.1 == center.1 {
+        (dist(point, center) - HOP_RADIUS).abs()
+    } else {
+        let (x, y) = center;
+        dist(point, (x - HOP_RADIUS, y)).min(dist(point, (x + HOP_RADIUS, y)))
+    }
+}
+
+fn hop_opens_up((x, y): (i64, i64), preferred: bool, dots: &DotPositions) -> bool {
+    let extent = (HOP_RADIUS + DOT_SHAFT_CLEARANCE).ceil() as i64;
+    let center = (x as f64, y as f64);
+    let clear = |up| dots.range((x - extent, i64::MIN)..=(x + extent, i64::MAX))
+        .all(|&(dx, dy)| off_hop((dx as f64, dy as f64), center, up) >= DOT_SHAFT_CLEARANCE);
+    if !clear(preferred) && clear(!preferred) { !preferred } else { preferred }
+}
+
+fn through_marks(drawn: &[Drawn], dots: &DotLayer, clearance: MarkClearance) -> Vec<usize> {
+    dot_and_bar_hits(drawn, dots, clearance).into_iter().map(|(i, _, _)| i).collect()
+}
+
+fn dot_and_bar_hits(drawn: &[Drawn], dots: &DotLayer, clearance: MarkClearance) -> Vec<(usize, bool, usize)> {
     let mut out = Vec::new();
     for (i, d) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none()) {
-        // Where its pieces start and stop, and its head's tip: a dot within
-        // 6 px of one is a dot it leaves (5.25 px off it) or points at.
-        let ends: Vec<(f64, f64)> = d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(d.tri.get(1).copied()).collect();
-        for (mark, &(x, y)) in dots.iter().enumerate() {
+        let head = d.tri.get(1).copied();
+        let ends: Vec<_> = if clearance == MarkClearance::DotGap {
+            Vec::new()
+        } else {
+            d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(head).collect()
+        };
+        let miters = if clearance == MarkClearance::DotGap { shaft_miters(&d.pieces, &d.arcs) } else { Vec::new() };
+        let head_extent = if clearance != MarkClearance::Shaft {
+            head.map_or(0.0, |h| d.tri.iter().map(|&corner| dist(h, corner)).fold(0.0, f64::max))
+        } else {
+            0.0
+        };
+        for (mark, &(x, y)) in dots.positions.iter().enumerate() {
             let c = (x as f64, y as f64);
-            // Through its centre, or the 5 px stroke touching the dot's rim.
-            let reach = if ends.iter().any(|&e| dist(e, c) < 6.0) { 4.5 } else { 5.0 + 2.5 };
-            if d.pieces.iter().any(|&p| off(c, p) < reach)
-                || (include_head && d.tri.len() == 3 && off_tri(&d.tri, c) < 5.0) {
+            if clearance != MarkClearance::DotGap {
+                let reach = if ends.iter().any(|&e| dist(e, c) < 6.0) { 4.5 } else { 7.5 };
+                if d.pieces.iter().any(|&p| off_piece(c, p) < reach)
+                    || (clearance == MarkClearance::Head
+                        && head.is_some_and(|h| dist(h, c) < head_extent + 5.0 && off_tri(&d.tri, c) < 5.0)) {
+                    out.push((i, false, mark));
+                }
+                continue;
+            }
+            let belongs_to = |column: Option<u64>| column.and_then(|hash| dots.at.get(&(hash, x, y)))
+                .is_some_and(|&dot| dots.dots[dot].event);
+            let shaft = d.pieces.iter().enumerate().any(|(n, &(p, q))| {
+                let gap = off_piece(c, (p, q));
+                gap < DOT_SHAFT_CLEARANCE
+                    && !(n == 0 && gap >= 4.99 && gap >= dist(p, c) - 0.01 && belongs_to(d.columns.0))
+            });
+            let arc = d.arcs.iter().any(|arc| off_hop(c, arc.center, arc.up) < DOT_SHAFT_CLEARANCE);
+            let head = head.is_some_and(|h| dist(h, c) < head_extent + DOT_CLEARANCE
+                && off_tri(&d.tri, c) < DOT_CLEARANCE && !(dist(h, c) <= 10.0 && belongs_to(d.columns.1)));
+            if shaft || arc || head || miters.iter().any(|&edge| off_piece(c, edge) < DOT_CLEARANCE) {
                 out.push((i, false, mark));
             }
         }
         // Along a stop bar (12 px wide, level): its middle under the shaft.
-        for (mark, &c) in bars.iter().enumerate() {
+        for (mark, &c) in dots.bars.iter().enumerate() {
             let bar = ((c.0 - 6.0, c.1), (c.0 + 6.0, c.1));
-            if d.pieces.iter().any(|&p| off(c, p) < 4.5)
-                || (include_head && d.tri.len() == 3
+            if d.pieces.iter().any(|&p| off_piece(c, p) < 4.5)
+                || (clearance != MarkClearance::Shaft && d.tri.len() == 3
                     && samples(&[bar]).into_iter().any(|p| off_tri(&d.tri, p) < 2.0)) {
                 out.push((i, true, mark));
             }
@@ -6872,13 +7097,21 @@ fn end_to_end(drawn: &[Drawn], ends: &HashMap<(usize, usize), ((i64, i64), (i64,
 /// (`marks_on_others`), the shafts through marks (`through_marks`, as
 /// `(i, i)`), the tracks hopping dots (`track_hops`; another track that
 /// passes none is better) and the arrows end to end (`end_to_end`).
-fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
+fn defects(drawn: &[Drawn], dots: &DotLayer, clearance: MarkClearance) -> Vec<(usize, usize)> {
     let mut out = marks_on_others(drawn, &dots.lanes.ends);
-    out.extend(through_marks(drawn, &dots.positions, &dots.bars).into_iter().map(|i| (i, i)));
+    out.extend(head_arc_hits(drawn).map(|(head, arc, _)| (head, arc)));
+    out.extend(through_marks(drawn, dots, clearance).into_iter().map(|i| (i, i)));
     out.extend(on_legs(drawn, &dots.legs).into_iter().map(|i| (i, i)));
     out.extend((0..drawn.len()).filter(|&i| drawn[i].track_hops > 0).map(|i| (i, i)));
     out.extend(end_to_end(drawn, &dots.lanes.ends));
     out
+}
+
+fn head_arc_hits(drawn: &[Drawn]) -> impl Iterator<Item = (usize, usize, &Hop)> {
+    drawn.iter().enumerate().filter(|(_, a)| a.tri.len() == 3).flat_map(move |(i, a)| {
+        drawn.iter().enumerate().filter(move |(j, b)| i != *j && a.tip != b.tip)
+            .flat_map(move |(j, b)| b.arcs.iter().filter(move |arc| arc.head_overlaps(&a.tri)).map(move |arc| (i, j, arc)))
+    })
 }
 
 /// How badly the arrows are drawn: the marks on others, the dots a track
@@ -6886,8 +7119,8 @@ fn defects(drawn: &[Drawn], dots: &DotLayer) -> Vec<(usize, usize)> {
 /// end to end.
 /// Second, to choose between drawings with as few of those: how many
 /// times two arrows cross.
-fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
-    let through = through_marks(drawn, &dots.positions, &dots.bars).len() + end_to_end(drawn, &dots.lanes.ends).len();
+fn untangle_cost(drawn: &[Drawn], dots: &DotLayer, clearance: MarkClearance) -> (usize, usize) {
+    let through = through_marks(drawn, dots, clearance).len() + end_to_end(drawn, &dots.lanes.ends).len();
     let arrows: Vec<&Drawn> = drawn.iter().filter(|d| d.logo.is_none()).collect();
     let mut crossings = 0;
     for (n, a) in arrows.iter().enumerate() {
@@ -6897,18 +7130,13 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     }
     // Two arrows' pieces in line and touching (one running on where the
     // other stops reads as one arrow), however short the shared stretch.
-    let seg_dist = |c: (f64, f64), (p, q): Piece| {
-        let l = dist(p, q);
-        let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
-        dist(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
-    };
     let in_line = |a: Piece, b: Piece| {
         let (la, lb) = (dist(a.0, a.1), dist(b.0, b.1));
         if la < 1.0 || lb < 1.0 {
             return false;
         }
         let sin = (((a.1 .0 - a.0 .0) * (b.1 .1 - b.0 .1) - (a.1 .1 - a.0 .1) * (b.1 .0 - b.0 .0)) / (la * lb)).abs();
-        sin < 0.17 && [seg_dist(a.0, b), seg_dist(a.1, b), seg_dist(b.0, a), seg_dist(b.1, a)].iter().any(|&d| d < 4.0)
+        sin < 0.17 && [off_piece(a.0, b), off_piece(a.1, b), off_piece(b.0, a), off_piece(b.1, a)].iter().any(|&d| d < 4.0)
     };
     let mut touching = 0;
     for (n, a) in arrows.iter().enumerate() {
@@ -6925,8 +7153,7 @@ fn untangle_cost(drawn: &[Drawn], dots: &DotLayer) -> (usize, usize) {
     let stacked = logos.iter().enumerate().filter(|&(i, a)| logos[i + 1..].iter()
         .any(|b| (a.0 - b.0).abs() < 12.0 && (a.1 - b.1).abs() < 18.0)).count();
     // A head on another arrow's hop.
-    let on_arcs = arrows.iter().filter(|a| a.tri.len() == 3 && arrows.iter()
-        .any(|b| b.tip != a.tip && b.arcs.iter().any(|&p| inside_tri(&a.tri, p) > -1.5))).count();
+    let on_arcs = head_arc_hits(drawn).map(|(i, _, _)| i).collect::<BTreeSet<_>>().len();
     let hops: usize = drawn.iter().map(|d| d.track_hops).sum();
     (marks_on_others(drawn, &dots.lanes.ends).len() + on_legs(drawn, &dots.legs).len() + on_arcs + hops + 10 * (through + touching + stacked), crossings)
 }
@@ -7198,6 +7425,7 @@ fn render_generic_arrow(
             .var(&rv_attrs::party_name(from)).to(&rv_attrs::party_name(to)).row(*line_number).attrs(),
         key: (external_event.get_id(), *line_number),
         names: (rv_attrs::party_name(from).to_string(), rv_attrs::party_name(to).to_string()),
+        columns: (from.extract_rap().map(|r| *r.hash()), to.extract_rap().map(|r| *r.hash())),
         self_right: dots.lanes.self_right.contains(&(external_event.get_id(), *line_number)),
     };
 
@@ -7479,6 +7707,7 @@ fn render_init_param_arrow(line_number: &usize, param: &ResourceAccessPoint, id:
             .var("caller").to(param.name()).row(*line_number).attrs();
         dots.lanes.capture(Drawn {
             key: (*id, *line_number), tip: title.clone(), var: "caller".into(), to: param.name().to_string(),
+            columns: (None, Some(*param.hash())),
             pieces: vec![((bend_x, top_y), (bend_x, cy)), ((bend_x, cy), (head_x, head_y))],
             tri: vec![bot_v1, bot_v2, bot_v3], logo: None, arcs: Vec::new(), track_hops: 0,
         });
@@ -7547,6 +7776,7 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
         };
         dots.lanes.capture(Drawn {
             key, tip: title.clone(), var: f.name.clone(), to: "caller".into(),
+            columns: (None, None),
             pieces: vec![((source_x, y), (bend_x, y)), ((bend_x, y), (bend_x, head_end_y))],
             tri: vec![(bend_x - 6.0, head_end_y), (bend_x, head_end_y - tip), (bend_x + 6.0, head_end_y)], logo: None, arcs: Vec::new(), track_hops: 0,
         });
@@ -7659,6 +7889,7 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             .var(rap.name()).to("caller").row(*line_number).attrs();
         dots.lanes.capture(Drawn {
             key: (*id, *line_number), tip: title.clone(), var: rap.name().to_string(), to: "caller".into(),
+            columns: (Some(*rap.hash()), None),
             pieces: vec![((source_x, cy), (bend_x, cy)), ((bend_x, cy), (bend_x, head_end_y))],
             tri: vec![head_v1, head_v2, head_v3], logo: None, arcs: Vec::new(), track_hops: 0,
         });
@@ -7843,12 +8074,19 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
                 x1, y1, x2,
                 &data.title,
                 &data.rv,
-                &dots.positions,
+                dots,
                 if x2 > x1 && head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) { head_offset + CALL_ICON_CLEARANCE } else { head_offset },
-                if matches!(external_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) { &dots.legs } else { &[] },
+                if dots.lanes.leg_turn.contains_key(&key) || matches!(external_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) {
+                    &dots.legs
+                } else {
+                    &[]
+                },
+                dots.lanes.leg_turn.get(&key).copied(),
+                dots.lanes.branch_hops.contains(&key),
             )).flatten() {
                 dots.lanes.capture(Drawn {
                     key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
+                    columns: data.columns,
                     pieces, tri, logo: None, arcs, track_hops: 0,
                 });
                 // Inline render done; push to the right
@@ -7877,7 +8115,7 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
 
 /// How far before its dot an arrow whose head comes in level
 /// (`ArrowLanes::level_in`) turns level: the head (18 px) and room before
-/// it.
+/// it. This also bounds the horizontal extent of a far-side approach.
 const LEVEL_IN_DX: i64 = 26;
 /// The slant, in degrees, of a head coming in nearly level
 /// (`level_in_ways`).
@@ -7887,9 +8125,10 @@ const LEVEL_IN_SLANT: i64 = 14;
 /// or `angle` degrees off level towards its track at `y_row`
 /// (`ArrowLanes::level_in`, #1499), head first: where its last leg starts,
 /// `LEVEL_IN_DX` px before the dot on the tail's side (`far` 1) or the
-/// other (`far` -1), and where the leg before it leaves the track, at
-/// about 56 degrees. `None` where it isn't asked for, the track is the
-/// dot's row, the legs wouldn't fit between the dot and the tail's leg,
+/// other (`far` -1), and where the leg before it leaves the track. A
+/// far-side bend keeps that leg close to the target column. `None` where
+/// it isn't asked for, the track is the dot's row, the legs wouldn't fit
+/// between the dot and the tail's leg,
 /// or they would run out of the figure on the left.
 fn level_in_bend(angle: Option<i64>, far: i64, head: (i64, i64), tail: (i64, i64), y_row: i64, d_from: i64) -> Option<[(i64, i64); 2]> {
     let ((x1, y1), (x2, _)) = (head, tail);
@@ -7904,8 +8143,8 @@ fn level_in_bend(angle: Option<i64>, far: i64, head: (i64, i64), tail: (i64, i64
     if (y_row - by).abs() < 4 {
         return None;
     }
-    let rise = ((y_row - by).abs() * 2 / 3).max(8);
-    let (bx, lx) = (x1 + dir * dx, x1 + dir * (dx + rise));
+    let track_dx = if far == -1 { LEVEL_IN_DX } else { dx + ((y_row - by).abs() * 2 / 3).max(8) };
+    let (bx, lx) = (x1 + dir * dx, x1 + dir * track_dx);
     let fits = far == -1 || (lx - x1).abs() + d_from + 4 <= (x2 - x1).abs();
     (fits && bx.min(lx) >= 12).then_some([(bx, by), (lx, y_row)])
 }
@@ -8041,6 +8280,7 @@ fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, ou
             if let Some((d, pieces, arcs, n)) = hops {
                 dots.lanes.capture(Drawn {
                     key: data.key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
+                    columns: data.columns,
                     pieces, tri: vec![v1, v2, v3], logo: None, arcs, track_hops: n,
                 });
                 let rendered = format!(
@@ -8055,7 +8295,8 @@ fn finish_arrow(mut data: ArrowData, mut head_offset: f64, from: &ResourceTy, ou
             }
             dots.lanes.capture(Drawn {
                 key: data.key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
-                pieces: data.coordinates.windows(2).map(|w| (w[1], w[0])).collect(),
+                columns: data.columns,
+                pieces: route.windows(2).map(|w| (w[0], w[1])).collect(),
                 tri: vec![v1, v2, v3], logo: None, arcs: Vec::new(), track_hops: 0,
             });
         }
@@ -8093,12 +8334,12 @@ fn file_arrow(rendered: String, from: &ResourceTy, output: &mut BTreeMap<i64, (T
 /// An arrow's route (tail first) with more than one piece, as a path
 /// whose level pieces hop over the dots on them (#1344: `match (a, (b,
 /// c))`'s `b -> x` dipping through c's dot): its `d`, its straight pieces,
-/// points along its arcs, and how many dots it hops. `None` when no such
+/// its arcs, and how many dots it hops. `None` when no such
 /// dot is in the way (a level arrow of one piece is
 /// `render_hopping_arrow`'s). A hop bulges up, or down where a dot
 /// half a row above would be under it.
-fn track_hops(route: &[(f64, f64)], dots: &DotPositions) -> Option<(String, Vec<Piece>, Vec<(f64, f64)>, usize)> {
-    const R: f64 = 10.0;
+fn track_hops(route: &[(f64, f64)], dots: &DotPositions) -> Option<(String, Vec<Piece>, Vec<Hop>, usize)> {
+    const R: f64 = HOP_RADIUS;
     if route.len() < 3 {
         return None;
     }
@@ -8126,16 +8367,13 @@ fn track_hops(route: &[(f64, f64)], dots: &DotPositions) -> Option<(String, Vec<
             let (xf, y) = (x as f64, p.1);
             let right = q.0 > p.0;
             let (near, far) = if right { (xf - R, xf + R) } else { (xf + R, xf - R) };
-            let up = !dots.contains(&(x, y as i64 - LANE_STEP)) || dots.contains(&(x, y as i64 + LANE_STEP));
+            let prefer_up = !dots.contains(&(x, y as i64 - LANE_STEP)) || dots.contains(&(x, y as i64 + LANE_STEP));
+            let up = hop_opens_up((x, y as i64), prefer_up, dots);
             // Sweep 1 turns clockwise on screen: going right, over the top.
             let sweep = if right == up { 1 } else { 0 };
             d.push_str(&format!(" L {} {} A {} {} 0 0 {} {} {}", near, y, R, R, sweep, far, y));
             pieces.push((at, (near, y)));
-            let side = if up { -1.0 } else { 1.0 };
-            arcs.extend((0..=12).map(|k| {
-                let a = std::f64::consts::PI * k as f64 / 12.0;
-                (xf - R * a.cos(), y + side * R * a.sin())
-            }));
+            arcs.push(Hop { center: (xf, y), up, right });
             at = (far, y);
             n += 1;
         }
@@ -8171,6 +8409,17 @@ fn turn_across_legs(route: &[(f64, f64)], legs: &[Piece], clearance: f64) -> Vec
         out.push(q);
     }
     out
+}
+
+/// Where a column crosses a horizontal shaft, including a leg that
+/// meets the row at its endpoint.
+fn horizontal_crossing_x((p, q): Piece, (a, b): Piece) -> Option<f64> {
+    if p.1 != q.1 || a.1 == b.1 {
+        return None;
+    }
+    let t = (p.1 - a.1) / (b.1 - a.1);
+    let x = a.0 + t * (b.0 - a.0);
+    ((0.0..=1.0).contains(&t) && p.0.min(q.0) < x && x < p.0.max(q.0)).then_some(x)
 }
 
 /// Every arrow event with the row it is drawn on, including those nested
@@ -8469,16 +8718,80 @@ fn untangle(
     for hops in [false, true] {
         dots.lanes.set(start.clone());
         dots.lanes.probe_hops = hops;
-        untangle_search(visualization_data, resource_owners_layout, dots, registry);
+        untangle_search(visualization_data, resource_owners_layout, dots, registry, MarkClearance::Shaft);
         dots.lanes.probe_hops = true;
         let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
         // (On a tie, the one with fewer heads along a column, #1488.)
-        let c = untangle_cost(&drawn, dots);
+        let c = untangle_cost(&drawn, dots, MarkClearance::Shaft);
         let geometry = visible_arrow_defects(&drawn, dots) + on_legs(&drawn, &dots.legs).len();
         results.push(((geometry, c.0, c.1, on_cols(&drawn, &dots.cols).len()), dots.lanes.settings()));
     }
     // (The first on a tie: no hops weighed.)
-    let best = results.into_iter().min_by_key(|(c, _)| *c).map(|(_, s)| s).unwrap_or(start);
+    let best = results.into_iter().min_by_key(|(c, _)| *c).map(|(_, s)| s).unwrap_or_else(|| start.clone());
+    dots.lanes.set(best);
+    let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+    let drawn = if needs_route_repair(&drawn, dots) {
+        repair_dot_routes(visualization_data, resource_owners_layout, dots, registry, &start, drawn);
+        probe_arrows(visualization_data, resource_owners_layout, dots, registry)
+    } else {
+        drawn
+    };
+    let drawn = if drawn.iter().any(|a| crosses_branches_off_row(a, dots)) {
+        repair_arrow_routes(visualization_data, resource_owners_layout, dots, registry, drawn, RouteRepair::Crossings);
+        probe_arrows(visualization_data, resource_owners_layout, dots, registry)
+    } else {
+        drawn
+    };
+    repair_arrow_routes(visualization_data, resource_owners_layout, dots, registry, drawn, RouteRepair::Heads);
+}
+
+fn repair_dot_routes(
+    visualization_data: &VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dots: &mut DotLayer,
+    registry: &Handlebars,
+    start: &LaneSettings,
+    drawn: Vec<Drawn>,
+) {
+    repair_arrow_routes(visualization_data, resource_owners_layout, dots, registry, drawn, RouteRepair::Dots);
+    let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+    let score = |d: &[Drawn], dots: &DotLayer| {
+        let gaps = dot_and_bar_hits(d, dots, MarkClearance::DotGap).into_iter().filter(|&(_, bar, _)| !bar).count();
+        let loops = d.iter().filter(|a| runs_past_ends(a, &dots.lanes.ends)).count();
+        let detours = d.iter().map(|a| high_track_length(a, &dots.lanes.ends)).sum::<f64>();
+        (gaps, loops, detours)
+    };
+    let mut quality = score(&drawn, dots);
+    if quality == (0, 0, 0.0) {
+        return;
+    }
+    // The affected arrow may need a lane already taken by another
+    // arrow. Revisit the lanes together with dot clearance in the cost.
+    let hard_hits = |d: &[Drawn], dots: &DotLayer| {
+        route_hits(d, dots, MarkClearance::DotGap).into_iter()
+            .filter(|h| !matches!(h, RouteHit::Crossing(..))).collect::<BTreeSet<_>>()
+    };
+    let mut hits = hard_hits(&drawn, dots);
+    let mut best = dots.lanes.settings();
+    for hops in [true, false] {
+        dots.lanes.set(start.clone());
+        dots.lanes.probe_hops = hops;
+        untangle_search(visualization_data, resource_owners_layout, dots, registry, MarkClearance::DotGap);
+        dots.lanes.probe_hops = true;
+        let d = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+        let candidate = score(&d, dots);
+        if candidate < quality {
+            let next = hard_hits(&d, dots);
+            if next.is_subset(&hits) {
+                best = dots.lanes.settings();
+                hits = next;
+                quality = candidate;
+            }
+        }
+        if quality == (0, 0, 0.0) {
+            break;
+        }
+    }
     dots.lanes.set(best);
 }
 
@@ -8487,24 +8800,25 @@ fn untangle_search(
     visualization_data: &VisualizationData,
     resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
     dots: &mut DotLayer,
-    registry: &Handlebars
+    registry: &Handlebars,
+    clearance: MarkClearance,
 ) {
     let mut drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
-    let tangled = !defects(&drawn, dots).is_empty();
+    let tangled = !defects(&drawn, dots, clearance).is_empty();
     if !tangled && on_cols(&drawn, &dots.cols).is_empty() {
         return;
     }
     let dot_ys = dots.positions.iter().map(|&(_, y)| y);
     let drawn_ys = drawn.iter().flat_map(|d| d.pieces.iter().flat_map(|&(p, q)| [p.1, q.1])).map(|y| y.round() as i64);
     let ys = (dots.positions.iter().map(|&(_, y)| y).min().unwrap_or(0), dot_ys.chain(drawn_ys).max().unwrap_or(0));
-    let mut cost = untangle_cost(&drawn, dots);
+    let mut cost = untangle_cost(&drawn, dots, clearance);
     // Every drawing tried costs a pass over the arrows.
     let mut budget: usize = 4000;
     let eval = |dots: &mut DotLayer, s: &LaneSettings, budget: &mut usize| {
         *budget = budget.saturating_sub(1);
         dots.lanes.set(s.clone());
         let d = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
-        (untangle_cost(&d, dots), d)
+        (untangle_cost(&d, dots, clearance), d)
     };
     let keys_of = |d: &[Drawn], (i, j): (usize, usize)| {
         let mut keys = vec![d[i].key, d[j].key];
@@ -8514,7 +8828,13 @@ fn untangle_search(
     if tangled {
         for _ in 0..24 {
             let now = dots.lanes.settings();
-            let marks = defects(&drawn, dots);
+            let marks = defects(&drawn, dots, clearance);
+            let local_keys: BTreeSet<_> = if clearance == MarkClearance::DotGap {
+                on_legs(&drawn, &dots.legs).into_iter().chain(through_marks(&drawn, dots, clearance))
+                    .map(|i| drawn[i].key).collect()
+            } else {
+                BTreeSet::new()
+            };
             // One arrow or logo drawn another way, for the first mark where
             // that helps; else two, the second for a mark the first leaves;
             // a track running on past its head's dot only where nothing else
@@ -8527,7 +8847,7 @@ fn untangle_search(
             for far in [false, true] {
                 'one: for &m in &marks {
                     for key in keys_of(&drawn, m) {
-                        for s in dots.lanes.alternatives(key, &drawn, ys, far, false) {
+                        for s in dots.lanes.repair_alternatives(key, &drawn, ys, far, local_keys.contains(&key)) {
                             let (c, d) = eval(dots, &s, &mut budget);
                             if better(c, &best) {
                                 best = Some((c, s, d));
@@ -8542,20 +8862,22 @@ fn untangle_search(
                 if best.is_some() {
                     break;
                 }
+                let local = clearance == MarkClearance::DotGap;
                 'two: for &m in &marks {
                     for key in keys_of(&drawn, m) {
-                        for s1 in dots.lanes.alternatives(key, &drawn, ys, far, false) {
+                        for s1 in dots.lanes.repair_alternatives(key, &drawn, ys, far, local) {
                             if budget == 0 {
                                 break 'two;
                             }
                             let (c1, d1) = eval(dots, &s1, &mut budget);
                             if c1.0 > cost.0 + 12 {
+                                dots.lanes.set(now.clone());
                                 continue;
                             }
-                            for m2 in defects(&d1, dots) {
+                            for m2 in defects(&d1, dots, clearance) {
                                 for key2 in keys_of(&d1, m2) {
                                     dots.lanes.set(s1.clone());
-                                    for s2 in dots.lanes.alternatives(key2, &d1, ys, far, false) {
+                                    for s2 in dots.lanes.repair_alternatives(key2, &d1, ys, far, local) {
                                         let (c, d) = eval(dots, &s2, &mut budget);
                                         if better(c, &best) {
                                             best = Some((c, s2, d));
@@ -8579,7 +8901,7 @@ fn untangle_search(
             dots.lanes.set(s);
             cost = c;
             drawn = d;
-            if budget == 0 || defects(&drawn, dots).is_empty() {
+            if budget == 0 || defects(&drawn, dots, clearance).is_empty() {
                 break;
             }
         }
@@ -8644,73 +8966,274 @@ fn untangle_search(
         if let Some((cc, s, d)) = best {
             dots.lanes.set(s);
             now_cost = cc;
-            cost = untangle_cost(&d, dots);
+            cost = untangle_cost(&d, dots, clearance);
             drawn = d;
         }
     }
-    // An arrow may still follow a fork leg when the ordinary search
-    // prefers to avoid a hop or an extra crossing. A hop already leaves
-    // the dot visible. Use the intermediate tracks if they clear the
-    // leg without covering any other marks.
-    let keys: BTreeSet<_> = on_legs(&drawn, &dots.legs).into_iter().map(|i| drawn[i].key).collect();
+    let repair = if clearance == MarkClearance::Shaft { RouteRepair::Legs } else { RouteRepair::Dots };
+    repair_arrow_routes(visualization_data, resource_owners_layout, dots, registry, drawn, repair);
+}
+
+fn needs_route_repair(drawn: &[Drawn], dots: &DotLayer) -> bool {
+    // A track may deliberately dip under its event row to fan out
+    // arrows to the same column. A long track above it warrants a try.
+    drawn.iter().any(|a| runs_past_ends(a, &dots.lanes.ends) || high_track_length(a, &dots.lanes.ends) > 0.0)
+        || dot_and_bar_hits(drawn, dots, MarkClearance::DotGap).into_iter().any(|(_, bar, _)| !bar)
+}
+
+/// The length of a full track more than half a row above its event dots.
+/// Crossing arcs can split that track into several straight pieces.
+fn high_track_length(arrow: &Drawn, ends: &Ends) -> f64 {
+    let Some(&((tx, ty), (fx, fy), _)) = ends.get(&arrow.key) else { return 0.0 };
+    if ty != fy {
+        return 0.0;
+    }
+    let above = (ty - LANE_STEP) as f64;
+    let length = arrow.pieces.iter().copied().chain(arrow.arcs.iter().map(|arc| arc.ends()))
+        .filter(|(p, q)| p.1 == q.1 && p.1 < above)
+        .map(|(p, q)| (p.0 - q.0).abs()).sum::<f64>();
+    if length > (tx - fx).abs() as f64 / 2.0 { length } else { 0.0 }
+}
+
+/// A brief approach from the far side is sometimes needed to fan out
+/// two heads. Extra coverage beyond that approach reads as a loop.
+fn runs_past_ends(arrow: &Drawn, ends: &Ends) -> bool {
+    let Some(&((tx, _), (fx, _), _)) = ends.get(&arrow.key) else { return false };
+    if tx == fx {
+        return false;
+    }
+    let (lo, hi) = ((tx.min(fx) - LEVEL_IN_DX) as f64, (tx.max(fx) + LEVEL_IN_DX) as f64);
+    arrow.pieces.iter().any(|&(p, q)| p.0.min(q.0) < lo || p.0.max(q.0) > hi)
+}
+
+/// A displaced track crossing a branch can read as part of the branch.
+/// Try putting the main track back at the height of its two event dots.
+fn crosses_branches_off_row(arrow: &Drawn, dots: &DotLayer) -> bool {
+    let Some(&((tx, ty), (fx, fy), _)) = dots.lanes.ends.get(&arrow.key) else { return false };
+    if ty != fy || tx == fx {
+        return false;
+    }
+    let row = ((fx as f64, fy as f64), (tx as f64, ty as f64));
+    let crosses = |piece, leg| horizontal_crossing_x(piece, leg).is_some();
+    let fork_on_row = dots.legs.iter().copied().any(|leg| crosses(row, leg));
+    arrow.pieces.iter().copied().filter(|piece| piece.0.1 != ty as f64 && piece.0.1 == piece.1.1)
+        .any(|piece| {
+            if fork_on_row {
+                dots.branch_stretches().any(|leg| crosses(piece, leg))
+            } else {
+                dots.legs.iter().copied().any(|leg| crosses(piece, leg))
+            }
+        })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RouteRepair { Legs, Dots, Crossings, Heads }
+
+fn repair_arrow_routes(
+    visualization_data: &VisualizationData,
+    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    dots: &mut DotLayer,
+    registry: &Handlebars,
+    mut drawn: Vec<Drawn>,
+    repair: RouteRepair,
+) {
+    let painted = repair != RouteRepair::Legs;
+    let clearance = if painted { MarkClearance::DotGap } else { MarkClearance::Head };
+    let mut keys = BTreeSet::new();
+    if matches!(repair, RouteRepair::Legs | RouteRepair::Dots) {
+        keys.extend(on_legs(&drawn, &dots.legs).into_iter().map(|i| drawn[i].key));
+    }
+    if repair == RouteRepair::Dots {
+        keys.extend(dot_and_bar_hits(&drawn, dots, clearance).into_iter()
+            .filter(|&(_, bar, _)| !bar).map(|(i, _, _)| drawn[i].key));
+        keys.extend(drawn.iter().filter(|a| high_track_length(a, &dots.lanes.ends) > 0.0
+            || runs_past_ends(a, &dots.lanes.ends)).map(|a| a.key));
+    }
+    if repair == RouteRepair::Crossings {
+        keys.extend(drawn.iter().filter(|a| crosses_branches_off_row(a, dots)).map(|a| a.key));
+    }
+    if repair == RouteRepair::Heads {
+        keys.extend(arrow_mark_hits(&drawn, &dots.lanes.ends).into_iter()
+            .filter(|&(_, _, kind)| kind == ArrowMarkHit::Head)
+            .flat_map(|(i, j, _)| [drawn[i].key, drawn[j].key]));
+    }
     if keys.is_empty() {
         return;
     }
+    let mut keys: Vec<_> = keys.into_iter().collect();
+    if repair == RouteRepair::Crossings {
+        // Overlapping tracks cannot both take the event row. Start with
+        // the wider arrow, where the detour hides more of the crossing.
+        keys.sort_by_key(|key| {
+            let ((tx, _), (fx, _), _) = dots.lanes.ends[key];
+            std::cmp::Reverse((tx - fx).abs())
+        });
+    }
+    let dot_ys = dots.positions.iter().map(|&(_, y)| y);
+    let ys = (dot_ys.clone().min().unwrap_or(0), dot_ys.chain(drawn.iter().flat_map(|d| d.pieces.iter())
+        .flat_map(|&(p, q)| [p.1, q.1]).map(|y| y.round() as i64)).max().unwrap_or(0));
+    let hi_x = dots.positions.iter().map(|&(x, _)| x as f64)
+        .chain(drawn.iter().flat_map(|d| d.pieces.iter().flat_map(|&(p, q)| [p.0, q.0])))
+        .fold(f64::NEG_INFINITY, f64::max);
+    // A later head repair can adjust a bend or move its neighbor
+    // while keeping the crossings already placed by the dot repair.
+    let arc_crossings = |drawing: &[Drawn]| {
+        drawing.iter().flat_map(|a| {
+            a.arcs.iter().map(move |arc| (a.key, arc.center.0 as i64, arc.center.1 as i64))
+        }).collect::<BTreeSet<_>>()
+    };
+    let crossings = if repair == RouteRepair::Heads { arc_crossings(&drawn) } else { BTreeSet::new() };
+    let allowed = |d: &[Drawn], ends: &Ends, loops: &BTreeSet<ArrowKey>| {
+        d.iter().flat_map(|d| d.pieces.iter().flat_map(|&(p, q)| [p.0, q.0])).all(|x| x >= 10.0 && x <= hi_x + 45.0)
+            && (crossings.is_empty() || crossings.is_subset(&arc_crossings(d)))
+            && d.iter().all(|a| !runs_past_ends(a, ends) || loops.contains(&a.key))
+    };
     let redraw = |dots: &mut DotLayer, settings: LaneSettings| {
         dots.lanes.set(settings);
         let drawn = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
-        let hits = route_hits(&drawn, dots);
+        let hits = route_hits(&drawn, dots, clearance);
         (drawn, hits)
     };
-    let mut hits = route_hits(&drawn, dots);
+    let mut hits = route_hits(&drawn, dots, clearance);
+    // One search proposes routes without track hops. Before accepting
+    // any of its proposals, check the arcs the final drawing will paint.
+    let painted_arc_hits = |dots: &mut DotLayer| {
+        dots.lanes.probe_hops = true;
+        let actual = probe_arrows(visualization_data, resource_owners_layout, dots, registry);
+        dots.lanes.probe_hops = false;
+        arc_head_route_hits(&actual).collect::<BTreeSet<_>>()
+    };
+    let mut actual_arc_hits = (!dots.lanes.probe_hops).then(|| painted_arc_hits(dots));
+    let mut arcs_are_safe = |dots: &mut DotLayer| {
+        let Some(before) = actual_arc_hits.as_mut() else { return true };
+        let after = painted_arc_hits(dots);
+        if !after.is_subset(before) {
+            return false;
+        }
+        *before = after;
+        true
+    };
     for key in keys {
-        let follows_leg = |hit: &RouteHit| matches!(hit, RouteHit::Leg(k, _) if *k == key);
-        if !hits.iter().any(follows_leg) {
+        let loops: BTreeSet<_> = drawn.iter().filter(|a| runs_past_ends(a, &dots.lanes.ends)).map(|a| a.key).collect();
+        let obstructed = |hit: &RouteHit| {
+            matches!(hit, RouteHit::Leg(k, _) if *k == key)
+                || (repair == RouteRepair::Dots && matches!(hit, RouteHit::Dot(k, _) if *k == key))
+                || (repair == RouteRepair::Heads
+                    && matches!(hit, RouteHit::Arrow((a, _), (b, _), ArrowMarkHit::Head) if *a == key || *b == key))
+        };
+        let blocked = hits.iter().any(obstructed);
+        let crossing = repair == RouteRepair::Crossings;
+        if repair != RouteRepair::Dots && !crossing && !blocked {
             continue;
         }
         let now = dots.lanes.settings();
+        let shape = |d: &[Drawn], ends: &Ends| d.iter().find(|a| a.key == key && a.logo.is_none())
+            .map_or((false, 0.0), |a| (runs_past_ends(a, ends), high_track_length(a, ends)));
+        let original_shape = shape(&drawn, &dots.lanes.ends);
+        let improves_route = |d: &[Drawn], dots: &DotLayer| {
+            if crossing {
+                d.iter().any(|a| a.key == key && !a.arcs.is_empty() && !crosses_branches_off_row(a, dots))
+            } else {
+                blocked || shape(d, &dots.lanes.ends) < original_shape
+            }
+        };
         let mut pairs = Vec::new();
-        let turns = [12, -12].map(|clearance| {
-            let mut s = now.clone();
-            s.leg_turn.insert(key, clearance);
-            s
-        });
-        for s in dots.lanes.alternatives(key, &drawn, ys, true, true).into_iter().chain(turns) {
-            let (d, candidate) = redraw(dots, s.clone());
-            if candidate.iter().any(follows_leg) || !inside(&d) {
-                continue;
+        let mut routes = Vec::new();
+        if crossing {
+            routes.extend(dots.lanes.local_routes(key).into_iter().map(|mut s| {
+                s.branch_hops.insert(key);
+                s
+            }));
+        } else if painted {
+            routes.extend(dots.lanes.local_routes(key));
+            if let Some(&y) = now.lane_y.get(&key).filter(|_| blocked) {
+                // A close pass can need only a pixel or two of extra
+                // space. Keep the same bends and move the track first.
+                for offset in [-1, 1, -2, 2, -3, 3] {
+                    if (ys.0..=ys.1).contains(&(y + offset)) {
+                        let mut s = now.clone();
+                        s.lane_y.insert(key, y + offset);
+                        routes.push(s);
+                    }
+                }
             }
-            if candidate.is_subset(&hits) {
-                hits = candidate;
-                drawn = d;
-                break;
+            for s in dots.lanes.alternatives(key, &drawn, ys, false, false).into_iter().filter(|s| !s.far.contains(&key)) {
+                routes.push(s.clone());
+                routes.extend(s.with_local_turns(key));
             }
-            if let Some(other) = single_route_blocker(&hits, &candidate, key) {
-                pairs.push((s, d, other));
+            if blocked {
+                routes.extend(now.with_local_turns(key));
             }
         }
-        if !hits.iter().any(follows_leg) {
+        if blocked && !crossing {
+            routes.extend(dots.lanes.alternatives(key, &drawn, ys, true, true));
+        }
+        if !painted {
+            routes.extend(now.with_local_turns(key));
+        }
+        let mut accepted = false;
+        for s in routes {
+            let (d, candidate) = redraw(dots, s.clone());
+            if candidate.iter().any(obstructed) || !allowed(&d, &dots.lanes.ends, &loops)
+                || !improves_route(&d, dots) {
+                continue;
+            }
+            if candidate.is_subset(&hits) && arcs_are_safe(dots) {
+                hits = candidate;
+                drawn = d;
+                accepted = true;
+                break;
+            }
+            let can_move = |other: &ArrowKey| {
+                if now.branch_hops.contains(other) {
+                    return false;
+                }
+                if crossing {
+                    // A return dips off the row when its borrow traces
+                    // the same span in reverse (#710). Keep that order.
+                    let (target, source, _) = dots.lanes.ends[&key];
+                    if dots.lanes.ends.get(other).is_some_and(|&(t, s, _)| t == source && s == target) {
+                        return false;
+                    }
+                }
+                true
+            };
+            if let Some(other) = single_route_blocker(&hits, &candidate, key).filter(can_move) {
+                let arc_blocker = candidate.difference(&hits).any(|h| matches!(h, RouteHit::ArcHead(_, _, _)));
+                pairs.push((s, d, other, arc_blocker));
+            }
+        }
+        if accepted {
             continue;
         }
         // A borrow and its return can share both dots. Try moving the
         // blocking arrow too when it is the only mark in the way.
         let mut remaining = 400;
-        'pair: for (s, d, other) in pairs {
+        'pair: for (s, d, other, arc_blocker) in pairs {
             dots.lanes.set(s);
-            for s in dots.lanes.alternatives(other, &d, ys, true, false) {
+            let mut alternatives = dots.lanes.repair_alternatives(other, &d, ys, true, true);
+            if arc_blocker {
+                // The half-row tracks can already be occupied. The
+                // blocker may need an intermediate track to avoid
+                // hopping through the other arrow's new head.
+                alternatives.extend(dots.lanes.alternatives(other, &d, ys, false, true));
+            }
+            for s in alternatives {
                 if remaining == 0 {
                     break 'pair;
                 }
                 remaining -= 1;
                 let (d, candidate) = redraw(dots, s);
-                if !candidate.iter().any(follows_leg) && candidate.is_subset(&hits) && inside(&d) {
+                if !candidate.iter().any(obstructed) && candidate.is_subset(&hits)
+                    && allowed(&d, &dots.lanes.ends, &loops) && improves_route(&d, dots) && arcs_are_safe(dots) {
                     hits = candidate;
                     drawn = d;
+                    accepted = true;
                     break 'pair;
                 }
             }
         }
-        if hits.iter().any(follows_leg) {
+        if !accepted {
             dots.lanes.set(now);
         }
     }
@@ -8721,6 +9244,7 @@ type ArrowMark = (ArrowKey, bool);
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum RouteHit {
     Arrow(ArrowMark, ArrowMark, ArrowMarkHit),
+    ArcHead(ArrowKey, ArrowKey, (i64, i64)),
     EndToEnd(ArrowKey, ArrowKey),
     Crossing(ArrowKey, ArrowKey, usize),
     Dot(ArrowKey, usize),
@@ -8733,7 +9257,8 @@ enum RouteHit {
 fn single_route_blocker(before: &BTreeSet<RouteHit>, after: &BTreeSet<RouteHit>, key: ArrowKey) -> Option<ArrowKey> {
     let mut partners = after.difference(before).map(|hit| {
         let (a, b) = match *hit {
-            RouteHit::Arrow((a, _), (b, _), _) | RouteHit::Crossing(a, b, _) | RouteHit::EndToEnd(a, b) => (a, b),
+            RouteHit::Arrow((a, _), (b, _), _) | RouteHit::ArcHead(a, b, _)
+            | RouteHit::Crossing(a, b, _) | RouteHit::EndToEnd(a, b) => (a, b),
             _ => return None,
         };
         if a == key { Some(b) } else if b == key { Some(a) } else { None }
@@ -8742,16 +9267,23 @@ fn single_route_blocker(before: &BTreeSet<RouteHit>, after: &BTreeSet<RouteHit>,
     (other != key && partners.all(|p| p == Some(other))).then_some(other)
 }
 
+fn arc_head_route_hits(drawn: &[Drawn]) -> impl Iterator<Item = RouteHit> + '_ {
+    head_arc_hits(drawn).map(move |(i, j, arc)| {
+        RouteHit::ArcHead(drawn[i].key, drawn[j].key, (arc.center.0 as i64, arc.center.1 as i64))
+    })
+}
+
 /// Each obstruction keeps the identities of the marks that meet. Clearing
 /// one of them cannot pay for introducing another, even of the same kind.
-fn route_hits(drawn: &[Drawn], dots: &DotLayer) -> BTreeSet<RouteHit> {
+fn route_hits(drawn: &[Drawn], dots: &DotLayer, clearance: MarkClearance) -> BTreeSet<RouteHit> {
     let mark = |i: usize| (drawn[i].key, drawn[i].logo.is_some());
     let mut hits = BTreeSet::new();
     hits.extend(arrow_mark_hits(drawn, &dots.lanes.ends).into_iter()
         .map(|(i, j, kind)| RouteHit::Arrow(mark(i), mark(j), kind)));
+    hits.extend(arc_head_route_hits(drawn));
     hits.extend(end_to_end(drawn, &dots.lanes.ends).into_iter()
         .map(|(i, j)| RouteHit::EndToEnd(drawn[i].key, drawn[j].key)));
-    hits.extend(dot_and_bar_hits(drawn, &dots.positions, &dots.bars, true).into_iter()
+    hits.extend(dot_and_bar_hits(drawn, dots, clearance).into_iter()
         .map(|(i, bar, m)| if bar { RouteHit::StopBar(drawn[i].key, m) } else { RouteHit::Dot(drawn[i].key, m) }));
     hits.extend(leg_hits(drawn, &dots.legs).into_iter().map(|(i, m)| RouteHit::Leg(drawn[i].key, m)));
     hits.extend(leg_hits(drawn, &dots.cols).into_iter().map(|(i, m)| RouteHit::Column(drawn[i].key, m)));
@@ -8769,7 +9301,7 @@ fn route_hits(drawn: &[Drawn], dots: &DotLayer) -> BTreeSet<RouteHit> {
 
 fn visible_arrow_defects(drawn: &[Drawn], dots: &DotLayer) -> usize {
     marks_on_others(drawn, &dots.lanes.ends).len()
-        + through_marks(drawn, &dots.positions, &dots.bars).len()
+        + through_marks(drawn, dots, MarkClearance::Shaft).len()
         + end_to_end(drawn, &dots.lanes.ends).len()
         + on_cols(drawn, &dots.cols).len()
 }
@@ -9847,7 +10379,9 @@ fn render_branches(
             bars.legs.extend(segs.iter().filter(|seg| (seg.p1.0 - seg.p2.0).abs() > 0.5).map(|seg| (seg.p1, seg.p2)));
             // And its vertical stretches: a head coming steeply into a dot
             // along one hides it (#1488).
-            bars.cols.extend(segs.iter().filter(|seg| (seg.p1.0 - seg.p2.0).abs() <= 0.5).map(|seg| (seg.p1, seg.p2)));
+            let cols = segs.iter().filter(|seg| (seg.p1.0 - seg.p2.0).abs() <= 0.5).map(|seg| (seg.p1, seg.p2));
+            bars.cols.extend(cols.clone());
+            bars.branch_cols.extend(cols);
 
             // `data-arm-rows`: the first and last row of those lines (the
             // corpus tests check hover against it).
@@ -12759,8 +13293,8 @@ mod tests {
         };
         assert_eq!(visible_arrow_defects(std::slice::from_ref(&before), &dots),
             visible_arrow_defects(std::slice::from_ref(&after), &dots));
-        let before = route_hits(&[before], &dots);
-        let after = route_hits(&[after], &dots);
+        let before = route_hits(&[before], &dots, MarkClearance::DotGap);
+        let after = route_hits(&[after], &dots, MarkClearance::DotGap);
         assert!(before.contains(&RouteHit::Leg(key, 0)));
         assert!(!after.contains(&RouteHit::Leg(key, 0)));
         assert!(!after.is_subset(&before));
@@ -12778,16 +13312,114 @@ mod tests {
             positions: BTreeSet::from([(39, 20)]), bars: vec![(40.0, 22.0)],
             ..Default::default()
         };
-        let hits = route_hits(&[arrow], &dots);
+        let hits = route_hits(&[arrow], &dots, MarkClearance::DotGap);
         assert!(hits.contains(&RouteHit::Dot(key, 0)));
         assert!(hits.contains(&RouteHit::StopBar(key, 0)));
+    }
+
+    #[test]
+    fn a_shadowed_binding_is_its_arrows_own_endpoint() {
+        let mut dots = DotLayer::default();
+        let mut column = arm(Vec::new()).t_data;
+        column.name = format!("x{}", crate::expr_visitor_utils::SCOPE_MARK);
+        dots.add_event(2, 20, 30, &column, String::new(), false, None, "static_lend", 1);
+        let mut a = Drawn {
+            var: "x".into(), columns: (Some(2), None),
+            pieces: vec![((25.25, 30.0), (60.0, 30.0))],
+            ..Default::default()
+        };
+        assert!(dot_and_bar_hits(std::slice::from_ref(&a), &dots, MarkClearance::DotGap).is_empty());
+        a.columns.0 = Some(1);
+        assert_eq!(dot_and_bar_hits(&[a], &dots, MarkClearance::DotGap), vec![(0, false, 0)]);
+    }
+
+    #[test]
+    fn routing_counts_the_dots_stroke() {
+        let arrow = Drawn {
+            pieces: vec![((10.0, 20.25), (50.0, 20.25))],
+            ..Default::default()
+        };
+        let dots = DotLayer { positions: BTreeSet::from([(30, 29)]), ..Default::default() };
+        assert_eq!(dot_and_bar_hits(&[arrow], &dots, MarkClearance::DotGap), vec![(0, false, 0)]);
+    }
+
+    #[test]
+    fn routing_counts_the_painted_corner_of_a_bend() {
+        let arrow = Drawn {
+            pieces: vec![((15.0, 20.0), (40.0, 20.0)), ((40.0, 20.0), (40.0, 40.0))],
+            ..Default::default()
+        };
+        // Both centerlines are sqrt(85) away. The miter at (42.5, 17.5)
+        // passes within sqrt(32.5) of the dot, leaving less than 1 px.
+        let dots = DotLayer { positions: BTreeSet::from([(46, 13)]), ..Default::default() };
+        assert_eq!(dot_and_bar_hits(&[arrow], &dots, MarkClearance::DotGap), vec![(0, false, 0)]);
+    }
+
+    #[test]
+    fn a_head_corner_can_crowd_a_dot_over_twenty_pixels_from_the_tip() {
+        let arrow = Drawn {
+            tri: vec![(30.4, 14.5), (43.15, 20.5), (30.4, 26.5)],
+            ..Default::default()
+        };
+        let dots = DotLayer { positions: BTreeSet::from([(25, 12)]), ..Default::default() };
+        assert_eq!(dot_and_bar_hits(&[arrow], &dots, MarkClearance::DotGap), vec![(0, false, 0)]);
+    }
+
+    #[test]
+    fn high_tracks_need_repair_even_without_dot_hits() {
+        let key = (1, 1);
+        let mut dots = DotLayer::default();
+        dots.lanes.ends.insert(key, ((100, 80), (0, 80), 80));
+        let mut arrow = Drawn { key, pieces: vec![((24.0, 40.0), (76.0, 40.0))], ..Default::default() };
+        assert!(needs_route_repair(std::slice::from_ref(&arrow), &dots));
+
+        dots.positions.insert((50, 40));
+        let (_, pieces, arcs, _) = track_hops(&[(0.0, 80.0), (24.0, 40.0), (76.0, 40.0), (100.0, 80.0)], &dots.positions).unwrap();
+        arrow.pieces = pieces;
+        arrow.arcs = arcs;
+        let drawing = [arrow];
+        assert!(dot_and_bar_hits(&drawing, &dots, MarkClearance::DotGap).is_empty());
+        assert_eq!(high_track_length(&drawing[0], &dots.lanes.ends), 52.0);
+        assert!(needs_route_repair(&drawing, &dots));
+    }
+
+    #[test]
+    fn a_repair_cannot_put_a_crossing_arc_through_another_head() {
+        let dots = DotLayer::default();
+        let head = Drawn {
+            key: (1, 1), tip: "head".into(),
+            tri: vec![(55.0, 37.0), (43.0, 40.0), (55.0, 43.0)],
+            ..Default::default()
+        };
+        let route = [(15.0, 52.0), (25.0, 50.0), (75.0, 50.0)];
+        let (_, pieces, arcs, _) = track_hops(&route, &BTreeSet::from([(50, 50)])).unwrap();
+        let shaft = Drawn { key: (2, 2), tip: "hop".into(), pieces, ..Default::default() };
+        let before = route_hits(&[head.clone(), shaft.clone()], &dots, MarkClearance::DotGap);
+        let after = route_hits(&[head, Drawn { arcs, ..shaft }], &dots, MarkClearance::DotGap);
+        assert!(!after.is_subset(&before));
+        assert_eq!(single_route_blocker(&before, &after, (2, 2)), Some((1, 1)));
+    }
+
+    #[test]
+    fn both_arrows_in_a_pair_can_take_a_local_bend() {
+        let mut lanes = ArrowLanes::default();
+        let (a, b) = ((1, 1), (2, 1));
+        lanes.ends.insert(a, ((200, 80), (20, 80), 80));
+        lanes.ends.insert(b, ((20, 80), (200, 80), 80));
+        let first = lanes.repair_alternatives(a, &[], (20, 120), false, true).into_iter()
+            .find(|s| s.leg_turn.get(&a) == Some(&12)).unwrap();
+        lanes.set(first);
+        for far in [false, true] {
+            assert!(lanes.repair_alternatives(b, &[], (20, 120), far, true).iter()
+                .any(|s| s.leg_turn.get(&a) == Some(&12) && s.leg_turn.get(&b) == Some(&-12)));
+        }
     }
 
     #[test]
     fn fallback_checks_for_a_crossing_with_the_other_arrow() {
         let a = Drawn { key: (1, 1), pieces: vec![((0.0, 15.0), (40.0, 15.0))], ..Default::default() };
         let b = Drawn { key: (2, 2), pieces: vec![((20.0, 0.0), (20.0, 30.0))], ..Default::default() };
-        assert!(route_hits(&[a, b], &DotLayer::default()).contains(&RouteHit::Crossing((1, 1), (2, 2), 0)));
+        assert!(route_hits(&[a, b], &DotLayer::default(), MarkClearance::DotGap).contains(&RouteHit::Crossing((1, 1), (2, 2), 0)));
     }
 
     /// #1468: a level return on the track half a row below its dots, and
@@ -12839,8 +13471,8 @@ mod tests {
     fn level_in_bends() {
         // Head at (340, 1115), tail right of it at (960, 1115), track a
         // row below: from past the dot, level, then 14 degrees off level.
-        assert_eq!(level_in_bend(Some(0), -1, (340, 1115), (960, 1115), 1145, 20), Some([(314, 1115), (294, 1145)]));
-        assert_eq!(level_in_bend(Some(14), -1, (340, 1115), (960, 1115), 1145, 20), Some([(315, 1121), (299, 1145)]));
+        assert_eq!(level_in_bend(Some(0), -1, (340, 1115), (960, 1115), 1145, 20), Some([(314, 1115), (314, 1145)]));
+        assert_eq!(level_in_bend(Some(14), -1, (340, 1115), (960, 1115), 1145, 20), Some([(315, 1121), (314, 1145)]));
         // On the tail's side; not asked for; out of the figure.
         assert_eq!(level_in_bend(Some(0), 1, (340, 1115), (960, 1115), 1145, 20), Some([(366, 1115), (386, 1145)]));
         assert_eq!(level_in_bend(None, 1, (340, 1115), (960, 1115), 1145, 20), None);
