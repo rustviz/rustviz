@@ -2752,16 +2752,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 continue;
             }
             let line = cx.row_of(*e);
-            let data = &body.basic_blocks[e.block];
-            let succs: Vec<Location> = if e.statement_index < data.statements.len() {
-                vec![e.successor_within_block()]
-            } else {
-                data.terminator()
-                    .successors()
-                    .filter(|s| !body.basic_blocks[*s].is_cleanup && !is_unreachable(body, *s))
-                    .map(|s| Location { block: s, statement_index: 0 })
-                    .collect()
-            };
+            let succs = cx.r.real_succs(*e);
             let later: Vec<Location> = succs.iter().copied().filter(|s| cx.row_of(*s) > line).collect();
             let at = if later.is_empty() { succs } else { later };
             inscope.seek_after_primary_effect(*e);
@@ -2889,23 +2880,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         if let Some(t) = table {
             let known: BTreeSet<usize> = loans.iter().map(|l| l.loan).collect();
             let mut holds: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
-            // Successors on code that runs: not cleanup, an unreachable
-            // block, or a `match`'s imaginary edge.
-            let succs_of = |l: Location| -> Vec<Location> {
-                let data = &body.basic_blocks[l.block];
-                if l.statement_index < data.statements.len() {
-                    return vec![l.successor_within_block()];
-                }
-                let targets: Vec<rustc_middle::mir::BasicBlock> = match &data.terminator().kind {
-                    TerminatorKind::FalseEdge { real_target, .. } | TerminatorKind::FalseUnwind { real_target, .. } => vec![*real_target],
-                    _ => data.terminator().successors().collect(),
-                };
-                targets
-                    .into_iter()
-                    .filter(|s| !body.basic_blocks[*s].is_cleanup && !is_unreachable(body, *s))
-                    .map(|s| Location { block: s, statement_index: 0 })
-                    .collect()
-            };
             // A block more than one way of code that runs comes into (a
             // join).
             let preds = body.basic_blocks.predecessors();
@@ -2914,7 +2888,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     .iter()
                     .filter(|p| {
                         let end = Location { block: **p, statement_index: body.basic_blocks[**p].statements.len() };
-                        !body.basic_blocks[**p].is_cleanup && succs_of(end).iter().any(|s| s.block == bb)
+                        !body.basic_blocks[**p].is_cleanup && cx.r.real_succs(end).iter().any(|s| s.block == bb)
                     })
                     .count()
                     > 1
@@ -2945,7 +2919,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         }
                     }
                     let last = frozen.unwrap_or_else(|| t.mid_index(l));
-                    let next = succs_of(l);
+                    let next = cx.r.real_succs(l);
                     if next.is_empty() {
                         legs.push((last, frozen.is_some(), None));
                     }
@@ -3064,7 +3038,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if let [exit] = exits.as_slice() {
                 if let [next] = cx.r.real_succs(*exit).as_slice() {
                     let next_line = cx.row_of(*next);
-                    if next_line > line + 1 && (next.block == exit.block || body.basic_blocks.predecessors()[next.block].len() == 1) {
+                    if next_line > line && (next.block == exit.block || body.basic_blocks.predecessors()[next.block].len() == 1) {
                         row.continues_to = Some(next_line);
                     }
                 }

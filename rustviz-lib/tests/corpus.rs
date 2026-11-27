@@ -30173,6 +30173,30 @@ fn loop_iterator_keeps_its_lender_borrowed_to_the_loop_end() {
     }
 }
 
+/// The shared borrow starts when the iterator is made and is still live
+/// after the element's last use in the body (rustc reports E0502 there).
+#[test]
+fn nested_for_names_the_iterator_on_the_header_and_body() {
+    let rv = run_with_local_backend("if_branch_nested_decls");
+    let svg = rv.timeline_panel_string();
+    let titles: Vec<_> = start_tags(&svg, "polygon").into_iter().filter(|tag| {
+        attr(tag, "data-rv-kind") == Some("branch_line") && attr(tag, "data-rv-var") == Some("v")
+    }).collect();
+    for row in [10, 11] {
+        let covering: Vec<_> = titles.iter().copied().filter(|tag| {
+            let number = |key| attr(tag, key).and_then(|n| n.parse::<usize>().ok());
+            number("data-rv-line").is_some_and(|start| start <= row)
+                && number("data-rv-line-end").is_some_and(|end| row < end)
+                && attr(tag, "data-rv-state") == Some("partial_privilege")
+        }).flat_map(timeline_tooltips).collect();
+        assert_eq!(
+            covering,
+            ["v's resource is being shared by one or more variables. The `for` loop's iterator holds a shared borrow"],
+            "v's shared segment after source row {row}",
+        );
+    }
+}
+
 /// #885: with a head written `&v` / `&mut v` that no loop variable
 /// borrows from (`for &y in &v` copies each element, `for _ in &v` binds
 /// nothing), the loop's iterator still borrows v until the loop ends:
