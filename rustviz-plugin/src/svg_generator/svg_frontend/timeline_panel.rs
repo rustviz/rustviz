@@ -2755,6 +2755,10 @@ fn render_dot(
                             && borrow_result_may_be_none(&visualization_data.external_events, event.get_id());
                         data.title = event.print_message_with_option_type(&mut name, may_be_none);
                     }
+                    if let (Event::Acquire { .. }, Some((slot, target))) =
+                        (event, visualization_data.row_layout.retained_references.get(&event.get_id())) {
+                        data.title.push_str(&format!(". {} keeps its reference to {}", styled_name_html(slot), styled_name_html(target)));
+                    }
                     // One of several `break` values reaching the loop's
                     // receiver: it happened only if that `break` ended
                     // the loop (#561).
@@ -6901,7 +6905,10 @@ fn render_generic_arrow(
     let option_ref = matches!(external_event, ExternalEvent::StaticBorrow { via: Some(_), .. } | ExternalEvent::MutableBorrow { via: Some(_), .. })
         && to.extract_rap().is_some_and(|rap| option_ref_copy(visualization_data, rap.hash(), rap.name(), Some(*line_number)).is_some());
     let mut title = match visualization_data.field_lenders.get(&external_event.get_id()) {
-        Some(f) => hover_messages::arrow_field_lenders_title(external_event, from, to, &f.lenders, f.end, option_ref),
+        Some(f) => {
+            let previous = visualization_data.row_layout.field_generations.get(&external_event.get_id()).is_some_and(|g| g.replaced);
+            hover_messages::arrow_field_lenders_title(external_event, from, to, f, previous, option_ref)
+        }
         None => hover_messages::arrow_full_title(external_event, from, to, option_ref),
     };
 

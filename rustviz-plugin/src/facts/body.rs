@@ -59,6 +59,56 @@ fn after_call<'tcx>(body: &Body<'tcx>, loc: Location, predicate: impl Fn(&Operan
     false
 }
 
+impl BodyFacts {
+    /// For a store through two references, follow the reaching MIR values
+    /// back to the two address-of operations. A join, call, or intervening
+    /// indirect store can change the referent; leave its name out then.
+    pub(crate) fn reference_slot_write(&self, body: &Body<'_>, at: Location) -> Option<(String, String)> {
+        let mut block = at.block;
+        let mut index = at.statement_index;
+        let StatementKind::Assign(write) = &body.basic_blocks[block].statements.get(index)?.kind else { return None };
+        if write.0.projection.as_slice() != [ProjectionElem::Deref, ProjectionElem::Deref] { return None; }
+        let mut local = write.0.local;
+        let mut slot = None;
+        let mut seen = BTreeSet::new();
+        while seen.insert(block) {
+            for stmt in body.basic_blocks[block].statements[..index].iter().rev() {
+                match &stmt.kind {
+                    StatementKind::Assign(assign) => {
+                        let (dst, rhs) = &**assign;
+                        if dst.is_indirect() { return None; }
+                        if dst.local != local { continue; }
+                        if !dst.projection.is_empty() { return None; }
+                        local = match rhs {
+                            Rvalue::Use(Operand::Move(p) | Operand::Copy(p)) => p.as_local()?,
+                            Rvalue::Ref(_, _, p) => {
+                                let borrowed = p.as_local()?;
+                                let name = &self.vars.iter().find(|v| v.local == borrowed.index() && v.capture.is_none())?.name;
+                                if let Some(slot) = slot { return Some((slot, name.clone())); }
+                                slot = Some(name.clone());
+                                borrowed
+                            }
+                            _ => return None,
+                        };
+                    }
+                    StatementKind::StorageLive(_) | StatementKind::StorageDead(_) |
+                    StatementKind::PlaceMention(_) | StatementKind::FakeRead(_) |
+                    StatementKind::AscribeUserType(..) | StatementKind::Nop => {}
+                    _ => return None,
+                }
+            }
+            let &[pred] = body.basic_blocks.predecessors()[block].as_slice() else { return None };
+            let data = &body.basic_blocks[pred];
+            if !matches!(data.terminator().kind, TerminatorKind::Goto { target } | TerminatorKind::Assert { target, .. } if target == block) {
+                return None;
+            }
+            block = pred;
+            index = data.statements.len();
+        }
+        None
+    }
+}
+
 /// A staged operand is destroyed on the early-return edge of `?` when
 /// the residual conversion dominates the drop of that exact MIR temporary.
 pub(crate) fn dropped_on_residual<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, facts: &BodyFacts, assignment: Location) -> bool {

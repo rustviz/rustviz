@@ -4102,6 +4102,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     fates
   }
 
+  pub(crate) fn note_reference_slot_write(&mut self, span: rustc_span::Span, lhs: &ResourceTy) {
+    let ResourceTy::DerefField(_, place, ..) = lhs else { return };
+    let Some(effects) = self.effects.get(&span.with_parent(None)) else { return };
+    let mut writes = effects.iter().filter(|(_, e)| matches!(&e.fact, crate::facts::Fact::Init { path, .. } if path == place));
+    let Some((_, write)) = writes.next().filter(|_| writes.next().is_none()) else { return };
+    if let Some(names) = self.body_facts.and_then(|f| f.reference_slot_write(self.mir_body, write.location)) {
+      self.row_layout.retained_references.insert(*self.unique_id, names);
+    }
+  }
+
   fn nested_reference_place(&self, expr: &Expr<'_>, write: bool) -> Option<ResourceTy> {
     use crate::facts::Fact;
     // Box payloads and ordinary field writes have their own drop events.

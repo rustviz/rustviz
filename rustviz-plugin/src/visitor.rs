@@ -5747,6 +5747,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               other => other,
             };
             self.write_field_behind_ref(&lhs_rty, lhs_expr, line_num);
+            self.note_reference_slot_write(expr.span, &lhs_rty);
             self.add_ev(line_num, Evt::Bind, lhs_rty.clone(), ResourceTy::Anonymous, false);
             self.write_part_behind_ref_update(&lhs_rty, lhs_expr, line_num);
           }

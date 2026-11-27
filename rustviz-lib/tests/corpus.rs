@@ -41193,15 +41193,25 @@ fn mir_review_distinct_field_stores_preserve_old_loan() {
     // borrowck still rejects a write to s, including on the line's hover.
     let middle = (writes[0].1 + writes[1].1) as f64 / 2.0;
     let doc = roxmltree::Document::parse(&svg).unwrap();
-    let shared = doc.descendants().filter(|n| n.attribute("data-rv-var") == Some("s")
-        && n.attribute("data-rv-kind") == Some("line")).any(|n| {
-        n.attribute("data-tooltip-text").is_some_and(|tip| tip.contains("being shared")) &&
-            n.descendants().any(|stroke| {
+    // Expose the statement boundary to the rustc oracle. The original
+    // one-line fixture has only an after-both-stores snapshot.
+    let source = read_corpus("rv3_issues/1718_field_two_writes_one_line")
+        .replace("h.r = &t; h.r = &u;", "h.r = &t;\n    h.r = &u;");
+    let states = common::oracle::derive_states(&source, &[], &[]).unwrap();
+    for lender in ["s", "t"] {
+        for (line, expected) in [(6, "shared"), (7, "own")] {
+            assert!(states.iter().any(|state| state.func == "run" && state.line == line
+                && state.place == lender && state.is == expected), "{lender} after {line}: {states:?}");
+        }
+        let mut segments = doc.descendants().filter(|n| n.attribute("data-rv-var") == Some(lender)
+            && n.attribute("data-rv-kind") == Some("line") && n.descendants().any(|stroke| {
                 let y = |attr| stroke.attribute(attr).and_then(|s| s.parse::<f64>().ok());
                 y("y1").zip(y("y2")).is_some_and(|(lo, hi)| lo < middle && middle < hi)
-            })
-    });
-    assert!(shared, "s must remain shared between the two stores");
+            })).peekable();
+        assert!(segments.peek().is_some(), "{lender} has no segment between the stores");
+        assert!(segments.all(|n| n.attribute("data-tooltip-text").is_some_and(|tip| tip.contains("being shared"))),
+            "{lender} must remain shared between the two stores");
+    }
     assert!(drawn_clauses(&svg, "h.r", "6").iter().any(|(_, _, t)|t.contains("borrow of s or t ends")));
 }
 
@@ -41478,7 +41488,7 @@ fn inline_match_lends_the_reference_on_the_scrutinee_row_1638() {
     }
     let tips = timeline_tooltips(&tl);
     for (want, wrong) in [
-        ("the value at **s is modified", "the value s points to is modified through *s"),
+        ("the value at **s is modified. r keeps its reference to n", "the value s points to is modified through *s"),
         ("**shared's value is copied", "*shared's value is copied"),
         ("the value at **field is modified", "the value field points to is modified through *field"),
     ] {
@@ -41528,13 +41538,21 @@ fn review_stored_loans_at_arm_entry() {
 #[test]
 fn review_match_reference_slot_access() {
     for (fixture, want, wrong) in [
-        ("1638_match_mut_ref_of_ref_var", "the value at **s is modified", "the value s points to is modified through *s"),
+        ("1638_match_mut_ref_of_ref_var", "the value at **s is modified. r keeps its reference to n", "the value s points to is modified through *s"),
         ("1638_match_mut_ref_of_ref_var_b", "the value *s points to is immutably borrowed by println!", "the value s points to is immutably borrowed by println!"),
     ] {
         let svg = render_cell(&format!("rv3_issues/{fixture}")).unwrap().timeline_panel_string();
         let tip = tooltip_of_id(&svg, "s@L5:dot:").unwrap();
         assert!(!tip.contains(wrong) && tip.contains(want), "{fixture}: {tip}");
     }
+    // A write through *s can replace r's reference before the write
+    // through **s. The original initializer no longer identifies its target.
+    let repointed = read_corpus("rv3_issues/1638_match_mut_ref_of_ref_var")
+        .replace("let mut n = 0;", "let mut n = 0; let mut other = 0;")
+        .replace("s => **s += 1,", "s => { *s = &mut other; **s += 1; }");
+    let svg = Rustviz::new(&repointed).unwrap().timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "s@L5:dot:mutable_borrow+acquire").unwrap();
+    assert!(tip.contains("the value at **s is modified") && !tip.contains("keeps its reference to n"), "{tip}");
 }
 
 #[test]
@@ -41551,19 +41569,30 @@ fn review_reference_slot_still_holds_a_mutable_reference() {
 #[test]
 fn review_named_sequential_field_ends() {
     let svg = render_cell("rv3_issues/1718_field_two_writes_one_line").unwrap().timeline_panel_string();
-    let doc = roxmltree::Document::parse(&svg).unwrap();
-    let dots = doc.descendants().filter_map(|n| n.attribute("data-rv-id")).filter(|id| id.starts_with("h.r@L6:dot:"))
-        .map(|id| tooltip_of_id(&svg, &format!("{id}\"")).unwrap()).collect::<Vec<_>>().join(" ");
-    assert!(!dots.contains("borrow of u or t ends") && !dots.contains("borrow of t or u ends"), "{dots}");
-    let y = |title: &str| {
-        let xy = dots_listing_tooltip(&svg, title);
-        assert_eq!(xy.len(), 1, "{title}: {xy:?}");
-        xy[0].1
-    };
-    let borrows = dots_listing_tooltip(&svg, "h.r immutably borrows a resource");
-    let t = y("h.r's immutable borrow of t ends");
-    let u = y("h.r's immutable borrow of u ends");
-    assert!(borrows.iter().any(|&(_, row)| t < row && row < u), "{dots}");
+    let dots = drawn_clauses(&svg, "h.r", "6");
+    let borrows: Vec<_> = dots.iter().filter(|(_, _, t)| t == "h.r immutably borrows a resource").collect();
+    assert_eq!(borrows.len(), 2, "{dots:?}");
+    let second_store = borrows[1].1;
+    assert!(borrows[0].1 < second_store);
+    for (store, lender) in borrows.iter().zip(["t", "u"]) {
+        let lender_dots = drawn_clauses(&svg, lender, "6");
+        assert!(lender_dots.iter().any(|(_, y, tip)| *y == store.1 && tip.contains("immutably borrowed by h.r")),
+            "{lender}: {lender_dots:?}");
+        assert!(!lender_dots.iter().any(|(_, y, tip)| *y <= second_store && tip.contains("no longer immutably borrowed")),
+            "{lender}: {lender_dots:?}");
+    }
+    // No old or new loan is returned before the final store. The two
+    // call arguments are alternatives for only the original field value.
+    assert!(!dots.iter().any(|(_, y, t)| *y <= second_store && t.contains("borrow") && t.contains("ends")), "{dots:?}");
+    let ends: Vec<_> = dots.iter().filter(|(_, _, t)| t.contains("borrow") && t.contains("ends"))
+        .map(|(_, _, t)| t.as_str()).collect();
+    assert_eq!(ends.len(), 3, "{ends:?}");
+    for expected in ["h.r's immutable borrow of s or t ends", "h.r's immutable borrow of t ends", "h.r's immutable borrow of u ends"] {
+        assert!(ends.contains(&expected), "{ends:?}");
+    }
+    let arrow = tooltip_of_id(&svg, "h.r>s@L6:arrow:static_die").unwrap();
+    assert!(!arrow.contains("h.r may point into either"), "{arrow}");
+    assert!(arrow.contains("The earlier reference in h.r could point into either. Its borrow of both ends here"), "{arrow}");
 }
 
 #[test]

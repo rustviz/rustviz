@@ -702,34 +702,51 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let mut writes = BTreeMap::<_, Vec<_>>::new();
       for e in &row.facts {
         if let Fact::Repoint { holder, new, reaching: Some(old), .. } = &e.fact {
-          writes.entry(holder).or_default().push((e.location, new, old));
+          writes.entry(holder).or_default().push((e, new, old));
         }
       }
       for (holder, stores) in writes {
         // Require both execution order and reaching definitions. Two stores
         // in different arms can have the same source row and the same slot.
         if stores.len() < 2 || !stores.windows(2).all(|w|
-          dominates(&self.bwf.body, w[0].0, w[1].0) && w[0].1 == w[1].2)
+          dominates(&self.bwf.body, w[0].0.location, w[1].0.location) && w[0].1 == w[1].2)
           || !stores.iter().all(|(_, new, _)| matches!(new.as_slice(), [l] if self.repoint_borrows.values().any(|b| b == l)))
         {
           continue;
         }
-        let mut ranks = BTreeMap::new();
-        for (index, (_, new, old)) in stores.iter().copied().enumerate() {
+        let mut effects = BTreeMap::new();
+        for &(store, new, _) in &stores {
           for (&id, &loan) in &self.repoint_borrows {
-            if new.contains(&loan) { ranks.insert(id, 2 * index + 1); }
-          }
-          // A copy can have its own earlier or later end. Only rank the
-          // ends of the actual reference slot being assigned here.
-          for (_, event, _) in slots.iter().filter(|(l, e, _)| *l == row.line && endpoints(e).0.real_name() == *holder) {
-            let id = event.get_id();
-            let loans = &self.end_loans[&id];
-            if loans == old { ranks.insert(id, 2 * index); }
-            if index + 1 == stores.len() && loans == new { ranks.insert(id, 2 * index + 2); }
+            if new.contains(&loan) { effects.insert(id, store); }
           }
         }
-        if let Some((&group, _)) = ranks.first_key_value() {
-          order.extend(ranks.iter().map(|(&id, &rank)| (id, (group, rank))));
+        // Overwriting a reference need not release its lender. Match the
+        // return arrow to the actual loan's end, even for an earlier store.
+        for (_, event, _) in slots.iter().filter(|(l, e, _)| *l == row.line && endpoints(e).0.name() == *holder) {
+          let id = event.get_id();
+          let ids = &self.end_loans[&id];
+          let lender = endpoints(event).1.name();
+          let mut ends = row.facts.iter().filter(|e| matches!(&e.fact,
+            Fact::BorrowEnd { loan, lender: from, .. } if ids.contains(loan) && *from == lender));
+          if let Some(end) = ends.next().filter(|first| ends.all(|e| e.location == first.location && e.end_successor == first.end_successor)) {
+            effects.insert(id, end);
+          }
+        }
+        let Some((&group, _)) = effects.first_key_value() else { continue };
+        let mut effects: Vec<_> = effects.into_iter().collect();
+        effects.sort_by_key(|(_, e)| e.order);
+        // A loan can end on just one edge out of a block. Its end only
+        // precedes a later effect on a path through that successor.
+        if !effects.windows(2).all(|w| {
+          let (a, b) = (w[0].1, w[1].1);
+          if a.order == b.order { return a.end_successor == b.end_successor; }
+          dominates(&self.bwf.body, a.location, b.location)
+            && a.end_successor.is_none_or(|next| dominates(&self.bwf.body, next, b.location))
+        }) {
+          continue;
+        }
+        for (rank, same_point) in effects.chunk_by(|a, b| a.1.order == b.1.order).enumerate() {
+          order.extend(same_point.iter().map(|(id, _)| (*id, (group, rank))));
         }
       }
     }

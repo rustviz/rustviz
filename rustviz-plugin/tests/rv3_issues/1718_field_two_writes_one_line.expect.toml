@@ -3,7 +3,7 @@ cluster = "C07"
 title = "Two writes to one reference field on one line drawn as one loan that may point into either"
 fn = "run"
 places = ["h.r"]
-beyond_facts = "P3: two separate returns on the row (t then u), not one 'u or t' alternative"
+beyond_facts = "Draw the stores of &t and &u in order. Show the original call's loans and the distinct loans from the two stores ending after the second store."
 
 [[loan]]
 row = 4

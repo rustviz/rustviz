@@ -6303,7 +6303,7 @@ pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: 
  * geometry; the words live here, so every message can be checked
  * against Rust's semantics in one file. */
 
-use crate::svg_generator::data::{DeepPlace, ExternalEvent, Function, LoopHead, ImplicitRef, ResourceTy, StoredIn, holds_copy_value, rc_call_of, returned_closure};
+use crate::svg_generator::data::{DeepPlace, ExternalEvent, FieldLenders, Function, LoopHead, ImplicitRef, ResourceTy, StoredIn, holds_copy_value, rc_call_of, returned_closure};
 
 // set style for code string
 static SPAN_BEGIN : &'static str = "&lt;span style=&quot;font-family: 'Source Code Pro', Consolas, 'Ubuntu Mono', Menlo, 'DejaVu Sans Mono', monospace, monospace !important;&quot;&gt;";
@@ -6518,13 +6518,18 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
 /// "Immutable borrow from s1 or s2 to d.a: …" / "Return immutably
 /// borrowed resource from d.a to s1 or s2 (d.a may point into either;
 /// its borrow of both ends here)".
-pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, lenders: &[String], end: bool, option_ref: bool) -> String {
+pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &ResourceTy, to: &ResourceTy, group: &FieldLenders, previous: bool, option_ref: bool) -> String {
+    let lenders = &group.lenders;
     let title = arrow_full_title(external_event, from, to, option_ref);
     let (either, all) = if lenders.len() == 2 { ("either", "both") } else { ("any of them", "all of them") };
-    if end {
+    if group.end {
         let field = styled_name_html(&from.name());
         let title = title.replacen(&format!(" to {}", styled_name_html(&to.name())), &format!(" to {}", or_list(lenders)), 1);
-        format!("{} ({} may point into {}; its borrow of {} ends here)", title, field, either, all)
+        if previous {
+            format!("{title}. The earlier reference in {field} could point into {either}. Its borrow of {all} ends here")
+        } else {
+            format!("{} ({} may point into {}; its borrow of {} ends here)", title, field, either, all)
+        }
     } else {
         let field = styled_name_html(&to.name());
         let title = title.replacen(&format!(" from {}", styled_name_html(&from.name())), &format!(" from {}", or_list(lenders)), 1);
