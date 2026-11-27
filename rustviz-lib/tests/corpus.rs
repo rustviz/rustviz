@@ -32934,6 +32934,41 @@ fn corpus_1907_geometry() {
 }
 
 #[test]
+fn issue_1915_arrows_cross_on_their_event_row() {
+    // rustc's MIR takes a shared reference to o in the let-chain and
+    // copies h.r into r2 in the first arm of the second fixture.
+    let cases: [(&str, &str, &str, &str, &[&str]); 2] = [
+        ("rv3_1907_2711_05_arrow_along_leg", "o", "x", "7", &["s2", "s3"]),
+        ("rv3_1907_2711_24_arrow_along_leg", "r2", "s", "19", &["r", "h.r"]),
+    ];
+    let mut detours = Vec::new();
+    for (name, from, to, row, crossed) in cases {
+        let rv = run_with_local_backend(&format!("geometry_1907/{name}"));
+        let svg = rv.timeline_panel_string();
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        if !common::geometry::parse(&doc).arrow_stays_on_row(from, to, row, crossed) {
+            detours.push(name);
+        }
+    }
+    assert!(detours.is_empty(), "arrows detouring from their event row: {detours:?}");
+}
+
+#[test]
+fn issue_1915_field_returns_stay_between_their_columns() {
+    // All four fields contain shared references into s1, used by the
+    // formatting call on L25. Each return stays within a short jog of
+    // its lender and the field ending the borrow.
+    let rv = run_with_local_backend("field_lenders_1354");
+    let svg = rv.timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let geometry = common::geometry::parse(&doc);
+    for field in ["d.a", "d.b", "e.a", "e.b"] {
+        assert!(geometry.arrows_stay_between_columns(field, "s1", "25", 26.0),
+            "{field}'s return loops outside its endpoint columns");
+    }
+}
+
+#[test]
 fn shared_row_reservations_keep_the_join_at_the_closing_brace() {
     let rv = run_with_local_backend("edition2024/rv3_1907_shared_row_reservation");
     let timeline = rv.timeline_panel_string();

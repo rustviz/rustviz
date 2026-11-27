@@ -24,7 +24,7 @@ pub const INVARIANTS: &[&str] = &[
     "line-starts-nowhere", "line-ends-nowhere", "line-through-fork", "arrows-overlap",
     "marks-on-one-spot", "arrow-misses-target", "outside-figure", "heads-or-logos-overlap",
     "shaft-through-mark", "arrows-end-to-end",
-    "fork-without-dot", "arrow-along-leg",
+    "fork-without-dot", "arrow-along-leg", "arrow-near-dot",
 ];
 
 /// How far apart two points the drawing means to be one may be.
@@ -64,6 +64,9 @@ struct Dot {
     hash: String,
     x: f64,
     y: f64,
+    line: String,
+    radius: f64,
+    painted_radius: f64,
     events: Vec<String>,
     tip: String,
 }
@@ -77,11 +80,103 @@ struct Arrow {
     tip: String,
     /// The shaft's straight pieces (a hop's arc left out).
     pieces: Vec<((f64, f64), (f64, f64))>,
-    /// The centres of the dots its hops go over.
-    hops: Vec<(f64, f64)>,
+    hops: Vec<Hop>,
+    miters: Vec<(Pt, Pt)>,
     head: Option<(f64, f64)>,
     /// The head's triangle.
     tri: Vec<(f64, f64)>,
+}
+
+/// An SVG elliptical arc in an arrow shaft, in centre parameterization.
+#[derive(Debug, Clone)]
+struct Hop {
+    chord: (Pt, Pt),
+    center: Pt,
+    radii: Pt,
+    axis: Pt,
+    start_angle: f64,
+    sweep: f64,
+    /// Other than the renderer's circular half-hops, approximate the arc
+    /// with segments short enough to have <0.001 px chord error.
+    flattened: Vec<(Pt, Pt)>,
+}
+
+impl Hop {
+    fn from_svg(chord @ (from, to): (Pt, Pt), radii: Pt, rotation: f64, large: bool, forwards: bool) -> Option<Self> {
+        let (mut rx, mut ry) = (radii.0.abs(), radii.1.abs());
+        if from == to || rx == 0.0 || ry == 0.0 {
+            return None;
+        }
+        // SVG 2, B.2.4–5: rotate to the ellipse's axes and scale
+        // radii that are too small to connect the endpoints.
+        let (sin, cos) = rotation.to_radians().sin_cos();
+        let (dx, dy) = ((from.0 - to.0) / 2.0, (from.1 - to.1) / 2.0);
+        let (x, y) = (cos * dx + sin * dy, -sin * dx + cos * dy);
+        let scale = (x / rx).hypot(y / ry);
+        rx *= scale.max(1.0);
+        ry *= scale.max(1.0);
+        let ratio = (x / rx).powi(2) + (y / ry).powi(2);
+        let side = if large == forwards { -1.0 } else { 1.0 };
+        let offset = side * ((1.0 - ratio).max(0.0) / ratio).sqrt();
+        let (cx, cy) = (offset * rx * y / ry, -offset * ry * x / rx);
+        let midpoint = mid(from, to);
+        let center = (midpoint.0 + cos * cx - sin * cy, midpoint.1 + sin * cx + cos * cy);
+        let start_angle = ((y - cy) / ry).atan2((x - cx) / rx);
+        let end_angle = ((-y - cy) / ry).atan2((-x - cx) / rx);
+        let tau = std::f64::consts::TAU;
+        let sweep = if forwards { (end_angle - start_angle).rem_euclid(tau) }
+            else { -(start_angle - end_angle).rem_euclid(tau) };
+        let mut arc = Self { chord, center, radii: (rx, ry), axis: (cos, sin), start_angle, sweep, flattened: Vec::new() };
+        if !arc.is_horizontal_semicircle() {
+            let max_radius = rx.max(ry);
+            let count = (sweep.abs() * (max_radius / 0.008).sqrt()).ceil().max(1.0) as usize;
+            let mut p = from;
+            for k in 1..=count {
+                let q = if k == count { to } else { arc.point_at(start_angle + sweep * k as f64 / count as f64) };
+                arc.flattened.push((p, q));
+                p = q;
+            }
+        }
+        Some(arc)
+    }
+
+    fn is_horizontal_semicircle(&self) -> bool {
+        self.radii.0 == self.radii.1 && self.chord.0.1 == self.chord.1.1
+            && len(self.center, mid(self.chord.0, self.chord.1)) < 1e-9
+    }
+
+    fn rotate(&self, (x, y): Pt) -> Pt {
+        let (cos, sin) = self.axis;
+        (cos * x - sin * y, sin * x + cos * y)
+    }
+
+    fn point_at(&self, angle: f64) -> Pt {
+        let (sin, cos) = angle.sin_cos();
+        let (x, y) = self.rotate((self.radii.0 * cos, self.radii.1 * sin));
+        (self.center.0 + x, self.center.1 + y)
+    }
+
+    fn tangent(&self, at_end: bool) -> Pt {
+        let angle = self.start_angle + if at_end { self.sweep } else { 0.0 };
+        let (sin, cos) = angle.sin_cos();
+        let (x, y) = self.rotate((-self.radii.0 * sin, self.radii.1 * cos));
+        let scale = self.sweep.signum() / x.hypot(y);
+        (x * scale, y * scale)
+    }
+
+    fn distance_to(&self, point: Pt) -> f64 {
+        let (from, to) = self.chord;
+        if self.flattened.is_empty() {
+            let above = (to.0 > from.0) == (self.sweep > 0.0);
+            if (above && point.1 <= from.1) || (!above && point.1 >= from.1) {
+                (len(point, self.center) - self.radii.0).abs()
+            } else {
+                len(point, from).min(len(point, to))
+            }
+        } else {
+            self.flattened.iter().map(|&(p, q)| off_piece(point, p, q)).fold(f64::INFINITY, f64::min)
+        }
+    }
 }
 
 /// A function logo (`fn`).
@@ -137,9 +232,8 @@ fn path_pieces(d: &str) -> Vec<((f64, f64), (f64, f64))> {
     path_parts(d).0
 }
 
-/// A hop arrow's straight pieces, and the midpoints of its arcs' chords
-/// (the dots it hops over).
-fn path_parts(d: &str) -> (Vec<((f64, f64), (f64, f64))>, Vec<(f64, f64)>) {
+/// A hop arrow's straight pieces and arcs.
+fn path_parts(d: &str) -> (Vec<(Pt, Pt)>, Vec<Hop>) {
     let toks: Vec<&str> = d.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).collect();
     let f = |i: usize| toks.get(i).and_then(|t| t.parse::<f64>().ok());
     let mut out = Vec::new();
@@ -156,7 +250,15 @@ fn path_parts(d: &str) -> (Vec<((f64, f64), (f64, f64))>, Vec<(f64, f64)>) {
         if let Some(from) = at {
             match toks[i] {
                 "L" => out.push((from, to)),
-                "A" => hops.push(mid(from, to)),
+                "A" => {
+                    let Some((rx, ry)) = f(i + 1).zip(f(i + 2)) else { break };
+                    let Some(rotation) = f(i + 3) else { break };
+                    if let Some(arc) = Hop::from_svg((from, to), (rx, ry), rotation, f(i + 4) == Some(1.0), f(i + 5) == Some(1.0)) {
+                        hops.push(arc);
+                    } else if from != to {
+                        out.push((from, to));
+                    }
+                }
                 _ => {}
             }
         }
@@ -187,8 +289,11 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
         match n.attribute("data-rv-kind").unwrap_or("") {
             "dot" => {
                 let Some(c) = n.descendants().find(|c| c.has_tag_name("circle")) else { continue };
+                let radius = num(c, "r");
                 g.dots.push(Dot {
-                    id, var: a("data-rv-var"), hash, x: num(c, "cx"), y: num(c, "cy"),
+                    id, var: a("data-rv-var"), hash, x: num(c, "cx"), y: num(c, "cy"), line: a("data-rv-line"), radius,
+                    painted_radius: radius + c.attribute("stroke-width")
+                        .and_then(|width| width.trim_end_matches("px").parse::<f64>().ok()).unwrap_or(1.0) / 2.0,
                     events: a("data-rv-event").split(' ').filter(|e| !e.is_empty()).map(str::to_owned).collect(),
                     tip: a("data-tooltip-text"),
                 });
@@ -222,15 +327,17 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
             "arrow" => {
                 let mut pieces = Vec::new();
                 let mut hops = Vec::new();
+                let mut miters = Vec::new();
                 for c in n.descendants().filter(|c| c.attribute("class").is_some_and(|k| k.split(' ').any(|k| k == "arrow-shaft"))) {
-                    if c.has_tag_name("polyline") {
+                    let (straight, arcs) = if c.has_tag_name("polyline") {
                         let p = points(c.attribute("points").unwrap_or(""));
-                        pieces.extend(p.windows(2).map(|w| (w[0], w[1])));
+                        (p.windows(2).map(|w| (w[0], w[1])).collect(), Vec::new())
                     } else {
-                        let (p, h) = path_parts(c.attribute("d").unwrap_or(""));
-                        pieces.extend(p);
-                        hops.extend(h);
-                    }
+                        path_parts(c.attribute("d").unwrap_or(""))
+                    };
+                    miters.extend(shaft_miters(&straight, &arcs));
+                    pieces.extend(straight);
+                    hops.extend(arcs);
                 }
                 let tri = n.descendants()
                     .find(|c| c.attribute("class").is_some_and(|k| k.split(' ').any(|k| k == "arrow-head")))
@@ -238,7 +345,7 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
                 let head = tri.get(1).copied();
                 g.arrows.push(Arrow {
                     id, var: a("data-rv-var"), to: a("data-rv-to"), line: a("data-rv-line"),
-                    tip: a("data-tooltip-text"), pieces, hops, head, tri,
+                    tip: a("data-tooltip-text"), pieces, hops, miters, head, tri,
                 });
             }
             "fn" => g.logos.push(Logo {
@@ -293,6 +400,54 @@ impl Geo {
                 && a.head.is_some_and(|head| len(head, target) <= ARROW_REACH)
         })
     }
+
+    /// An arrow can bend around an obstruction while its main track
+    /// stays on the event row and within the two columns it connects.
+    pub fn arrow_stays_on_row(&self, var: &str, to: &str, line: &str, crossed: &[&str]) -> bool {
+        self.arrows.iter().any(|a| {
+            if a.var != var || a.to != to || a.line != line {
+                return false;
+            }
+            let (Some(&(start, _)), Some(head)) = (a.pieces.first(), a.head) else { return false };
+            let Some((source, target)) = self.dots.iter()
+                .find(|d| d.var == var && d.line == line && len((d.x, d.y), start) <= ARROW_REACH)
+                .zip(self.dots.iter().find(|d| d.var == to && d.line == line && len((d.x, d.y), head) <= ARROW_REACH))
+                else { return false };
+            let (left, right) = (source.x.min(target.x), source.x.max(target.x));
+            let row = source.y;
+            let on_row: f64 = a.pieces.iter().filter(|(p, q)| (p.1 - row).abs() < TOL && (q.1 - row).abs() < TOL)
+                .map(|(p, q)| (q.0 - p.0).abs()).sum();
+            let row_hops = || a.hops.iter().filter(|h| h.chord.0.1 == row && h.chord.1.1 == row);
+            row == target.y && on_row + row_hops().map(|h| len(h.chord.0, h.chord.1)).sum::<f64>() > 0.75 * (right - left)
+                && a.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(a.tri.iter().copied())
+                    .chain(a.hops.iter().flat_map(|hop| [hop.chord.0, hop.chord.1, hop.point_at(hop.start_angle + hop.sweep / 2.0)]))
+                    .all(|(x, y)| (left - 0.01..=right + 0.01).contains(&x) && (y - row).abs() <= 15.0)
+                && crossed.iter().all(|col| row_hops().any(|hop| {
+                    let center = mid(hop.chord.0, hop.chord.1);
+                    self.dots.iter().any(|d| d.var == *col && d.line == line && near((d.x, d.y), center))
+                        || self.segs.iter().any(|s| !s.main && s.var == *col
+                            && off_piece(center, s.a, s.b) <= TOL)
+                }))
+        })
+    }
+
+    /// Keep every route between the columns it connects, with room for a
+    /// short head approach from the far side.
+    pub fn arrows_stay_between_columns(&self, from: &str, to: &str, line: &str, jog: f64) -> bool {
+        let mut arrows = self.arrows.iter().filter(|a| a.var == from && a.to == to && a.line == line).peekable();
+        arrows.peek().is_some() && arrows.all(|a| {
+            let (Some(&(start, _)), Some(head)) = (a.pieces.first(), a.head) else { return false };
+            let Some((source, target)) = self.dots.iter()
+                .find(|d| d.var == from && d.line == line && len((d.x, d.y), start) <= ARROW_REACH)
+                .zip(self.dots.iter().find(|d| d.var == to && d.line == line && len((d.x, d.y), head) <= ARROW_REACH))
+                else { return false };
+            let span = (source.x.min(target.x) - jog)..=(source.x.max(target.x) + jog);
+            a.pieces.iter().flat_map(|&(p, q)| [p, q])
+                .chain(a.tri.iter().copied())
+                .chain(a.hops.iter().flat_map(|hop| [hop.chord.0, hop.chord.1]))
+                .all(|(x, _)| span.contains(&x))
+        })
+    }
 }
 
 pub fn near(p: (f64, f64), q: (f64, f64)) -> bool {
@@ -327,6 +482,47 @@ fn off_piece(c: (f64, f64), p: (f64, f64), q: (f64, f64)) -> f64 {
     let l = len(p, q);
     let t = if l < 1e-9 { 0.0 } else { (((c.0 - p.0) * (q.0 - p.0) + (c.1 - p.1) * (q.1 - p.1)) / (l * l)).clamp(0.0, 1.0) };
     len(c, (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t))
+}
+
+/// Outer edges of the painted joins (SVG defaults to miter, limit 4).
+fn shaft_miters(pieces: &[(Pt, Pt)], arcs: &[Hop]) -> Vec<(Pt, Pt)> {
+    let mut edges = Vec::new();
+    let mut join = |at: Pt, incoming: Pt, outgoing: Pt| {
+        let (dx, dy) = incoming;
+        let (ex, ey) = outgoing;
+        let cross = dx * ey - dy * ex;
+        if cross.abs() < 1e-9 {
+            return;
+        }
+        let scale = SHAFT_HALF * cross.signum();
+        let (nx, ny) = (scale * dy, -scale * dx);
+        let (mx, my) = (scale * ey, -scale * ex);
+        let alignment = 1.0 + dx * ex + dy * ey;
+        let tip = ((nx + mx) / alignment, (ny + my) / alignment);
+        if tip.0.hypot(tip.1) <= 4.0 * SHAFT_HALF {
+            let (x, y) = at;
+            let corner = (x + tip.0, y + tip.1);
+            edges.extend([((x + nx, y + ny), corner), (corner, (x + mx, y + my))]);
+        }
+    };
+    let mut lines = pieces.iter().copied().filter_map(|(p, q)| {
+        let length = len(p, q);
+        (length > 1e-9).then(|| ((p, q), ((q.0 - p.0) / length, (q.1 - p.1) / length)))
+    }).peekable();
+    while let Some(((p, q), tangent)) = lines.next() {
+        if let Some(&(_, next)) = lines.peek().filter(|((start, _), _)| *start == q) {
+            join(q, tangent, next);
+        }
+        for arc in arcs {
+            if q == arc.chord.0 {
+                join(q, tangent, arc.tangent(false));
+            }
+            if p == arc.chord.1 {
+                join(p, arc.tangent(true), tangent);
+            }
+        }
+    }
+    edges
 }
 
 type Pt = (f64, f64);
@@ -568,7 +764,7 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
             // edge within 1 px of the triangle, #1316's `y -> a` grazing
             // `a -> z`'s head).
             let related = b.var == a.to || b.to == a.to
-                || a.head.is_some_and(|h| b.hops.iter().any(|&c| len(c, h) < 8.0));
+                || a.head.is_some_and(|h| b.hops.iter().any(|hop| len(mid(hop.chord.0, hop.chord.1), h) < 8.0));
             let shaft = samples(&b.pieces).into_iter()
                 .any(|p| inside(&a.tri, p) > -1.5 || (!related && off_tri(&a.tri, p) < SHAFT_HALF + 1.0));
             let head = b.tri.len() == 3 && std::ptr::addr_of!(*a) < std::ptr::addr_of!(*b)
@@ -642,15 +838,33 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
         }
     }
 
-    // A shaft through a dot's centre, or along a stop bar, with no hop
-    // (#1344): the mark reads as part of the arrow (a column it doesn't
-    // touch looks moved or lent), and the arrow, drawn on top, takes its
-    // hover. An arrow's own ends are 5.25 px or more off its dots'
-    // centres, so they never count.
+    // A shaft through a dot's centre (#1344) makes it read as part of the
+    // arrow and takes its hover. Even when the shaft misses the centre,
+    // an unrelated dot needs a visible gap from the painted arrow.
     for a in &g.arrows {
+        let head_extent = a.head.map_or(0.0, |h| a.tri.iter().map(|&corner| len(h, corner)).fold(0.0, f64::max));
         for d in &g.dots {
-            if a.pieces.iter().any(|&(p, q)| off_piece((d.x, d.y), p, q) < SHAFT_HALF) {
-                out.push(("shaft-through-mark", format!("{} runs through {} at {}", a.id, d.id, fmt((d.x, d.y)))));
+            let center = (d.x, d.y);
+            let clearance = d.painted_radius + 1.0;
+            let shaft_gap = a.pieces.iter().enumerate().filter_map(|(i, &(p, q))| {
+                let distance = off_piece(center, p, q);
+                // The shaft may leave its source dot at the rim. A bend
+                // or another part of the shaft still needs clearance.
+                let leaves_dot = i == 0 && a.var == d.var && len(p, center) <= ARROW_REACH
+                    && distance >= d.radius - 0.01 && distance >= len(p, center) - 0.01;
+                (!leaves_dot).then_some(distance)
+            }).fold(f64::INFINITY, f64::min);
+            if shaft_gap < SHAFT_HALF {
+                out.push(("shaft-through-mark", format!("{} runs through {} at {}", a.id, d.id, fmt(center))));
+                continue;
+            }
+            if shaft_gap < clearance + SHAFT_HALF
+                || a.hops.iter().any(|hop| hop.distance_to(center) < clearance + SHAFT_HALF)
+                || a.miters.iter().any(|&(p, q)| off_piece(center, p, q) < clearance)
+                || a.head.is_some_and(|h| len(h, center) < head_extent + clearance && off_tri(&a.tri, center) < clearance
+                    && !(a.to == d.var && len(h, center) <= ARROW_REACH))
+            {
+                out.push(("arrow-near-dot", format!("{} passes too close to {} at {}", a.id, d.id, fmt(center))));
             }
         }
         for (h, c) in &g.stops {
@@ -888,10 +1102,19 @@ mod unit {
         // On a track that misses it, or hopping it, it's fine.
         let clear = arrow("b>x", "b", "x", "144.2 218.2 160 230 330 230 335.6 225.8", "332,221 345.8,218 339.2,230.6");
         assert_eq!(invs(&[c.clone(), clear].concat()), Vec::<&str>::new());
+        let grazing = arrow("b>x", "b", "x", "144 218 160 237 330 237 340 230", "334.8,226.7 345.6,219.3 344.8,233.3");
+        assert_eq!(invs(&[c.clone(), grazing].concat()), vec!["arrow-near-dot"]);
+        let near_head = dot("q", 349.0, 215.0, "branch_join");
+        let head = arrow("b>x", "b", "x", "140 220 330 220", "330,214 342.75,220 330,226");
+        assert_eq!(invs(&[near_head, head.clone()].concat()), Vec::<&str>::new());
+        let near_head = dot("q", 347.0, 220.0, "branch_join");
+        assert_eq!(invs(&[near_head, head].concat()), vec!["arrow-near-dot"]);
         let hop = "<g data-rv-id=\"b>x\" data-rv-kind=\"arrow\" data-rv-var=\"b\" data-rv-to=\"x\" data-rv-line=\"1\" \
                    data-tooltip-text=\"b>x\"><path class=\"arrow-shaft\" d=\"M 142.9 219.4 L 160 245 L 200 245 A 10 10 0 0 1 220 245 L 330 245 L 340 230\"/>\
                    <polygon class=\"arrow-head\" points=\"334.8,226.7 345.6,219.3 344.8,233.3\"/></g>";
         assert_eq!(invs(&[c.clone(), hop.to_string()].concat()), Vec::<&str>::new());
+        let near_hop = dot("q", 210.0, 230.0, "branch_join");
+        assert_eq!(invs(&[hop, &near_hop].concat()), vec!["arrow-near-dot"]);
         // Its own dots (5.25 px off their centres) don't count.
         let own = [dot("b", 70.0, 245.0, "move"), dot("x", 300.0, 245.0, "acquire"),
                    arrow("b>x", "b", "x", "75.25 245 282 245", "282,239 294.75,245 282,251")].concat();
@@ -902,6 +1125,57 @@ mod unit {
         let along = arrow("re>e", "re", "e", "374.75 175 138 175", "138,169 125.25,175 138,181");
         assert_eq!(invs(&[bar, &along].concat()), vec!["shaft-through-mark"]);
         assert_eq!(invs(&[bar, &along.replace("175 138 175", "190 138 190")].concat()), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn clearance_includes_the_dot_stroke() {
+        let near = dot("q", 50.0, 29.0, "branch_join");
+        let straight = arrow("b>x", "b", "x", "15 20.25 80 20.25", "80,14.25 92.75,20.25 80,26.25");
+        assert_eq!(invs(&format!("{near}{straight}")), vec!["arrow-near-dot"]);
+        assert!(invs(&format!("{}{straight}", dot("q", 50.0, 29.25, "branch_join"))).is_empty());
+    }
+
+    #[test]
+    fn clearance_includes_the_stroke_miter() {
+        let near = dot("q", 46.0, 13.0, "branch_join");
+        let bent = arrow("b>x", "b", "x", "15 20 40 20 40 40", "34,40 40,52.75 46,40");
+        assert_eq!(invs(&format!("{near}{bent}")), vec!["arrow-near-dot"]);
+        assert!(invs(&format!("{}{bent}", dot("q", 48.0, 13.0, "branch_join"))).is_empty());
+    }
+
+    #[test]
+    fn crossing_clearance_uses_both_svg_arc_radii() {
+        let near = dot("q", 50.0, 50.0, "branch_join");
+        let svg = r#"<g data-rv-id="b>x" data-rv-kind="arrow" data-rv-var="b" data-rv-to="x">
+            <path class="arrow-shaft" d="M 15 50 L 40 50 A 10 10 0 0 1 60 50 L 90 50"/></g>"#;
+        assert!(invs(&[&near, svg].concat()).is_empty());
+        for ellipse in ["A 10 3", "A 20 10"] {
+            assert_eq!(invs(&format!("{near}{}", svg.replace("A 10 10", ellipse))), vec!["arrow-near-dot"]);
+        }
+    }
+
+    #[test]
+    fn event_row_pin_requires_the_named_crossings_and_bounds_the_jog() {
+        let row_dot = |name, x| dot(name, x, 80.0, "branch_join").replace("/>", " data-rv-line=\"19\"/>");
+        let (source, target, r, hr) = (row_dot("r2", 220.0), row_dot("s", 20.0), row_dot("r", 150.0), row_dot("h.r", 60.0));
+        let path = r#"<g data-rv-id="r2>s" data-rv-kind="arrow" data-rv-var="r2" data-rv-to="s" data-rv-line="19">
+            <path class="arrow-shaft" d="M 214.75 80 L 160 80 A 10 10 0 0 0 140 80 L 70 80 A 10 10 0 0 0 50 80 L 38 80"/>
+            <polygon class="arrow-head" points="38,74 25.25,80 38,86"/></g>"#;
+        let matches = |source: &str, target: &str, r: &str, hr: &str, path: &str| {
+            let svg = format!("<svg>{source}{target}{r}{hr}{path}</svg>");
+            let doc = roxmltree::Document::parse(&svg).unwrap();
+            parse(&doc).arrow_stays_on_row("r2", "s", "19", &["r", "h.r"])
+        };
+        assert!(matches(&source, &target, &r, &hr, path));
+        let wrong_row = |mark: &str| mark.replace("line=\"19\"", "line=\"18\"");
+        let accepted: Vec<_> = [
+            ("wrong source row", matches(&wrong_row(&source), &target, &r, &hr, path)),
+            ("wrong target row", matches(&source, &wrong_row(&target), &r, &hr, path)),
+            ("wrong crossing row", matches(&source, &target, &wrong_row(&r), &hr, path)),
+            ("missing crossing", matches(&source, &target, &r, &hr, &path.replace("A 10 10 0 0 0 50 80", "L 50 80"))),
+            ("deep jog", matches(&source, &target, &r, &hr, &path.replace("L 160 80", "L 210 55 L 200 55 L 195 80 L 160 80"))),
+        ].into_iter().filter_map(|(reason, matched)| matched.then_some(reason)).collect();
+        assert!(accepted.is_empty(), "accepted invalid routes: {accepted:?}");
     }
 
     #[test]

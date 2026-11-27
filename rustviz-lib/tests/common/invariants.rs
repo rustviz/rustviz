@@ -57,7 +57,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("cond_holder_moved_1464", "arrow-along-leg", 1542),
     ("ctor_cond_assign_holder_1470", "arrow-along-leg", 1542),
     ("ctor_cond_holder_1457", "arrow-along-leg", 1542),
-    ("field_lenders_1354", "arrow-along-leg", 1542),
     ("fn_ret_ref_arg_lists", "arrow-along-leg", 1542),
     ("holder_return_clear_of_leg_1476", "arrow-along-leg", 1542),
     ("holder_tuple_literal_1459", "arrow-along-leg", 1542),
@@ -152,6 +151,8 @@ pub const INVARIANTS: &[(&str, &str)] = &[
     ("shaft-through-mark",
      "an arrow's shaft runs through the centre of a dot, or along a column's stop bar, with no hop: the \
       mark reads as part of the arrow and can't be hovered"),
+    ("arrow-near-dot",
+     "an arrow's head, shaft or crossing arc leaves less than a pixel of space beside an unrelated event dot"),
     ("arrows-end-to-end",
      "one arrow leaves the dot another points at straight on in the same direction: the two read as \
       one arrow through the dot"),
