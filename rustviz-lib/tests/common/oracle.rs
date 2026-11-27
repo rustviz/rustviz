@@ -40,9 +40,9 @@
 //! the other binding); a gap where only another arm's dashed line runs,
 //! or the column is drawn in two states at once; a program with
 //! `// rustviz: hide` / `skip` (its gutter or events differ from the
-//! source); a row of code that never runs drawn inline (the dead `else`
-//! of an irrefutable `if let`, `data-rv-dead-rows`, one count per row,
-//! until #1873) or a `macro_rules!` (a macro can bind names syn can't see);
+//! source) or a `macro_rules!` (a macro can bind names syn can't see);
+//! an imaginary leg displays the incoming state throughout, so its claims
+//! are probed just inside the arm, before its first statement;
 //! a `&mut` probe of a place behind a `&` reference; and a probe rustc can't type-check (the variable is out of
 //! scope there). A claim inside a loop is checked like any other (the
 //! probe is still one point of the program) and its message says
@@ -310,12 +310,8 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
     ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 168, "hh", 1595),
     ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 174, "ta", 1595),
     ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 221, "ec", 1595),
-    ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 261, "de", 1595),
-    ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 261, "de.a", 1595),
     ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 262, "de", 1595),
-    ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 262, "de.a", 1595),
     ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 263, "de", 1595),
-    ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 263, "de.a", 1595),
     ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 279, "ti", 1595),
     ("known_bugs/1595_struct_arm_parts_moved", "oracle-usable", 280, "ti", 1595),
     ("known_bugs/1604_field_two_lender_repoint", "oracle-borrowed", 42, "s", 1604),
@@ -409,19 +405,10 @@ pub const KNOWN_ORACLE_FAILURES: &[(&str, &str, u32, &str, u32)] = &[
 /// borrow checker, which is conservative: (snippet, check, line, column, why). The
 /// test ignores these, and fails if one no longer happens.
 pub const ORACLE_EXEMPT: &[(&str, &str, u32, &str, &str)] = &[
-    // A pattern that can't fail (`if let x = f`, `Some(x)` on `Some(f)`):
-    // its `else` block, and the code after a body that always returns,
-    // never run, so the drawing shows nothing there. rustc still checks
-    // them as if they could run (#987, #995, #1004, #1013, #949).
-    ("edition2024/dead_else_987", "oracle-moved", 13, "f", "irrefutable pattern: dead else"),
-    ("edition2024/dead_else_987", "oracle-moved", 35, "a", "irrefutable pattern: dead else"),
-    ("edition2024/dead_else_987", "oracle-moved", 35, "s1", "irrefutable pattern: dead else"),
-    ("edition2024/dead_else_987", "oracle-moved", 45, "b", "irrefutable pattern: dead else"),
-    ("edition2024/dead_else_987", "oracle-usable", 13, "g", "irrefutable pattern: dead else"),
-    ("edition2024/dead_else_987", "oracle-usable", 23, "r", "irrefutable pattern: dead else"),
-    ("edition2024/dead_else_987", "oracle-usable", 35, "s2", "irrefutable pattern: dead else"),
-    ("edition2024/dead_else_987", "oracle-usable", 36, "s2", "irrefutable pattern: dead else"),
-    ("edition2024/dead_else_987", "oracle-usable", 37, "s2", "irrefutable pattern: dead else"),
+    // The code after an `if let` body that always returns never runs, so
+    // the drawing shows nothing there. rustc still checks it via the
+    // implicit way past the pattern (#995, #1004, #1013, #949). The dead
+    // `else` itself is drawn as a leg and checked (#1873).
     ("edition2024/irrefutable_iflet_inline_995", "oracle-moved", 34, "p", "irrefutable pattern: code after never runs"),
     ("edition2024/irrefutable_iflet_inline_995", "oracle-moved", 35, "p", "irrefutable pattern: code after never runs"),
 ];
@@ -488,6 +475,15 @@ struct Point {
     /// The blocks the statement is in (indices into `Points::blocks`),
     /// outermost first.
     ancestors: Vec<usize>,
+    else_arms: Vec<(u32, usize)>,
+}
+
+type SourcePos = (u32, usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct ArmEntry {
+    at: SourcePos,
+    wrap_end: Option<SourcePos>,
 }
 
 #[derive(Debug, Clone)]
@@ -535,6 +531,9 @@ struct Points {
     src: Vec<String>,
     blocks: Vec<BlockSpan>,
     block_stack: Vec<usize>,
+    else_stack: Vec<(usize, SourcePos)>,
+    else_entries: BTreeMap<SourcePos, (usize, bool, ArmEntry)>,
+    first_stmt: Vec<Option<SourcePos>>,
     /// Per function: inserting lines could change its meaning or land
     /// in a comment (block comments, `line!()` / `column!()` /
     /// `file!()`, a name like the sentinels').
@@ -591,6 +590,10 @@ impl Points {
         self.body_starts.push(body.map(|b| {
             let pos = b.brace_token.span.open().start();
             (pos.line as u32, pos.column as u32)
+        }));
+        self.first_stmt.push(body.and_then(|b| b.stmts.first()).map(|stmt| {
+            let start = stmt.span().start();
+            (start.line as u32, start.column)
         }));
         self.stack.push(Some(self.bindings.len() - 1));
     }
@@ -783,6 +786,31 @@ impl<'ast> Visit<'ast> for Points {
         visit::visit_expr_for_loop(self, l);
         self.loops -= 1;
     }
+    fn visit_expr_if(&mut self, expr: &'ast syn::ExprIf) {
+        for attr in &expr.attrs { self.visit_attribute(attr); }
+        self.visit_expr(&expr.cond);
+        self.visit_block(&expr.then_branch);
+        let Some((_, els)) = &expr.else_branch else { return };
+        let Some(func) = self.func().filter(|&f| !self.unprobeable[f] && self.closures == 0 && self.no_points == 0) else {
+            self.visit_expr(els);
+            return;
+        };
+        let start = els.span().start();
+        let source = (start.line as u32, start.column + 1);
+        let entry = if let syn::Expr::Block(expr) = &**els {
+            let opening = expr.block.brace_token.span.open().end();
+            ArmEntry { at: (opening.line as u32, opening.column), wrap_end: None }
+        } else {
+            // Rust requires a block or `if` after `else`. Put the
+            // probe in a block immediately before evaluating the `if`.
+            let end = els.span().end();
+            ArmEntry { at: (start.line as u32, start.column), wrap_end: Some((end.line as u32, end.column)) }
+        };
+        self.else_entries.insert(source, (func, self.loops > 0, entry));
+        self.else_stack.push((func, source));
+        self.visit_expr(els);
+        self.else_stack.pop();
+    }
     fn visit_block(&mut self, b: &'ast syn::Block) {
         let Some(func) = self.func() else {
             visit::visit_block(self, b);
@@ -826,7 +854,10 @@ impl<'ast> Visit<'ast> for Points {
                     .is_some_and(|l| l.rfind("/*").is_some_and(|a| !l[a..].contains("*/")));
                 if next > end && !open_comment {
                     if ordinary {
-                        self.points.push(Point { line: end, func, in_loop: self.loops > 0, ancestors: self.block_stack.clone() });
+                        self.points.push(Point {
+                            line: end, func, in_loop: self.loops > 0, ancestors: self.block_stack.clone(),
+                            else_arms: self.else_stack.iter().filter(|(f, _)| *f == func).map(|(_, pos)| *pos).collect(),
+                        });
                     }
                     let (name, in_closure) = (self.names[func].clone(), self.closures > 0);
                     let landed: Vec<(u32, String)> = self.pending_probes.iter()
@@ -906,6 +937,10 @@ struct Seg {
     /// A conditional arm's leg (`branch_line`), not the column's own line.
     branch: bool,
     tip: String,
+    imaginary: Option<(u32, usize)>,
+    /// Source extent of a conditional with an imaginary arm whose
+    /// matching arm exits. No ownership line leaves the conditional.
+    no_continuation: Option<(u32, u32)>,
     /// (x1, y1, x2, y2) of each drawn line.
     lines: Vec<(f64, f64, f64, f64)>,
 }
@@ -922,9 +957,6 @@ struct Drawing {
     refs: HashSet<String>,
     /// Source line -> y of its timeline row.
     row: HashMap<u32, f64>,
-    /// Rows of code that never runs drawn inline (`data-rv-dead-rows`: the
-    /// dead `else` of an irrefutable `if let`, #987).
-    dead: HashSet<u32>,
     /// Body's opening brace (line, column) and row reached only by imaginary edges.
     unreachable: HashSet<((u32, u32), u32)>,
 }
@@ -950,11 +982,9 @@ fn num(n: roxmltree::Node, a: &str) -> f64 {
 
 fn drawing(timeline: &str, code: &str) -> Result<Drawing, String> {
     let doc = roxmltree::Document::parse(timeline).map_err(|e| e.to_string())?;
-    let source_rows = |attr| doc.root_element().attribute(attr).unwrap_or("")
-        .split_whitespace().filter_map(|w| w.parse().ok()).collect();
     let mut d = Drawing {
         dots: vec![], segs: vec![], columns: BTreeMap::new(), header_x: HashMap::new(),
-        refs: HashSet::new(), row: HashMap::new(), dead: source_rows("data-rv-dead-rows"),
+        refs: HashSet::new(), row: HashMap::new(),
         unreachable: doc.root_element().attribute("data-rv-unreachable-rows").unwrap_or("")
             .split_whitespace().filter_map(|word| {
                 let (body_line, rest) = word.split_once(':')?;
@@ -988,7 +1018,16 @@ fn drawing(timeline: &str, code: &str) -> Result<Drawing, String> {
                 }
                 let lines = n.descendants().filter(|c| c.has_tag_name("line"))
                     .map(|l| (num(l, "x1"), num(l, "y1"), num(l, "x2"), num(l, "y2"))).collect();
-                d.segs.push(Seg { hash, var: a("data-rv-var"), state: a("data-rv-state"), tip: plain(&tip), lines, branch: kind == "branch_line" });
+                let arm = n.ancestors().find(|g| g.attribute("data-rv-cause") == Some("imaginary"));
+                let imaginary = arm.and_then(|g| {
+                    let (line, col) = g.attribute("data-rv-arm-start")?.split_once(' ')?;
+                    Some((line.parse().ok()?, col.parse().ok()?))
+                });
+                let no_continuation = arm.and_then(|g| {
+                    let (start, end) = g.attribute("data-rv-no-continuation")?.split_once(' ')?;
+                    Some((start.parse().ok()?, end.parse().ok()?))
+                });
+                d.segs.push(Seg { hash, imaginary, no_continuation, var: a("data-rv-var"), state: a("data-rv-state"), tip: plain(&tip), lines, branch: kind == "branch_line" });
             }
             "header" => {
                 d.header_x.entry(hash.clone()).or_insert(num(n, "x"));
@@ -1046,6 +1085,8 @@ struct Claim {
     /// more (a whole move against "partially moved", a maybe-moved
     /// against "possibly-uninitialized").
     strict: bool,
+    /// Probe an imaginary leg at its else expression's entry.
+    entry: Option<ArmEntry>,
 }
 
 /// A variable or a field path (`s`, `p.x`, `t.0`), as a probe can name it.
@@ -1077,6 +1118,7 @@ const HOLDS_REF: &[&str] = &["holds an immutable reference", "holds a mutable re
 /// What a struct's line says once a field was moved out of it.
 const PARTLY_MOVED: &[&str] = &["is partially moved", "can't be used as a whole"];
 const MAYBE_MOVED: &[&str] = &["moved in at least one branch", "may have been moved", "moved out in at least one branch"];
+const IMAGINARY_MOVE: &str = "considers a move on an unreachable path";
 
 pub type Skips = BTreeMap<&'static str, usize>;
 
@@ -1097,22 +1139,6 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
         }
         let y = (ya + yb) / 2.0;
         let added_rows = d.dots.iter().any(|x| x.y > ya + 1.0 && x.y < yb - 1.0);
-        // Code that never runs, drawn inline as 2.x draws it (the dead
-        // `else` of an irrefutable `if let`): rustc checks it on an imaginary
-        // path the drawing doesn't show. Not checked until that `else` is
-        // drawn as a branch of its own (#1873); counted. Only a point
-        // inside that code (its block's statements all end on dead rows),
-        // or after an `if let ... else { }` whose closing `}` the renderer
-        // marks: it does so only where the code after it is dead too (the
-        // `if let` arm always leaves). After one whose arm goes on, the
-        // paths have joined, and the point is checked.
-        let in_dead_block = p.ancestors.last().and_then(|&b| pts.blocks.get(b))
-            .is_some_and(|b| !b.stmts.is_empty() && b.stmts.iter().all(|(_, last)| d.dead.contains(last)));
-        let lone_close = pts.src.get((p.line as usize).wrapping_sub(1)).is_some_and(|l| l.trim() == "}");
-        if d.dead.contains(&p.line) && (in_dead_block || lone_close) {
-            *skips.entry("dead-arm rows (code that never runs, drawn inline, #1873), not checked").or_default() += 1;
-            continue;
-        }
         for (hash, var) in &d.columns {
             // The column's last dot so far in this function. When it is
             // in a conditional's arm and in the point's own block, the
@@ -1132,6 +1158,11 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
             // path isn't known: skip rather than guess.
             let forked = d.segs.iter().any(|s| &s.hash == hash && s.branch && crossing(s, y).is_some());
             let path_known = in_arm && local;
+            // Entry snapshots are checked separately, including when
+            // there is no statement-end probe point inside this arm.
+            if d.segs.iter().any(|s| &s.hash == hash && s.imaginary.is_some_and(|e| p.else_arms.contains(&e))) {
+                continue;
+            }
             if forked && !path_known {
                 *skips.entry("arm leg: the point's path isn't known").or_default() += 1;
                 continue;
@@ -1140,6 +1171,7 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 .filter(|s| &s.hash == hash)
                 .filter(|s| match (crossing(s, y), last) {
                     (None, _) => false,
+                    (Some(_), _) if s.imaginary.is_some() => false,
                     (Some(x), Some(l)) if path_known => (x - l.x).abs() < 3.0,
                     _ => true,
                 })
@@ -1171,6 +1203,8 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                     // A struct with a field moved out: its line goes on
                     // (the other fields can be used), and says so.
                     Drawn::PartlyMoved
+                } else if s.tip.contains(IMAGINARY_MOVE) || s.tip.contains("may have been moved out, so it can't be used here") {
+                    Drawn::Moved
                 } else {
                     match st {
                         // A reference's line: hollow holds a `&`, solid a `&mut`.
@@ -1206,7 +1240,13 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 // No line: moved, if the column's last dot so far moved
                 // it, on this path (not in another arm).
                 let Some(last) = last else { continue };
-                if in_arm && !local {
+                // A move on a fork's row can be inside an arm even
+                // though the same source row also starts the conditional.
+                // If every real arm exits, that dot says nothing after
+                // the conditional has ended, where no line continues.
+                if in_arm && (!local || d.segs.iter().any(|s| &s.hash == hash
+                    && s.no_continuation.is_some_and(|(split, end)| split <= last.line && last.line <= end && end <= p.line)))
+                {
                     continue;
                 }
                 // `data-rv-event` lists each event name once, so a dot that
@@ -1275,26 +1315,85 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                 }
             }
             let drawn = *drawn.iter().next().unwrap();
-            out.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip, strict: false });
+            out.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip, strict: false, entry: None });
         }
     }
+    out.extend(imaginary_claims(pts, d, skips));
     out
+}
+
+fn imaginary_claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for segment in &d.segs {
+        let Some(source) = segment.imaginary else { continue };
+        if segment.lines.is_empty() || !seen.insert((source, &segment.hash)) { continue; }
+        let Some(&(func, in_loop, entry)) = pts.else_entries.get(&source) else {
+            *skips.entry("imaginary arm entry not found in the source").or_default() += 1;
+            continue;
+        };
+        let Some(var) = place_name(&segment.var) else { continue };
+        let root = var.split('.').next().unwrap();
+        if pts.items.contains(root) || pts.bindings[func].get(root) != Some(&1) {
+            *skips.entry("imaginary arm entry does not name a unique binding").or_default() += 1;
+            continue;
+        }
+        let tip = segment.tip.split(". After this code on that path, ").next().unwrap_or(&segment.tip);
+        let state = segment.state.trim_end_matches("_gray");
+        let drawn = if PARTLY_MOVED.iter().any(|m| tip.contains(m)) || tip.contains("partially moved:") {
+            Drawn::PartlyMoved
+        } else if MAYBE_MOVED.iter().any(|m| tip.contains(m)) || tip.contains(IMAGINARY_MOVE) {
+            Drawn::Moved
+        } else if state.ends_with("_uninit") {
+            Drawn::Unassigned
+        } else {
+            match state {
+                _ if d.refs.contains(&segment.hash) || HOLDS_REF.iter().any(|h| tip.contains(h)) => {
+                    *skips.entry("a reference's line (says what it holds)").or_default() += 1;
+                    continue;
+                }
+                "full_privilege" => Drawn::Usable,
+                "partial_privilege" => Drawn::Shared,
+                "revoked_privilege" => Drawn::MutLent,
+                "resource_moved" => Drawn::Moved,
+                _ => continue,
+            }
+        };
+        out.push(Claim { line: source.0, func, var, drawn, in_loop, tip: tip.to_owned(), strict: false, entry: Some(entry) });
+    }
+    out
+}
+
+type ClaimSite = (usize, u32, Option<ArmEntry>);
+
+fn entry_wrappers(entries: impl Iterator<Item = ArmEntry>) -> Vec<(u32, Option<usize>, String)> {
+    let sites: BTreeSet<_> = entries.collect();
+    sites.into_iter().flat_map(|entry| {
+        entry.wrap_end.map(|(line, col)| [
+            (entry.at.0, Some(entry.at.1), "{".to_owned()),
+            (line, Some(col), "}".to_owned()),
+        ]).into_iter().flatten()
+    }).collect()
 }
 
 /// The points rustc reaches: a never-assigned local per point, borrowed
 /// there, is an error (E0381) only where the code is reachable. After a
 /// `return`, `break`, `panic!` or `process::exit` nothing is
 /// borrow-checked, so a probe there would pass whatever is drawn.
-fn reachable(src: &str, pts: &Points, lines: &BTreeSet<(usize, u32)>) -> Result<HashSet<(usize, u32)>, String> {
-    let mut ins: Vec<(u32, String)> = Vec::new();
+fn reachable(src: &str, pts: &Points, sites: &BTreeSet<ClaimSite>) -> Result<HashSet<ClaimSite>, String> {
+    let mut ins = entry_wrappers(sites.iter().filter_map(|site| site.2));
     // For each inserted line, the point whose use it is.
-    let mut use_of: Vec<Option<(usize, u32)>> = Vec::new();
-    for (k, &(f, l)) in lines.iter().enumerate() {
-        let Some(open) = pts.spans[f].2 else { continue };
-        ins.push((open, format!("let __rv_reach_{}: u8;", k)));
+    let mut use_of = vec![None; ins.len()];
+    for (k, &(f, line, entry)) in sites.iter().enumerate() {
+        let open = pts.spans[f].2.map(|line| (line, None)).or_else(|| {
+            entry.and(pts.first_stmt[f]).map(|(line, col)| (line, Some(col)))
+        });
+        let Some((open_line, open_col)) = open else { continue };
+        ins.push((open_line, open_col, format!("let __rv_reach_{k}: u8;")));
         use_of.push(None);
-        ins.push((l, format!("let _ = &__rv_reach_{};", k)));
-        use_of.push(Some((f, l)));
+        let (row, col) = entry.map_or((line, None), |e| (e.at.0, Some(e.at.1)));
+        ins.push((row, col, format!("let _ = &__rv_reach_{k};")));
+        use_of.push(Some((f, line, entry)));
     }
     let (text, at) = insert_lines(src, &ins);
     let mut out = HashSet::new();
@@ -1309,25 +1408,37 @@ fn reachable(src: &str, pts: &Points, lines: &BTreeSet<(usize, u32)>) -> Result<
     Ok(out)
 }
 
-/// `src` with each (after line, text) on a new line after that line;
-/// new line number -> index into `ins`.
-fn insert_lines(src: &str, ins: &[(u32, String)]) -> (String, HashMap<u32, usize>) {
+/// Insert a probe after the given line, or just after its opening brace
+/// at the given character column. Return each probe's new line number.
+fn insert_lines(src: &str, ins: &[(u32, Option<usize>, String)]) -> (String, HashMap<u32, usize>) {
     let mut at: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
-    for (i, (l, _)) in ins.iter().enumerate() {
+    for (i, (l, _, _)) in ins.iter().enumerate() {
         at.entry(*l).or_default().push(i);
     }
     let mut out = String::new();
     let mut lines = HashMap::new();
     let mut n = 0u32;
     for (i, l) in src.lines().enumerate() {
-        out.push_str(l);
-        out.push('\n');
-        n += 1;
-        for &k in at.get(&(i as u32 + 1)).into_iter().flatten() {
-            out.push_str(&ins[k].1);
+        let ids = at.get_mut(&(i as u32 + 1)).map_or(&mut [][..], Vec::as_mut_slice);
+        ids.sort_by_key(|&k| ins[k].1.unwrap_or(usize::MAX));
+        let mut start = None;
+        for &k in ids.iter() {
+            let end = ins[k].1.and_then(|col| l.char_indices().nth(col).map(|(at, _)| at)).unwrap_or(l.len());
+            if start != Some(end) {
+                out.push_str(&l[start.unwrap_or(0)..end]);
+                out.push('\n');
+                n += 1;
+            }
+            out.push_str(&ins[k].2);
             out.push('\n');
             n += 1;
             lines.insert(n, k);
+            start = Some(end);
+        }
+        if start != Some(l.len()) {
+            out.push_str(&l[start.unwrap_or(0)..]);
+            out.push('\n');
+            n += 1;
         }
     }
     (out, lines)
@@ -1460,8 +1571,14 @@ impl Probe {
 
 /// `src` with each probe on a new line after its line; the probe's line.
 fn with_probes(src: &str, probes: &[&Probe], claims: &[Claim]) -> (String, HashMap<u32, usize>) {
-    let ins: Vec<(u32, String)> = probes.iter().map(|p| (p.after, p.text(claims))).collect();
-    insert_lines(src, &ins)
+    let mut ins = entry_wrappers(probes.iter().filter_map(|p| claims[p.claim].entry));
+    let wrappers = ins.len();
+    ins.extend(probes.iter().map(|p| {
+        let (line, col) = claims[p.claim].entry.map_or((p.after, None), |entry| (entry.at.0, Some(entry.at.1)));
+        (line, col, p.text(claims))
+    }));
+    let (text, lines) = insert_lines(src, &ins);
+    (text, lines.into_iter().filter_map(|(line, k)| k.checked_sub(wrappers).map(|k| (line, k))).collect())
 }
 
 /// What rustc said about one probe.
@@ -1678,7 +1795,7 @@ pub fn check_states(src: &str, states: &[FactState]) -> (Vec<Violation>, Vec<(u3
                 *st.skips.entry("name bound more than once / not bound / an item").or_default() += 1;
                 continue;
             }
-            claims.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip: tip.to_string(), strict: true });
+            claims.push(Claim { line: p.line, func: p.func, var: name, drawn, in_loop: p.in_loop, tip: tip.to_string(), strict: true, entry: None });
         }
     }
     verify(src, &pts, claims, st, out)
@@ -1713,7 +1830,7 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
             return (out, Vec::new(), st);
         }
     }
-    let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();
+    let lines: BTreeSet<ClaimSite> = claims.iter().map(|c| (c.func, c.line, c.entry)).collect();
     let live = match reachable(src, pts, &lines) {
         Ok(r) => r,
         Err(e) => {
@@ -1721,9 +1838,9 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
             return (out, Vec::new(), st);
         }
     };
-    let (claims, dead): (Vec<Claim>, Vec<Claim>) = claims.into_iter().partition(|c| live.contains(&(c.func, c.line)));
+    let (claims, dead): (Vec<Claim>, Vec<Claim>) = claims.into_iter().partition(|c| live.contains(&(c.func, c.line, c.entry)));
     for c in &dead {
-        let why = if pts.spans[c.func].2.is_none() { "function body starts on its `{` line" } else { "dead code (after a return, break, panic)" };
+        let why = if c.entry.is_none() && pts.spans[c.func].2.is_none() { "function body starts on its `{` line" } else { "dead code (after a return, break, panic)" };
         *st.skips.entry(why).or_default() += 1;
     }
     st.claims = claims.len() + st.skips.values().sum::<usize>();
@@ -1859,7 +1976,7 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
             // can only be shown wrong: no E0381/E0382 means x has its
             // value on every path.
             (Drawn::Moved | Drawn::PartlyMoved, _) => {
-                let maybe = MAYBE_MOVED.iter().chain(["may have been moved", "may have no value", "considers a move on an unreachable path"].iter()).any(|m| c.tip.contains(m));
+                let maybe = MAYBE_MOVED.iter().chain(["may have been moved", "may have no value", IMAGINARY_MOVE].iter()).any(|m| c.tip.contains(m));
                 let partly = c.drawn == Drawn::PartlyMoved;
                 match (&e0382, &e0381) {
                     (Some(e), _) if maybe && partly_msg(&e.1, &c.var) == partly => Ok(()),
@@ -1882,7 +1999,10 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
                     // A fact that it may have no value: rustc must say so
                     // (possibly-uninitialized), not that it was moved.
                     (None, Some(e)) if c.strict && maybe => Err(Some(("oracle-moved", format!("{}: moved, not unassigned", said(e))))),
-                    (Some(e), _) if maybe || !e.1.contains("possibly") => Ok(()),
+                    // For a drawing's arm entry, test usability. Rustc
+                    // can report "possibly" even when the only path to
+                    // the probe leaves the binding unassigned.
+                    (Some(e), _) if c.entry.is_some() || maybe || !e.1.contains("possibly") => Ok(()),
                     (_, Some(_)) if maybe => Ok(()),
                     (Some(_), _) | (_, Some(_)) => Err(None),
                     (None, None) => Err(Some(("oracle-moved", conflict.as_ref().map_or(none.clone(), said)))),
@@ -1930,8 +2050,9 @@ fn verify(src: &str, pts: &Points, claims: Vec<Claim>, mut st: Stats, mut out: V
             line: c.line,
             var: c.var.clone(),
             text: format!(
-                "{} after L{} `{}`{}: drawn {} ({:?}); {}",
-                c.var, c.line, src_line, if c.in_loop { " (in a loop)" } else { "" }, describe(c.drawn), tip, verdict
+                "{} {} L{} `{}`{}: drawn {} ({:?}); {}",
+                c.var, if c.entry.is_some() { "at the else entry on" } else { "after" },
+                c.line, src_line, if c.in_loop { " (in a loop)" } else { "" }, describe(c.drawn), tip, verdict
             ),
         });
     }
@@ -2228,7 +2349,7 @@ pub fn derive_states(src: &str, extra: &[String], explicit: &[IssueProbe]) -> Re
         names.sort();
         names.dedup();
         for n in names {
-            claims.push(Claim { line: p.line, func: p.func, var: n, drawn: Drawn::Usable, in_loop: p.in_loop, tip: String::new(), strict: false });
+            claims.push(Claim { line: p.line, func: p.func, var: n, drawn: Drawn::Usable, in_loop: p.in_loop, tip: String::new(), strict: false, entry: None });
         }
     }
     for p in explicit {
@@ -2240,11 +2361,11 @@ pub fn derive_states(src: &str, extra: &[String], explicit: &[IssueProbe]) -> Re
         let func = pts.names.len();
         pts.names.push(p.func.clone());
         pts.spans.push((p.row, p.row, Some(p.row)));
-        claims.push(Claim { line: p.row, func, var: p.place.clone(), drawn: Drawn::Usable, in_loop: false, tip: String::new(), strict: false });
+        claims.push(Claim { line: p.row, func, var: p.place.clone(), drawn: Drawn::Usable, in_loop: false, tip: String::new(), strict: false, entry: None });
     }
-    let lines: BTreeSet<(usize, u32)> = claims.iter().map(|c| (c.func, c.line)).collect();
+    let lines: BTreeSet<ClaimSite> = claims.iter().map(|c| (c.func, c.line, c.entry)).collect();
     let live = reachable(src, &pts, &lines)?;
-    claims.retain(|c| live.contains(&(c.func, c.line)));
+    claims.retain(|c| live.contains(&(c.func, c.line, c.entry)));
     let mut probes = Vec::new();
     for i in 0..claims.len() {
         probes.push(Probe { claim: i, after: claims[i].line, mutable: false });

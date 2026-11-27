@@ -12236,6 +12236,12 @@ pub fn print_out_of_scope(&mut self){
   self.mark_loop_returns(&exit_ids);
 }
   
+  /// Match the guard's MIR FalseEdge whose imaginary target enters this
+  /// arm. Exact spans also distinguish sibling conditionals on one line.
+  pub(crate) fn imaginary_edge(&self, arm: rustc_span::Span) -> Option<&'a crate::facts::ImaginaryEdge> {
+    self.body_facts?.imaginary_edges.iter().find(|edge| edge.id.0 == arm.with_parent(None))
+  }
+
   /// The ends of the borrows the walk left open (RustViz 3 P2-1b): each
   /// reference in `borrow_map`, each retired one (#903) and each earlier
   /// arm's loan (#806), at the row the fact layer ends it (see

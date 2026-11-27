@@ -26,7 +26,7 @@ fn noelse_assign(a: String, s1: String) {
     }
 }
 
-// A dead `else` (#987) reads like no `else`: the same as `early`.
+// A dead `else` has its own leg (#1873). Like `early`, only the return runs.
 fn dead_else_early(p: String, r: String) -> usize {
     if let w = p {
         return w.len();

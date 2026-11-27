@@ -3850,7 +3850,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     &mut self,
     temps: &HashSet<ResourceAccessPoint>,
     if_ev: &mut Vec<(usize, ExternalEvent)>,
-    else_ev: &mut Vec<(usize, ExternalEvent)>,
+    else_ev: Option<&mut Vec<(usize, ExternalEvent)>>,
     if_diverges: bool,
   ) -> HashSet<ResourceAccessPoint> {
     // A drop at an exit (`exit_drops`), or the dot of a `?`, in the
@@ -3904,7 +3904,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let made_in_if = if_ev.iter().any(|(_, e)| matches!(e,
         ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Bind { to: ResourceTy::Value(t), .. } if *t == ro));
       let else_when = if made_in_if { format!("{}, if the let chain got as far as the `let` that makes it", else_when) } else { else_when };
-      else_front.push((line, ExternalEvent::TemporaryDrop { ro: ro.clone(), ty: ty.clone(), when: else_when, literal, early: false, part: part.clone(), id }));
+      if else_ev.is_some() {
+        else_front.push((line, ExternalEvent::TemporaryDrop { ro: ro.clone(), ty: ty.clone(), when: else_when, literal, early: false, part: part.clone(), id }));
+      }
       // (Not when the matched block's pattern took all of it: that
       // leg ends at the move, #1386.)
       if !if_diverges && self.emptying_move(if_ev, &ro).is_none() {
@@ -3921,7 +3923,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     }
-    else_ev.splice(0..0, else_front);
+    if let Some(else_ev) = else_ev {
+      else_ev.splice(0..0, else_front);
+    }
     forked
   }
 
@@ -3948,7 +3952,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut gone: Vec<(usize, ExternalEvent)> = Vec::new();
     self.preprocessed_events.retain(|(l, ev)| {
       if dead(ev.get_id()) {
-        gone.push((*l, ev.clone()));
+        if !outer.is_empty() {
+          gone.push((*l, ev.clone()));
+        }
         false
       } else {
         true
@@ -8267,14 +8273,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `Some(f)`, #981). Its body always runs.
     let always_matches = iflet_tuple.is_some_and(|l| self.let_always_matches(l.pat, l.init)
       || (pat_has_or(l.pat) && else_expr.is_none() && self.facts.and_then(|f| f.joins.get(&expr.span)).is_some_and(|j| j.dead_implicit_else)));
-    // Its `else` block, if any, is dead code (#987): rustc warns
-    // `irrefutable_let_patterns`, and the compiled program has no else
-    // block (its MIR drops what the block would have moved at scope
-    // end, unconditionally). The block is visited, so its variables
-    // and calls are known, but its events are discarded and the `if`
-    // is drawn as one without an `else`; a dot on each outer variable
-    // it used says the branch never runs (`dead_else_notes`).
-    let dead_else = always_matches && else_expr.is_some();
+    let imaginary_edge = else_expr.and_then(|e| self.imaginary_edge(e.span));
+    let imaginary_columns: HashSet<ResourceAccessPoint> = imaginary_edge.into_iter()
+      .flat_map(|edge| edge.entry.state.keys())
+      .filter_map(|name| self.raps.get(name).map(|rd| rd.rap.clone()))
+      .collect();
+    let imaginary_else = imaginary_edge.map(|edge| edge.id);
+    // Literal matches that still have an executable CFG edge keep the
+    // existing inline treatment (#981). A borrowck-only edge gets a leg.
+    let dead_else = imaginary_else.is_some() || (always_matches && else_expr.is_some());
     let mut dead_else_notes: Vec<(usize, ResourceAccessPoint)> = Vec::new();
     // Restored, not reset: this `if` may sit inside another branch
     // (#410).
@@ -8374,6 +8381,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.note_chain_then(&chain_fail, guard_expr.span.to(if_expr.span), expr.span);
     let (fail_events, fail_ends) = self.chain_fail_events(std::mem::take(&mut chain_fail), path,
       else_expr.map(|e| e.span), expr.span, fail_line);
+    let fail_events = if imaginary_else.is_some() { Vec::new() } else { fail_events };
     let fail_lo = fail_events.first().map(|ev| ev.get_id());
     let uses_lo = fail_events.iter()
       .find(|ev| matches!(ev, ExternalEvent::ChainFailUse { .. }))
@@ -8399,9 +8407,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // so what the `else` asks of the events so far (does `s`
         // still own a value its reassignment drops?) doesn't see the
         // if-body's moves (#245).
-        // (A dead `else`'s events are discarded: the if-body's stay
-        // where they are, drawn as for an `if` without `else`.)
-        if !dead_else {
+        if !dead_else || imaginary_else.is_some() {
           if_ev_early = Some(self.take_branch_events(if_ids.clone(), Some(if_expr), &pre_split));
         }
         // Nor are the if-body's `if let` bindings: an exit in the
@@ -8419,7 +8425,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.bind_deferred_arm(e);
           self.borrow_map = borrows;
           self.arm_loans.truncate(arm_loans);
-          dead_else_notes = self.discard_dead_else(lo..*self.unique_id, e, &outer);
+          dead_else_notes = self.discard_dead_else(lo..*self.unique_id, e,
+            if imaginary_else.is_some() { &[] } else { &outer });
           HashSet::new()
         } else {
           self.arm_borrows_next(&mut arm_borrows);
@@ -8441,9 +8448,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       None => HashSet::new(),
     };
-    // From here on, an `if` whose `else` is dead is drawn as one
-    // without an `else` (#987).
-    let else_expr = else_expr.filter(|_| !dead_else);
+    let else_expr = else_expr.filter(|_| !dead_else || imaginary_else.is_some());
     if dead_else {
       // Whatever `let x;` locals it assigned are as the if branch
       // left them: the else never runs.
@@ -8451,7 +8456,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.maybe_init_locals = maybe_init_after_if.clone();
     }
     let mut else_inner = if dead_else { HashSet::new() } else { self.raps_declared_since(else_hash_lo, &uninit_before) };
-    if let Some(e) = else_expr {
+    if let Some(e) = else_expr.filter(|_| !dead_else) {
       else_inner = &else_inner | &bindings_within(e, &self.tcx, &self.raps);
     }
     self.arm_borrows_end(arm_borrows);
@@ -8465,7 +8470,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let assigned_in_if: Vec<HirId> = known.iter()
       .filter(|id| !uninit_after_if.contains_key(id) && !maybe_init_after_if.contains(id))
       .copied().collect();
-    self.maybe_init_by_loop = &self.maybe_init_by_loop | &by_loop_after_if;
+    self.maybe_init_by_loop = if dead_else { by_loop_after_if } else { &self.maybe_init_by_loop | &by_loop_after_if };
     // (A dead `else`, #987: only the if branch, which always runs.)
     let maybe_init = if dead_else {
       self.join_uninit_locals(vec![(Some(if_expr), uninit_after_if, maybe_init_after_if)], &known)
@@ -8682,7 +8687,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     // A scrutinee temporary that an exit in the matched block drops
     // forks here (#1360), as a `match` scrutinee's does.
-    let forked_temps = self.fork_exited_temps(&scrutinee_temps, &mut if_ev, &mut else_ev, self.expr_diverges(if_expr));
+    let forked_temps = self.fork_exited_temps(&scrutinee_temps, &mut if_ev, imaginary_else.is_none().then_some(&mut else_ev), self.expr_diverges(if_expr));
     // The arrows now inside the branches are drawn from each
     // branch's own line map. Take them out of the global one, or an
     // arrow that stays on the split line (a copy out of an if-let
@@ -8705,7 +8710,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // the merge (#296). Values dropped at a `return` in it (#363)
     // are live in it.
     let if_diverges = self.expr_diverges(if_expr);
-    let else_diverges = else_expr.is_some_and(|e| self.expr_diverges(e));
+    let else_diverges = dead_else || else_expr.is_some_and(|e| self.expr_diverges(e));
     liveness.extend(self.keep_exit_drops(&mut if_ev, if_diverges));
     liveness.extend(self.keep_exit_drops(&mut else_ev, else_diverges));
     // Variables declared inside a loop in a branch already go out
@@ -8722,6 +8727,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let declared_in_branches: HashSet<ResourceAccessPoint> =
       &(&if_scope | &else_scope) | &(&if_scoped | &else_scoped);
     liveness = &(&liveness - &declared_in_branches) | &forked_temps;
+    liveness.extend(imaginary_columns);
 
     // add gos events for variables declared in each block, except
     // where every path through the branch leaves it at an exit
@@ -8755,7 +8761,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // doesn't match, before the else branch runs. It has no column,
     // so a drop dot on each variable whose value (or part of it)
     // is still in it says so.
-    if let Some(let_expr) = iflet_tuple.filter(|_| !scrutinee_moves.is_empty()) {
+    if let Some(let_expr) = iflet_tuple.filter(|_| !dead_else && !scrutinee_moves.is_empty()) {
       let tuple_name = match self.tuple_scrutinee_target(let_expr.init) {
         ResourceTy::Temporary { tuple: Some(t), .. } => t,
         _ => String::new(),
@@ -8848,6 +8854,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let collapsed = branch_is_collapsed(split, merge);
     let if_slice = if collapsed { (split, if_end) } else { (split + 1, if_end) };
     let else_slice = match else_expr {
+      Some(e) if imaginary_else.is_some() => (span_to_line(&e.span, &self.tcx), merge),
       Some(e) if collapsed => (self.tcx.sess.source_map().lookup_char_pos(e.span.lo()).line, merge),
       _ if collapsed => (if_end, merge),
       _ => (if_end, merge_minus_one),
@@ -8855,47 +8862,41 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A branch of type `!` (`return`, `panic!()`) never reaches
     // the merge (#296).
     let (if_diverges, if_exits, if_carries) = self.branch_divergence(BranchBody::Expr(if_expr), &if_ev, &if_decl);
-    let (else_diverges, else_exits, else_carries) = match else_expr {
+    let (else_diverges, else_exits, else_carries) = match else_expr.filter(|_| !dead_else) {
       Some(e) => self.branch_divergence(BranchBody::Expr(e), &else_ev, &else_decl),
-      None => (false, Vec::new(), Vec::new()),
+      None => (imaginary_else.is_some(), Vec::new(), Vec::new()),
     };
-    let (b_labels, b_slices, b_branches) = match else_expr {
-      Some(_) => {
-        let else_map = create_line_map(&else_ev);
-        (
-          vec!["If".to_owned(), "Else".to_owned()],
-          vec![if_slice, else_slice],
-          vec![
-            ExtBranchData { source_span: self.arm_span(if_expr.span), e_data: if_ev,   line_map: if_map,   decl_vars: if_decl,   diverges: if_diverges,   exits: if_exits, break_carries: if_carries   },
-            ExtBranchData { source_span: else_expr.and_then(|e| self.arm_span(e.span)), e_data: else_ev, line_map: else_map, decl_vars: else_decl, diverges: else_diverges, exits: else_exits, break_carries: else_carries },
-          ],
-        )
-      }
-      // No `else` (and the body moves something, see above): the
-      // implicit empty `else` is a second path that leaves every
-      // variable as it was (#257).
-      // Its events are the scrutinee's moves (#327), or those of a
-      // let-chain condition that failed after a move (#281), if any.
-      None => {
-        let else_map = create_line_map(&else_ev);
-        (
-          vec!["If".to_owned(), "Else".to_owned()],
-          vec![if_slice, else_slice],
-          vec![
-            ExtBranchData { source_span: self.arm_span(if_expr.span), e_data: if_ev, line_map: if_map, decl_vars: if_decl, diverges: if_diverges, exits: if_exits, break_carries: if_carries },
-            ExtBranchData { source_span: else_expr.and_then(|e| self.arm_span(e.span)), e_data: else_ev, line_map: else_map, decl_vars: HashSet::new(), diverges: false, exits: Vec::new(), break_carries: Vec::new() },
-          ],
-        )
-      }
-    };
-    // The arm of an `if let` with pattern bindings is named so for
-    // the drawing: they bind on the split line, and the arm's column
-    // starts there (#382).
-    let mut b_labels = b_labels;
+    // With no written else, the second branch is the implicit empty
+    // path. A failed scrutinee or let chain can still have events there.
+    let else_map = create_line_map(&else_ev);
+    let b_branches = vec![
+      ExtBranchData {
+        source_span: self.arm_span(if_expr.span),
+        imaginary: None,
+        e_data: if_ev,
+        line_map: if_map,
+        decl_vars: if_decl,
+        diverges: if_diverges,
+        exits: if_exits,
+        break_carries: if_carries,
+      },
+      ExtBranchData {
+        source_span: else_expr.and_then(|e| self.arm_span(e.span)),
+        imaginary: imaginary_else,
+        e_data: else_ev,
+        line_map: else_map,
+        decl_vars: if else_expr.is_some() { else_decl } else { HashSet::new() },
+        diverges: else_diverges,
+        exits: else_exits,
+        break_carries: else_carries,
+      },
+    ];
+    // An if-let's bindings are on the if arm's first row (#382).
+    let mut b_labels = vec!["If".to_owned(), "Else".to_owned()];
     if !iflet_bindings.is_empty() {
       b_labels[0] = IF_LET_ARM.to_owned();
     }
-    let b_ty = BranchType::If(b_labels, b_slices);
+    let b_ty = BranchType::If(b_labels, vec![if_slice, else_slice]);
     self.note_exit_scope();
     let loop_assigned = self.loop_assigned_now(&liveness);
     // (The arms' events are out of the global timeline by now: what
@@ -9337,7 +9338,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // An arm of type `!` (`_ => unreachable!()`) never
         // reaches the merge (#296).
         let (diverges, exits, break_carries) = self.branch_divergence(BranchBody::Expr(arm.body), &branch_e_data, &arm_decls);
-        branch_data.push(ExtBranchData { source_span: self.arm_span(arm.span), e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
+        branch_data.push(ExtBranchData { source_span: self.arm_span(arm.span), imaginary: None, e_data: branch_e_data, line_map: branch_line_map, decl_vars: arm_decls, diverges, exits, break_carries });
       }
     }
     self.arm_borrows_end(arm_borrows);
@@ -13053,11 +13054,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let else_map = create_line_map(&else_ev);
     let matched = ExtBranchData {
       source_span: self.arm_span(pat.span),
+      imaginary: None,
       e_data: Vec::new(), line_map: BTreeMap::new(), decl_vars: HashSet::new(),
       diverges: false, exits: Vec::new(), break_carries: Vec::new(),
     };
     let branches = vec![
-      ExtBranchData { source_span: self.arm_span(els.span), e_data: else_ev, line_map: else_map, decl_vars, diverges, exits, break_carries },
+      ExtBranchData { source_span: self.arm_span(els.span), imaginary: None, e_data: else_ev, line_map: else_map, decl_vars, diverges, exits, break_carries },
       matched,
     ];
     // The matched path is named by the pattern as written.

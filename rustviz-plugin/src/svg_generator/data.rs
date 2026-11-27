@@ -1273,6 +1273,7 @@ impl BranchType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtBranchData {
     pub source_span: Option<crate::facts::table::ArmSpan>,
+    pub imaginary: Option<crate::facts::ImaginaryEdgeId>,
     // Event Data: a list of External Events
     pub e_data: Vec<(usize, ExternalEvent)>,
 
@@ -1282,10 +1283,10 @@ pub struct ExtBranchData {
     // Variables declared within the branch
     pub decl_vars: HashSet<ResourceAccessPoint>,
 
-    // The branch's body has type `!` (`unreachable!()`, `panic!()`,
-    // `return`, `continue`, `break`): it never reaches the merge
-    // point, so it contributes nothing to the state after the
-    // conditional (#296).
+    // The branch contributes no state to the merge. Either its body
+    // exits (`return`, `continue`, `break` or a diverging call, #296)
+    // or it is an imaginary arm (#1873), which keeps the state of
+    // its borrow-checker entry for the full leg.
     pub diverges: bool,
 
     // How a diverging branch leaves (empty when it reaches the merge).
@@ -2698,6 +2699,7 @@ impl ExternalEvent {
 #[derive(Debug, Clone)]
 pub struct BranchData {
   pub source_span: Option<crate::facts::table::ArmSpan>,
+  pub imaginary: Option<crate::facts::ImaginaryEdgeId>,
   pub t_data: TimelineColumnData,
   pub e_data: Vec<(usize, Event)>,
   pub width: usize,
@@ -4779,12 +4781,6 @@ pub struct VisualizationData {
     /// Branch event id and arm index with a reachable exit on its split row.
     pub exits_at_split: BTreeSet<(usize, usize)>,
 
-    /// Source rows of code that never runs (reached only by borrowck's
-    /// imaginary edges, `StateTable::dead_rows`) that 2.x draws inline, in no
-    /// conditional's arms: the dead `else` of an irrefutable `if let`
-    /// (#987). Set by `render_svg`; `data-rv-dead-rows` on the timeline.
-    /// (Until that `else` is drawn as a branch of its own, #1873.)
-    pub inline_dead_rows: BTreeSet<usize>,
 
     /// RustViz 3: each column's state on each row, from MIR
     /// (`crate::facts::table`). Struct columns' line text is drawn from it.
@@ -6142,7 +6138,7 @@ impl Visualizable for VisualizationData {
                             append_arm_ref_die(self, e, *l, rap, !matches!(branch_type, BranchType::Loop(..)),
                                 skipped_holds.get(rap.hash()), &mut new_b_history);
                         }
-                        new_branches.push(BranchData { source_span: b.source_span, t_data: TimelineColumnData { // produce some dummy timeline data for now
+                        new_branches.push(BranchData { source_span: b.source_span, imaginary: b.imaginary, t_data: TimelineColumnData { // produce some dummy timeline data for now
                             name: "".to_owned(),
                             x_val: -1,
                             title: "".to_owned(),
@@ -6403,7 +6399,7 @@ impl Visualizable for VisualizationData {
                                 skipped_holds.get(var.hash()), &mut b_history);
                         }
 
-                        branch_history.push(BranchData { source_span: branch.source_span, t_data: TimelineColumnData { // produce some dummy timeline data for now
+                        branch_history.push(BranchData { source_span: branch.source_span, imaginary: branch.imaginary, t_data: TimelineColumnData { // produce some dummy timeline data for now
                             name: "".to_owned(),
                             x_val: -1,
                             title: "".to_owned(),

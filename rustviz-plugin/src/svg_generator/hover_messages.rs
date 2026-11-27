@@ -3478,14 +3478,6 @@ pub fn state_maybe(name: &str, cause: Option<&str>) -> String {
     }
 }
 
-/// A row of the dead `else` of an irrefutable `if let`, drawn inline
-/// (#987), where the borrow checker's imaginary path through it leaves
-/// `name` with no value (Q9(b), #1873).
-pub fn state_dead_else_unassigned(name: &str) -> String {
-    let me = styled_name_html(name);
-    format!("This else never runs (the pattern always matches). On the path the borrow checker imagines through it, {me} has no value")
-}
-
 pub fn state_imaginary_unassigned(name: &str) -> String {
     let me = styled_name_html(name);
     format!("{me} is assigned on every path that runs. The borrow checker also checks an unreachable path that skips the assignment, so {me} can't be used here")
@@ -3589,6 +3581,17 @@ pub fn state_maybe_shared(name: &str, holder: Option<&str>, value: bool, read_on
 pub fn state_maybe_exclusive(name: &str, overwritten: bool) -> String {
     let me = styled_name_html(name);
     format!("{me} may be exclusively borrowed here ({}), so {me} can't be used until that borrow ends", some_paths_why(overwritten))
+}
+
+pub fn state_imaginary_ref(name: &String, mutable: bool, shared: bool, may: bool) -> String {
+    let me = styled_name_html(name);
+    let holds = ref_line_holds_reference(&me, mutable);
+    if shared && mutable {
+        let loan = if may { "may restrict" } else { "restricts" };
+        format!("{holds}. {me} can read the borrowed value. A shared borrow {loan} access through {me}, so the borrow checker won't allow writes through it here")
+    } else {
+        format!("{holds}. A borrow restricts access through {me} here")
+    }
 }
 
 pub fn state_moved_out(name: &str) -> String {
@@ -4569,40 +4572,43 @@ pub fn event_dot_go_out_of_scope_all_moved_suffix(my_name: &String, some_diverge
 /// `return`), which produce no value and never get here, as (name, how
 /// it leaves) pairs; every branch that does get here bound a value
 /// (#296).
-pub fn event_dot_branch_merge_bound(my_name: &String, diverged: &[(String, Vec<BranchExit>)]) -> String {
+pub fn event_dot_branch_merge_bound(my_name: &String, diverged: &[(String, Vec<BranchExit>)], imaginary_else: bool) -> String {
     format!(
         "{0} acquired ownership of a resource{1}",
         styled_name_html(my_name),
-        bound_in_branches(diverged)
+        bound_in_branches(diverged, imaginary_else)
     )
 }
 
 /// `event_dot_branch_merge_bound` for a reference variable: every
 /// branch bound it to a reference, which never owns its referent.
-pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool, diverged: &[(String, Vec<BranchExit>)]) -> String {
+pub fn event_dot_branch_merge_bound_ref(my_name: &String, is_mut: bool, diverged: &[(String, Vec<BranchExit>)], imaginary_else: bool) -> String {
     let kind = if is_mut { "a mutable" } else { "an immutable" };
     format!(
         "{0} is bound to {1} reference{2}",
         styled_name_html(my_name), kind,
-        bound_in_branches(diverged)
+        bound_in_branches(diverged, imaginary_else)
     )
 }
 
 /// `event_dot_branch_merge_bound` for a Copy variable (`let n = match x
 /// { 0 => 1, _ => 2 };`): an `i32` holds a value, not a resource it
 /// owns (#316). Matches the per-arm `event_dot_acquire_copyable`.
-pub fn event_dot_branch_merge_bound_copy(my_name: &String, diverged: &[(String, Vec<BranchExit>)]) -> String {
+pub fn event_dot_branch_merge_bound_copy(my_name: &String, diverged: &[(String, Vec<BranchExit>)], imaginary_else: bool) -> String {
     format!(
         "{0} is bound to a value{1}",
         styled_name_html(my_name),
-        bound_in_branches(diverged)
+        bound_in_branches(diverged, imaginary_else)
     )
 }
 
 /// The "in which branches" tail of the bound-at-merge messages: " (in
 /// all branches above)", or, when some branches never get here, "in
 /// every branch that reaches this point (the _ arm panicked)".
-fn bound_in_branches(diverged: &[(String, Vec<BranchExit>)]) -> String {
+fn bound_in_branches(diverged: &[(String, Vec<BranchExit>)], imaginary_else: bool) -> String {
+    if imaginary_else {
+        return " in the matching arm, which always runs".to_owned();
+    }
     if diverged.is_empty() {
         return " (in all branches above)".to_owned();
     }
@@ -5237,6 +5243,31 @@ pub fn event_dot_dead_else_note(my_name: &String) -> String {
         "The `if let` pattern above always matches, so this else branch never runs: nothing in it happens to {0}",
         styled_name_html(my_name)
     )
+}
+
+pub fn event_dot_imaginary_change(name: &String, assigned: bool, usable: bool) -> String {
+    let me = styled_name_html(name);
+    let change = if assigned { "would replace its value" } else { "would move its value" };
+    let mut title = format!("{me} keeps its value at runtime. The unreachable else arm {change}");
+    if usable {
+        title.push_str(&format!(". The borrow checker allows {me} to be used after the conditional"));
+    }
+    title
+}
+
+pub fn event_dot_borrowck_maybe_moved(name: &String) -> String {
+    let me = styled_name_html(name);
+    format!("The borrow checker treats {me} as possibly moved here, so {me} can't be used here")
+}
+
+pub fn event_dot_imaginary_initializer(name: &String) -> String {
+    let me = styled_name_html(name);
+    format!("The `if let` pattern always matches. When the matching arm yields a value, the let binding gives that value to {me} after the conditional")
+}
+
+pub fn event_dot_scrutinee_move_scope_end(name: &String) -> String {
+    let me = styled_name_html(name);
+    format!(". No resource is dropped. {me} was moved while evaluating the scrutinee, before the pattern matched.")
 }
 
 /// A `for` loop's pattern leaves `parts` of each element unbound (`.1`

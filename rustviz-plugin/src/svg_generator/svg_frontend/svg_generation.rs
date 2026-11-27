@@ -1043,9 +1043,10 @@ impl OneLineArmGaps {
         let own_row = |j: usize| j > 0 && spans[j].0 == spans[j - 1].1 && on_line(&branches[j], spans[j].0);
         // RustViz 3, design Q1: the arms leave a column in different states
         // (from MIR, `StateTable::arms_disagree`): one row per arm.
+        let imaginary_arm = one_line && branches.iter().any(|b| b.imaginary.is_some());
         let disagree = disagree && one_line;
         let gap_before: Vec<bool> = (0..spans.len())
-            .map(|j| stacked[j]
+            .map(|j| stacked[j] || (imaginary_arm && j > 0)
                 || ((nests || disagree) && own_row(j))
                 || (shares_row(j) && arms_arrows_overlap(branches, j, spans[j].0, binding_columns)))
             .collect();
@@ -1063,7 +1064,7 @@ impl OneLineArmGaps {
         let first_arm_diamond = branches.first().zip(spans.first()).is_some_and(|(b, &(start, _))|
             start == line_num && has_diamond(b, start));
         let fork_above = one_line && line_num >= 2 && (spread || first_arm_diamond);
-        OneLineArmGaps { gap_before, ends_on_merge, join_below, join_past_inner, fork_above }
+        OneLineArmGaps { gap_before, ends_on_merge: ends_on_merge || imaginary_arm, join_below, join_past_inner, fork_above }
     }
 
     /// Whether any arm got a row of its own: a one-line conditional
@@ -1119,72 +1120,6 @@ fn one_row_layout(visualization_data: &mut VisualizationData) -> BTreeSet<usize>
     walk(&visualization_data.preprocess_external_events, &visualization_data.state_table,
         &mut out, &mut visualization_data.exits_at_split);
     out
-}
-
-/// The rows of code that never runs (`StateTable::dead_rows`) inside an
-/// `else { .. }` block and outside every conditional drawn with arms: the
-/// dead `else` of an irrefutable `if let`, drawn inline (#987). (Not the
-/// code after an `if let` whose body always leaves: nothing is drawn for
-/// it, #1004.) Read while the events' lines are still source lines.
-fn inline_dead_rows(visualization_data: &VisualizationData) -> BTreeSet<usize> {
-    fn spans(events: &[(usize, ExternalEvent)], out: &mut Vec<(usize, usize)>) {
-        for (_, e) in events {
-            if let ExternalEvent::Branch { branches, split_point, merge_point, .. } = e {
-                out.push((*split_point, *merge_point));
-                for b in branches {
-                    spans(&b.e_data, out);
-                }
-            }
-        }
-    }
-    let mut drawn = Vec::new();
-    spans(&visualization_data.preprocess_external_events, &mut drawn);
-    // The `else` blocks: from the `else` keyword (a word of its own, not
-    // part of a name like `dead_else_early`) to the line its block's brace
-    // closes on, the `{` on that line or a later one. A closing line with
-    // only its `}` counts only where the code after it is dead too: else
-    // below it the conditional has joined, on the path that runs.
-    let text: Vec<String> = visualization_data.source_lines.iter().map(|l| timeline_panel::code_text(l)).collect();
-    let word = |c: char| c.is_alphanumeric() || c == '_';
-    let mut elses: Vec<(usize, usize, bool)> = Vec::new();
-    for (i, t) in text.iter().enumerate() {
-        let keywords = t.match_indices("else").map(|(p, _)| p).filter(|&p| {
-            !t[..p].chars().next_back().is_some_and(word) && !t[p + 4..].chars().next().is_some_and(word)
-        });
-        for p in keywords {
-            // The block's `{`: the first after the keyword.
-            let Some((oi, open)) = text.iter().enumerate().skip(i)
-                .find_map(|(j, line)| line[if j == i { p } else { 0 }..].find('{').map(|o| (j, o + if j == i { p } else { 0 })))
-            else { continue };
-            let mut depth = 0i64;
-            let close = text.iter().enumerate().skip(oi).find_map(|(j, line)| {
-                let from = if j == oi { open } else { 0 };
-                for (k, c) in line[from..].char_indices() {
-                    match c {
-                        '{' => depth += 1,
-                        '}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                return Some((j + 1, line[..from + k].trim().is_empty()));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                None
-            });
-            if let Some((close, lone)) = close {
-                elses.push((i + 1, close, lone && close > i + 1));
-            }
-        }
-    }
-    let dead = visualization_data.state_table.dead_rows();
-    // (A lone `}` counts where the code after it is dead too: the `if let`
-    // arm always leaves, so only the imaginary path goes on past it.)
-    dead.iter().copied()
-        .filter(|r| elses.iter().any(|&(e, c, lone)| e < *r && (*r < c || (*r == c && !(lone && !dead.contains(&(c + 1)))))))
-        .filter(|r| !drawn.iter().any(|(s, m)| s <= r && r <= m))
-        .collect()
 }
 
 /// How far an arm's first row moves (`start`, the line it starts on, of a
@@ -2362,7 +2297,6 @@ pub fn render_svg(
     // checks for fn neighbours, etc., reflect what the user will
     // actually see.
     let one_row_per_arm = one_row_layout(visualization_data);
-    visualization_data.inline_dead_rows = inline_dead_rows(visualization_data);
     let (post_hide_a, post_hide_s) = hide_source_lines(annotated_src_str, source_rs_str, visualization_data, hide_lines);
     let annotated_src_str: &str = post_hide_a.as_str();
     let source_rs_str: &str = post_hide_s.as_str();
@@ -2411,8 +2345,7 @@ pub fn render_svg(
     let (timeline_panel_string, max_width) = timeline_panel::render_timeline_panel(visualization_data);
     // Each element's `data-rv-id`, and its rows as code-panel lines.
     let timeline_panel_string = rv_attrs::finalize(&timeline_panel_string, &row_lines);
-    let mut tl_rv = rv_attrs::invalid_states_attr(visualization_data, &row_lines)
-        + &rv_attrs::source_rows_attr("data-rv-dead-rows", &visualization_data.inline_dead_rows);
+    let mut tl_rv = rv_attrs::invalid_states_attr(visualization_data, &row_lines);
     let unreachable = visualization_data.state_table.unreachable_rows()
         .map(|((line, col), row)| format!("{line}:{col}:{row}")).collect::<Vec<_>>().join(" ");
     if !unreachable.is_empty() {
