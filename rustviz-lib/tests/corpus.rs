@@ -28547,13 +28547,21 @@ fn one_line_arms_review_1871() {
 
     // One-line arms keep 2.x's leg title where the arm's own cell lends the
     // column the same way: the cell is read where the arm's value isn't in
-    // its variable yet, so it can't name the holder, and a title read for
-    // the row is the join's hedge.
+    // its variable yet, so it can't name the holder unless the facts prove
+    // it (the first pin below), and a title read for the row is the join's
+    // hedge.
     let tip_of = |fixture: &str, id: &str| -> String {
         let tl = run_with_local_backend(fixture).timeline_panel_string();
         rv_elements(&tl, id).into_iter().find(|e| e.0 == id).unwrap_or_else(|| panic!("{fixture}: no {id}")).1
     };
-    assert_eq!(tip_of("one_line_arm_overlap_1264", "f@L34:branch_line:partial_privilege"), "f's resource is being shared by one or more variables");
+    // `let r = match n { 0 => &f, _ => &g };` (#1877's arm facts read the
+    // arm on its own entry edge, so the cell now proves r took f's loan on
+    // the `0` arm: current, direct holder and holder_sources all say r).
+    // True, probed with rustc: `let _ = &mut f;` before `println!("{}", r)`
+    // is E0502 (r holds f's shared borrow), while the same `&mut f` inside
+    // the `_` arm compiles (f isn't borrowed on that path). So the title
+    // names r.
+    assert_eq!(tip_of("one_line_arm_overlap_1264", "f@L34:branch_line:partial_privilege"), "f's resource is being shared by one or more variables. r holds a shared borrow");
     assert_eq!(tip_of("arm_ref_binding_value_1327", "o2@L19:branch_line:partial_privilege"), "o2's resource is being shared by one or more variables");
     assert_eq!(tip_of("rv3_owner_lines_1852", "x@L44:branch_line:revoked_privilege"), "x's resource is mutably borrowed by r; x can't be used until the borrow ends");
     assert_eq!(tip_of("rv3_owner_lines_1852", "y@L44:branch_line:revoked_privilege"), "y's resource is mutably borrowed by s; y can't be used until the borrow ends");
