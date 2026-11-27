@@ -1354,6 +1354,8 @@ pub struct RowLayout {
     pub(crate) ended_before_call: BTreeMap<usize, BTreeSet<String>>,
     pub(crate) ended_at_fork: BTreeSet<(usize, u64)>,
     pub(crate) after_destructor: BTreeMap<usize, String>,
+    pub(crate) dropped_field_loans: BTreeMap<usize, DroppedFieldLoan>,
+    pub(crate) short_circuit_forks: BTreeSet<usize>,
     pub(crate) copied_ends: BTreeSet<usize>,
     /// Write event to the proven reference slot and its referent (`**s += 1`).
     pub(crate) retained_references: BTreeMap<usize, (String, String)>,
@@ -1368,6 +1370,14 @@ pub struct RowLayout {
     end_order: BTreeSet<(usize, usize)>,
     before: BTreeSet<(usize, usize)>,
     same_dot: BTreeMap<usize, Vec<usize>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DroppedFieldLoan {
+    pub(crate) field: String,
+    pub(crate) holder: String,
+    /// Whether this is a replacement drop, and whether it is conditional.
+    pub(crate) replacement: Option<bool>,
 }
 
 impl RowLayout {
@@ -1386,6 +1396,8 @@ impl RowLayout {
         self.shared_projected_calls.append(&mut other.shared_projected_calls);
         self.ended_at_fork.append(&mut other.ended_at_fork);
         self.after_destructor.append(&mut other.after_destructor);
+        self.dropped_field_loans.append(&mut other.dropped_field_loans);
+        self.short_circuit_forks.append(&mut other.short_circuit_forks);
         self.copied_ends.append(&mut other.copied_ends);
         self.retained_references.append(&mut other.retained_references);
         self.reassigned_receivers.append(&mut other.reassigned_receivers);

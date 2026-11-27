@@ -6655,7 +6655,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let from_ro = self.returned_part(arg).unwrap_or(from_ro);
           self.add_ev(line_num, Evt::Copy, to_ro, from_ro, false)
         }
-        false => self.add_ev(line_num, Evt::Move, to_ro, from_ro, false)
+        false => {
+          self.add_ev(line_num, Evt::Move, to_ro, from_ro, false);
+          // The ordinary replay of a short-circuit RHS doesn't see
+          // through the parent's move. End each reference field here
+          // even if it could be copied out of the holder on its own.
+          if let Some(transfer) = self.transfer_at(arg).filter(|t| matches!(t.kind, Evt::Move)) {
+            if let Some(moved) = self.body_facts.and_then(|b| b.drop_moves.get(&transfer.location)) {
+              for field in &moved.fields {
+                if let Some(rd) = self.raps.place(moved.local, field).filter(|r| r.rap.is_ref()) {
+                  self.add_ev(transfer.row, Evt::Move, ResourceTy::Anonymous, ResourceTy::Value(rd.rap.clone()), false);
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -7866,7 +7880,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// (`hold = make(hold.r)`, `hold = H { r: hold.r }`) stays borrowed by
   /// it: no end is drawn there, only where the new borrow ends.
   /// (`all_new`: every borrow of the new value is a new loan.)
-  pub fn draw_struct_field_borrow_ends(&mut self, ends: Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)>, all_new: bool) {
+  pub fn draw_struct_field_borrow_ends(&mut self, lhs: &Expr<'_>, ends: Vec<(usize, Vec<ResourceTy>, ResourceTy, bool)>, all_new: bool) {
     for (end, lenders, holder, is_mut) in ends {
       let now = holder.extract_rap()
         .filter(|_| !all_new)
@@ -7878,10 +7892,54 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           continue;
         }
         let id = *self.unique_id;
+        if let Some(loan) = self.overwritten_drop_loan(lhs, &holder, &l, is_mut) {
+          self.end_loans.insert(id, vec![loan]);
+        }
         self.add_ev(end, if is_mut { Evt::MDie } else { Evt::SDie }, l, holder.clone(), false);
         self.field_overwrite_ends.extend(id..*self.unique_id);
       }
     }
+  }
+
+  /// Identify the old loan by the assignment's destructor. On the
+  /// other path the same slot moved into drop before the assignment.
+  fn overwritten_drop_loan(&self, lhs: &Expr<'_>, holder: &ResourceTy, lender: &ResourceTy, is_mut: bool) -> Option<usize> {
+    use crate::facts::{DropRoute, Fact};
+    let (ResourceTy::Value(field), ResourceTy::Value(lender)) = (holder, lender) else { return None };
+    let facts = self.body_facts?;
+    let mut drops = self.effects.get(&lhs.span.with_parent(None))?.iter().filter_map(|&(_, ev)| {
+      if !matches!(ev.fact, Fact::Drop { at_reassign: true, .. }) { return None; }
+      let local = ev.place_local?;
+      let ids = facts.reassign_drop_loans.get(&ev.location)?;
+      self.raps.place(local, field.name()).filter(|r| r.rap == *field)?;
+      Some((ev.location, local, ids))
+    });
+    let (drop, local, ids) = drops.next()?;
+    if drops.any(|(other, ..)| other != drop) { return None; }
+    let is_field = |p: &crate::facts::EndPlace| p.local == local.index() && p.name == *field.name();
+    let mut loans = facts.loans.iter().filter(|l| ids.contains(&l.loan)
+      && l.lender == *lender.name()
+      && l.lender_local.is_some_and(|local| self.raps.place(local, lender.name()).is_some_and(|r| r.rap == *lender))
+      && l.kind == if is_mut { "mut" } else { "shared" }
+      && facts.rows.iter().flat_map(|row| &row.facts).any(|ev| ev.location == drop
+          && matches!(ev.fact, Fact::BorrowEnd { loan, .. } if loan == l.loan)
+          && ev.end_places.iter().any(is_field)));
+    let loan = loans.next()?.loan;
+    if loans.next().is_some() { return None; }
+    let mut overwrite = false;
+    let mut explicit = false;
+    for ev in facts.rows.iter().flat_map(|row| &row.facts) {
+      if !matches!(ev.fact, Fact::BorrowEnd { loan: id, .. } if id == loan) { continue; }
+      if ev.drop_route == DropRoute::Unwind { return None; }
+      if ev.location == drop && ev.end_places.iter().any(is_field) {
+        overwrite = true;
+      } else if facts.explicit_drop_ends.get(&(ev.location, loan)).is_some_and(|fields| fields.iter().any(is_field)) {
+        explicit = true;
+      } else {
+        return None;
+      }
+    }
+    (overwrite && explicit).then_some(loan)
   }
 
   /// After `let h = init;` was drawn: a holder whose initializer

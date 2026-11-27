@@ -209,8 +209,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let (from, to) = endpoints(&ev);
       let holder = from.real_name();
       let own = matches!(ev, ExternalEvent::RefDie { .. });
+      // These overwrite templates get a loan ID only when each edge is
+      // the assignment's drop or an explicit drop of the old holder.
+      let dropped = self.field_overwrite_ends.remove(&ev.get_id());
       let mut sites = BTreeMap::<Site, BTreeSet<usize>>::new();
       let mut lender_only = BTreeSet::new();
+      let mut replacement_drops = BTreeMap::new();
+      let mut drop_holder = None;
       for row in &facts.rows {
         for edge in &row.facts {
           let (loan, h, next, is_own) = match &edge.fact {
@@ -218,7 +223,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             Fact::HoldEnd { loan, holder, to_line, .. } => (loan, holder, to_line, true),
             _ => continue,
           };
-          if !ids.contains(loan) {
+          if !ids.contains(loan) || dropped && is_own {
+            continue;
+          }
+          if dropped {
+            let mut site = Site { path: Vec::new(), before: None, row: row.line };
+            self.locate(self.preprocessed_events, &switches, edge.display_location, edge, *next, &mut site);
+            // The field is gone at either drop. Mark the release on
+            // the lender without ending the new field's borrow.
+            if let Some((name, conditional)) = row.facts.iter().find_map(|ev| match &ev.fact {
+              Fact::Drop { path, at_reassign: true, how, .. } if ev.location == edge.location =>
+                Some((path.as_str(), *how == "drops_if_init")),
+              _ => None,
+            }) {
+              drop_holder = Some(name);
+              replacement_drops.insert(site.clone(), conditional);
+            }
+            lender_only.insert(site.clone());
+            sites.entry(site).or_default().insert(*loan);
             continue;
           }
           let Some(info) = facts.loans.iter().find(|l| l.loan == *loan) else { continue };
@@ -292,7 +314,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           Site { path: common, before: None, row: line }
         }
       };
-      let individual = site.before.is_some() && sites.len() > 1;
+      let individual = dropped || site.before.is_some() && sites.len() > 1;
       let destinations = if individual { sites } else { BTreeMap::from([(site, ids.iter().copied().collect())]) };
       let mut first = true;
       for (site, loans) in destinations {
@@ -319,6 +341,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           if let ExternalEvent::StaticDie { from, .. } | ExternalEvent::MutableDie { from, .. } = &mut e {
             *from = ResourceTy::Anonymous;
           }
+        }
+        if let Some(parent) = drop_holder {
+          self.row_layout.dropped_field_loans.insert(e.get_id(), crate::event_order::DroppedFieldLoan {
+            field: holder.clone(), holder: parent.to_owned(), replacement: replacement_drops.get(&site).copied(),
+          });
         }
         first = false;
         put.push((site, e));

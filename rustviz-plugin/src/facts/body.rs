@@ -644,6 +644,50 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         self.rows.row.get(&l).copied().unwrap_or(0)
     }
 
+    /// Named places moved into a call argument. At a join, follow each real
+    /// predecessor to the assignment that supplies the argument on that path.
+    fn drop_sources(
+        &self, call: Location, operand: Place<'tcx>, runs: &BTreeSet<rustc_middle::mir::BasicBlock>,
+    ) -> Vec<(Location, Place<'tcx>)> {
+        let mut inputs = Vec::new();
+        let mut work = vec![(call, operand)];
+        let mut seen = std::collections::HashSet::new();
+        while let Some((at, place)) = work.pop() {
+            if !seen.insert((at, place)) { continue; }
+            if self.is_user(place) {
+                inputs.push((at, place));
+                continue;
+            }
+            let Some(local) = place.as_local() else { continue };
+            let data = &self.body[at.block];
+            let definition = data.statements[..at.statement_index].iter().enumerate().rev().find(|(_, st)| {
+                match &st.kind {
+                    StatementKind::Assign(a) => a.0.local == local,
+                    StatementKind::StorageLive(l) | StatementKind::StorageDead(l) => *l == local,
+                    _ => false,
+                }
+            });
+            if let Some((i, st)) = definition {
+                if let StatementKind::Assign(a) = &st.kind {
+                    if let (true, Rvalue::Use(Operand::Move(source))) = (a.0 == place, &a.1) {
+                        work.push((Location { block: at.block, statement_index: i }, *source));
+                    }
+                }
+                continue;
+            }
+            for pred in super::rows::real_predecessors(self.body, at.block) {
+                let data = &self.body[pred];
+                if !runs.contains(&pred) || data.is_cleanup
+                    || matches!(data.terminator().kind, TerminatorKind::Call { destination, .. } if destination.local == local)
+                {
+                    continue;
+                }
+                work.push((self.body.terminator_loc(pred), place));
+            }
+        }
+        inputs
+    }
+
     /// Follow the reaching definitions of the temporaries staging an aggregate
     /// operand. An implicit reborrow has its own issue location. A raw address,
     /// a scalar read through a reference, and a call result are not that loan.
@@ -1677,6 +1721,55 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         column.parent = parents.get(&(column.local, column.name.as_str())).map(|p| (*p).to_owned());
     }
     let column_name = |mpi: MovePathIndex| columns.iter().find(|(m, _, _)| *m == mpi).map(|(_, _, n)| n.clone());
+    let body_root = tcx.hir_body_owned_by(def_id.expect_local()).value.hir_id;
+    let mut drop_moves = BTreeMap::new();
+    let mut short_circuit_branches = rustc_data_structures::fx::FxHashSet::default();
+    let mut drop_inputs = BTreeMap::<_, Vec<_>>::new();
+    for &block in &runs {
+        let data = &body[block];
+        let call = body.terminator_loc(block);
+        let TerminatorKind::Call { func, args, .. } = &data.terminator().kind else { continue };
+        if data.is_cleanup || !func.const_fn_def().is_some_and(|(def, _)| tcx.is_diagnostic_item(rustc_span::sym::mem_drop, def)) {
+            continue;
+        }
+        let [arg] = args.as_ref() else { continue };
+        let Operand::Move(source) = arg.node else { continue };
+        // The compiler's source scope identifies the operand that contains
+        // the call. The places and their move sites come from the MIR CFG.
+        let mut child = body.location_to_hir_id(call);
+        let mut short_circuit = None;
+        for (parent, node) in tcx.hir_parent_iter(child) {
+            use rustc_hir::{BinOpKind, ExprKind, Node};
+            if child == body_root { break; }
+            if matches!(node, Node::Expr(e)
+                if matches!(e.kind, ExprKind::Binary(op, _, rhs)
+                    if matches!(op.node, BinOpKind::And | BinOpKind::Or) && rhs.hir_id == child))
+            {
+                short_circuit = Some(parent);
+                break;
+            }
+            child = parent;
+        }
+        for (at, source) in cx.drop_sources(call, source, &runs) {
+            // Fields without their own move path are taken by the same
+            // move, including reference fields of Copy type.
+            if !move_data.loc_map[at].iter().any(|&m| move_data.move_paths[move_data.moves[m].path].place == source) {
+                continue;
+            }
+            let fields: Vec<_> = columns.iter().chain(&synth).filter(|(_, place, _)| {
+                place.local == source.local && place.projection.len() > source.projection.len()
+                    && place.projection.starts_with(source.projection) && place.ty(&body.local_decls, tcx).ty.is_ref()
+            }).collect();
+            if fields.is_empty() { continue; }
+            drop_inputs.entry(call).or_default().extend(fields.iter().map(|(_, p, _)| (at, *p)));
+            if let Some(branch) = short_circuit {
+                short_circuit_branches.insert(branch);
+                drop_moves.insert(at, DropMove {
+                    local: source.local, fields: fields.iter().map(|(_, _, name)| name.clone()).collect(),
+                });
+            }
+        }
+    }
 
     // ---- Polonius, once ---------------------------------------------------------
     let pfacts = bwf.input_facts.as_ref();
@@ -3014,6 +3107,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }
     let mut drop_holders = BTreeMap::<usize, BTreeSet<String>>::new();
     let mut reassign_drop_holders = BTreeMap::<_, BTreeSet<_>>::new();
+    let mut reassign_drop_loans = BTreeMap::<_, BTreeSet<_>>::new();
+    let mut explicit_drop_ends = BTreeMap::<_, BTreeSet<_>>::new();
     for ev in evs.values_mut().flatten() {
         let Fact::BorrowEnd { loan, holder, why, .. } = &mut ev.fact else { continue };
         let Some(li) = loans.iter().find(|li| li.loan == *loan) else { continue };
@@ -3045,7 +3140,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     && ty.needs_drop(tcx, typing_env) && carries_at_drop()
                 {
                     reassign_drop_holders.entry(place.local).or_default().insert(*loan);
+                    reassign_drop_loans.entry(at).or_default().insert(*loan);
                 }
+            }
+        }
+        if let Some(inputs) = drop_inputs.get(&at) {
+            for &(source, field) in inputs {
+                let (fields, _, _) = end_provenance(&mut flow, source, BorrowIndex::from_usize(*loan), li, Some(field));
+                explicit_drop_ends.entry((at, *loan)).or_default().extend(fields);
             }
         }
         ev.caller_slot = caller_slot;
@@ -5800,6 +5902,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         residual_drops,
         short_call_borrows,
         drop_holders,
+        reassign_drop_loans,
+        drop_moves,
+        short_circuit_branches,
+        explicit_drop_ends,
         switches,
         bindings: cx.names.bindings.into(),
         closure_result_loans,
