@@ -34,6 +34,7 @@ use rustc_hir::def::DefKind;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
 pub use schema::*;
+pub(crate) use rows::real_successor_blocks;
 pub(crate) use body::{after_diverging_closure, dropped_on_residual, loop_enters_pattern};
 
 pub(crate) fn is_vec_expansion(tcx: TyCtxt<'_>, expansion: rustc_span::hygiene::ExpnId) -> bool {

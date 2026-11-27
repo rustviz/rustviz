@@ -424,6 +424,9 @@ pub struct Ev {
     /// Reachability of a scope drop without traversing its early exits.
     #[serde(skip)]
     pub drop_route: DropRoute,
+    /// Successor on which this borrow or hold ends. Two edges can lead to the same display row.
+    #[serde(skip)]
+    pub end_successor: Option<rustc_middle::mir::Location>,
     /// Source column (1-based) where the MIR location's span starts.
     pub col: usize,
     /// The innermost arm of this event's row. For an early-exit drop,
@@ -440,9 +443,34 @@ pub struct Ev {
     /// location (its order), so copies on two exits stay two events.
     #[serde(skip)]
     pub site: Option<(usize, usize, u8)>,
-    /// The successor of a borrow-end edge, in the same MIR order as `order`.
-    #[serde(skip)]
-    pub successor: Option<(usize, usize, u8)>,
+}
+
+impl Ev {
+    /// Display coordinates can coincide for two different MIR edges.
+    pub(super) fn same_occurrence(&self, other: &Self) -> bool {
+        self.fact == other.fact && self.order == other.order && self.site == other.site
+            && self.end_successor == other.end_successor
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DropRoute, Ev, Fact};
+    use rustc_middle::mir::{BasicBlock, Location};
+
+    #[test]
+    fn dedup_keeps_ends_with_distinct_mir_successors() {
+        let first = Ev {
+            location: Location::START, drop_route: DropRoute::Normal, end_successor: Some(BasicBlock::from_usize(1).start_location()),
+            col: 8, arm: None, order: (0, 0, 1), site: None,
+            fact: Fact::HoldEnd { loan: 0, holder: "other.r".into(), to_line: 4, to_col: 1 },
+        };
+        let mut second = first.clone();
+        second.end_successor = Some(BasicBlock::from_usize(2).start_location());
+        let mut facts = vec![first.clone(), first, second];
+        facts.dedup_by(|a, b| a.same_occurrence(b));
+        assert_eq!(facts.len(), 2);
+    }
 }
 
 #[derive(Serialize, Clone, PartialEq, Eq)]

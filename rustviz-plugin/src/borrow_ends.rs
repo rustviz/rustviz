@@ -16,6 +16,7 @@
 //! body's rows still have it lent on the paths that go round again (Q6).
 
 use crate::facts::schema::{BodyFacts, Fact, LoanInfo};
+use crate::svg_generator::data::IteratorExhaustion;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_middle::ty::TyCtxt;
 use std::collections::BTreeSet;
@@ -79,6 +80,40 @@ impl<'a> BodyEnds<'a> {
     let mut v = Loops { tcx, out: Vec::new() };
     v.visit_expr(hir_body.value);
     BodyEnds { facts, loops: v.out }
+  }
+
+  /// Ends reached when next() yields None. The real MIR successor runs
+  /// the desugaring's break, whose target identifies the loop even when
+  /// loops nest. Exclude an item binding absent on the exhaustion arm
+  /// (the fact's list of possible holders can also name that binding).
+  pub fn exhaustion_edges<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &rustc_middle::mir::Body<'tcx>)
+    -> std::collections::BTreeMap<(usize, &'a str), Vec<IteratorExhaustion>> {
+    use rustc_utils::BodyExt;
+    let mut out = std::collections::BTreeMap::new();
+    for row in &self.facts.rows {
+      for ev in &row.facts {
+        let Fact::BorrowEnd { loan, holder, .. } = &ev.fact else { continue };
+        let Some(dest) = ev.end_successor else { continue };
+        let rustc_hir::Node::Expr(e) = tcx.hir_node(body.location_to_hir_id(dest)) else { continue };
+        if e.span.desugaring_kind() != Some(rustc_span::DesugaringKind::ForLoop) { continue }
+        let rustc_hir::ExprKind::Break(d, None) = e.kind else { continue };
+        let Ok(target) = d.target_id else { continue };
+        let closing_row = tcx.sess.source_map().lookup_char_pos(tcx.hir_span(target).hi()).line;
+        let arm = ev.arm.and_then(|i| row.arms.get(i));
+        for h in holder.split('|').filter(|h| match arm {
+          Some(arm) => arm.after.state.get(*h) == Some(&"own"),
+          // A wildcard can leave no item arm to distinguish on the row.
+          None => *h == holder && !h.is_empty(),
+        }) {
+          let edges = out.entry((*loan, h)).or_insert_with(Vec::new);
+          let edge = IteratorExhaustion { target, closing_row };
+          if !edges.contains(&edge) {
+            edges.push(edge);
+          }
+        }
+      }
+    }
+    out
   }
 
   /// The loans whose own reference `k` holds (stored in it, copied or moved

@@ -48,10 +48,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // A guard whose call stores a borrow and turns out false: the later
     // arm's legs start where the columns have no dot.
     ("guard_stores_borrow_1769", "line-starts-nowhere", 1786),
-    // Q6: the loop's exit edge ends the iterator's loan on the loop's
-    // closing row; every arm of the body's last `if` leaves the body, and
-    // the renderer ends xs's column in them.
-    ("exit_loop_body_all_exit", "event-on-dead-column", 1864),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     // A borrow arrow leaving an arm's dot along the fork leg, its track

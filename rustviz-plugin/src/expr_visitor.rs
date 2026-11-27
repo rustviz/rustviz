@@ -1006,6 +1006,7 @@ pub struct ExitScope {
   /// First and last line of the innermost loop around the conditional,
   /// which a `break` / `continue` in it leaves.
   pub loop_lines: Option<(usize, usize)>,
+  pub loop_id: Option<rustc_hir::HirId>,
 }
 
 /// `rap` was moved in a branch that leaves through the `break` `brk`
@@ -2946,8 +2947,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
         result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false, deep: None,
       },
-      Evt::SDie =>  ExternalEvent::StaticDie { of_ref_var: pattern_ref(&rhs, &lhs), from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() },
-      Evt::MDie => ExternalEvent::MutableDie { of_ref_var: pattern_ref(&rhs, &lhs), from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new() }
+      Evt::SDie =>  ExternalEvent::StaticDie { of_ref_var: pattern_ref(&rhs, &lhs), from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), exhaustion: Vec::new() },
+      Evt::MDie => ExternalEvent::MutableDie { of_ref_var: pattern_ref(&rhs, &lhs), from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), exhaustion: Vec::new() }
     }
   }
 
@@ -3719,9 +3720,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       || matches!((&from, &to), (ResourceTy::Value(h), ResourceTy::Value(l))
         if self.stored_ref_var_lends.contains(&(h.name().to_owned(), l.name().to_owned())));
     let ev = if ref_data.mut_of(&to) {
-      ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by, of_ref_var }
+      ExternalEvent::MutableDie { from, to, id, static_lender, still_borrowed_by, of_ref_var, exhaustion: Vec::new() }
     } else {
-      ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by, of_ref_var }
+      ExternalEvent::StaticDie { from, to, id, static_lender, still_borrowed_by, of_ref_var, exhaustion: Vec::new() }
     };
     self.add_external_event(line_num, ev);
   }
@@ -3882,6 +3883,90 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return None;
     }
     Some(DeepPlace { derefs: derefs - 1, holds_value: holds_value(place_ty), held_mut: None, elem: None })
+  }
+
+  /// Reference columns whose hold ends on the edge that bypasses the body.
+  pub(crate) fn skipped_holds(&self, guard: &Expr<'_>, then: &Expr<'_>) -> BTreeMap<u64, SkippedHold> {
+    use crate::facts::Fact;
+    use rustc_middle::mir::{BasicBlock, TerminatorKind};
+    let mut holds = BTreeMap::<u64, SkippedHold>::new();
+    let Some(body) = self.body_facts else { return holds };
+    let mir = self.mir_body;
+    let doms = mir.basic_blocks.dominators();
+    let reachable = |start: BasicBlock, test: BasicBlock| {
+      let mut seen = BTreeSet::new();
+      let mut work = vec![start];
+      while let Some(b) = work.pop() {
+        // A back edge can reach the same test with a fresh value.
+        if b != test && seen.insert(b) {
+          work.extend(crate::facts::real_successor_blocks(mir, b).into_iter().filter(|&next| !doms.dominates(next, b)));
+        }
+      }
+      seen
+    };
+    let facts = || body.rows.iter().flat_map(|row| &row.facts);
+    let skip_edge = |ev: &crate::facts::Ev| {
+      let test = ev.location.block;
+      let bb = &mir.basic_blocks[test];
+      let TerminatorKind::SwitchInt { discr, .. } = &bb.terminator().kind else { return None };
+      if ev.location.statement_index != bb.statements.len() || !discr.ty(mir, self.tcx).is_bool()
+        || !guard.span.contains(bb.terminator().source_info.span) { return None; }
+      let skip = ev.end_successor?.block;
+      let successors = crate::facts::real_successor_blocks(mir, test);
+      let &[left, right] = successors.as_slice() else { return None };
+      if skip == left && skip != right { Some((test, skip, right)) }
+      else if skip == right && skip != left { Some((test, skip, left)) }
+      else { None }
+    };
+    for ev in facts() {
+      let Fact::HoldEnd { holder, loan, .. } = &ev.fact else { continue };
+      let Some(rap) = self.raps.get(holder).map(|r| &r.rap).filter(|r| r.is_member() && r.is_ref()) else { continue };
+      if skip_edge(ev).is_none() || holds.get(rap.hash()).is_some_and(|h| h.loans.contains_key(loan)) { continue; }
+      let mut moves = BTreeSet::new();
+      let mut bypasses = Vec::new();
+      for row in &body.rows {
+        for e in &row.facts {
+          if !matches!(&e.fact, Fact::HoldEnd { holder: h, loan: l, .. } if h == holder && l == loan) { continue; }
+          if then.span.contains(mir.source_info(e.location).span)
+            && row.facts.iter().any(|m| m.location == e.location && matches!(&m.fact, Fact::Move { path, .. }
+              if holder.strip_prefix(path.as_str()).is_some_and(|suffix| suffix.starts_with('.')))) {
+            moves.insert(e.location.block);
+          } else {
+            bypasses.push(e);
+          }
+        }
+      }
+      let loan_ends = || facts().filter_map(|e| match &e.fact {
+          Fact::BorrowEnd { loan: l, holder, lender, why, .. } if l == loan => Some((e.location.block, holder, lender, why)),
+          _ => None,
+      });
+      if moves.is_empty() || loan_ends().any(|(_, h, _, _)| h.split('|').any(|part| part == holder)) { continue; }
+      // A short-circuit condition can have several edges into the same
+      // implicit else. All must bypass the moves and reach the join.
+      let explanations = bypasses.into_iter().map(|end| {
+        let (test, skip, taken) = skip_edge(end)?;
+        let skipped = reachable(skip, test);
+        let taken = reachable(taken, test);
+        if !moves.iter().all(|&m| !skipped.contains(&m) && taken.contains(&m) && !reachable(m, test).is_disjoint(&skipped)) {
+          return None;
+        }
+        // Name the continuing restriction only when the ends reachable
+        // from the skipped edge identify one lender and last holder.
+        let mut ends = loan_ends().filter(|(block, ..)| skipped.contains(block)).map(|(_, h, l, why)| (h, l, why));
+        let until = ends.next().filter(|&(h, l, why)| why == "no further use"
+          && ends.all(|other| other == (h, l, why))
+          && body.columns.iter().any(|c| c.name == *h)
+          && body.columns.iter().any(|c| c.name == *l));
+        Some(until.map(|(h, l, _)| (l, h)))
+      }).collect::<Option<Vec<_>>>();
+      if let Some(explanations) = explanations {
+        let mut explanations = explanations.into_iter();
+        let until = explanations.next().flatten().filter(|&pair| explanations.all(|other| other == Some(pair)))
+          .map(|(l, h)| (l.clone(), h.clone()));
+        holds.entry(*rap.hash()).or_default().loans.insert(*loan, until);
+      }
+    }
+    holds
   }
 
   /// An actual read of a named MIR place at this expression. Effects sharing
@@ -12545,6 +12630,7 @@ pub fn print_out_of_scope(&mut self){
         .then_with(|| sa.key.cmp(&sb.key))
     });
 
+    let exhaustion_edges = ix.as_ref().map(|ix| ix.exhaustion_edges(self.tcx, self.mir_body)).unwrap_or_default();
     for i in order {
       let slot = &slots[i];
       let k = &slot.key;
@@ -12601,15 +12687,26 @@ pub fn print_out_of_scope(&mut self){
             let end_from = if self.for_moved_holders.contains(k) { ResourceTy::Anonymous }
               else if let Some(c) = self.closure_moved_into(&from_ro) { ResourceTy::Value(c) }
               else { ResourceTy::Value(from_ro.clone()) };
+            let id = *self.unique_id;
             if co {
               let evt = if rd.mut_of(&lender) { Evt::MDie } else { Evt::SDie };
               self.add_ev(line, evt, lender.clone(), end_from, false);
             } else {
               self.add_borrow_end_ev(line, to_ro.clone(), end_from, &rd, Vec::new());
             }
+            if let Some((_, ExternalEvent::StaticDie { exhaustion, .. } | ExternalEvent::MutableDie { exhaustion, .. })) =
+              self.preprocessed_events.last_mut().filter(|(_, event)| event.get_id() == id) {
+              // Keep the edge when arm placement copies this end to a
+              // different path and assigns the copy a new event ID.
+              for edge in loans.iter().filter_map(|loan| exhaustion_edges.get(&(*loan, k.as_str()))).flatten() {
+                if !exhaustion.contains(edge) {
+                  exhaustion.push(edge.clone());
+                }
+              }
+            }
           }
           End::LoopExit { own, back } => {
-            self.add_own_end(own, &from_ro, to_ro.clone(), k);
+            self.add_own_end(own, &from_ro, to_ro.clone(), k, &[]);
             let evt = if rd.mut_of(&lender) { Evt::MDie } else { Evt::SDie };
             self.add_ev(back, evt, to_ro, ResourceTy::Anonymous, false);
           }
@@ -12641,7 +12738,7 @@ pub fn print_out_of_scope(&mut self){
             if !from_ro.is_ref() && from_ro.holds_borrow() && self.moved_into_call_on(&from_ro, line) {
               break 'own;
             }
-            self.add_own_end(line, &from_ro, to_ro, k);
+            self.add_own_end(line, &from_ro, to_ro, k, &loans);
           }
         }
         if !loans.is_empty() {
@@ -12655,11 +12752,14 @@ pub fn print_out_of_scope(&mut self){
 
   /// `r`'s own end on `line` (a `RefDie`: no arrow), before its scope end
   /// if that is on the same line (#913).
-  fn add_own_end(&mut self, line: usize, r: &ResourceAccessPoint, to: ResourceTy, key: &str) {
+  fn add_own_end(&mut self, line: usize, r: &ResourceAccessPoint, to: ResourceTy, key: &str, loans: &[usize]) {
     let id = *self.unique_id;
     let others = if self.borrow_map.contains_key(key) { get_borrowers(&key.to_owned(), &self.borrow_map).len().saturating_sub(1) } else { 0 };
-    self.add_external_event(line, ExternalEvent::RefDie { from: ResourceTy::Value(r.clone()), to, num_curr_borrowers: others, id });
+    let end = ExternalEvent::RefDie { from: ResourceTy::Value(r.clone()), to, num_curr_borrowers: others, id };
     *self.unique_id += 1;
+    if r.is_member() && !loans.is_empty() && !self.event_touches_skipped(&end)
+      && place_skipped_hold(self.preprocessed_events, r, loans, &end) { return; }
+    self.add_external_event(line, end);
   }
 
   /// The pass pipeline that places the ends into arms and orders them on
@@ -12692,6 +12792,7 @@ pub fn print_out_of_scope(&mut self){
     // the arms' legs (#1525).
     self.nest_borrow_ends_in_arms_with(true);
     end_let_else_scrutinee_borrows(self.preprocessed_events, &self.let_else_scrutinees, self.unique_id);
+    mark_exhaustion_paths(self.preprocessed_events, &self.exit_scopes);
     if let Some(facts) = facts {
       crate::event_order::order_body(self, facts);
     }
@@ -12764,7 +12865,7 @@ pub fn print_out_of_scope(&mut self){
     // Conditionals in a loop body, with the loop's head row.
     let mut in_loop: Vec<(usize, usize)> = Vec::new();
     for (k, (_, ev)) in self.preprocessed_events.iter().enumerate() {
-      let ExternalEvent::Branch { branches, merge_point, branch_type, id, .. } = ev else { continue };
+      let ExternalEvent::Branch { branches, merge_point, branch_type, id, skipped_holds, .. } = ev else { continue };
       if matches!(branch_type, BranchType::Loop(..)) {
         continue;
       }
@@ -12773,7 +12874,10 @@ pub fn print_out_of_scope(&mut self){
       }
       for b in branches.iter() {
         for (_, e) in b.e_data.iter() {
-          if let ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } = e {
+          if let ExternalEvent::RefDie { from: ResourceTy::Value(r), id, .. } = e {
+            if skipped_holds.get(r.hash()).is_some_and(|hold| hold.event == Some(*id)) {
+              continue;
+            }
             #[expect(clippy::disallowed_methods, reason = "`any` over the set: order never observed")]
             let declared = branches.iter().any(|x| x.decl_vars.iter().any(|d| d.hash() == r.hash()));
             if !declared && !checks.iter().any(|(i, _, n)| *i == k && n == r.name()) {
@@ -12791,9 +12895,10 @@ pub fn print_out_of_scope(&mut self){
       if !next_time && self.last_live_line(&name, (merge + 1, usize::MAX)).is_none() {
         continue;
       }
-      if let ExternalEvent::Branch { branches, .. } = &mut self.preprocessed_events[k].1 {
+      if let ExternalEvent::Branch { branches, skipped_holds, .. } = &mut self.preprocessed_events[k].1 {
         for b in branches.iter_mut() {
-          b.e_data.retain(|(_, e)| !matches!(e, ExternalEvent::RefDie { from: ResourceTy::Value(r), .. } if *r.name() == name));
+          b.e_data.retain(|(_, e)| !matches!(e, ExternalEvent::RefDie { from: ResourceTy::Value(r), id, .. }
+            if *r.name() == name && !skipped_holds.get(r.hash()).is_some_and(|hold| hold.event == Some(*id))));
         }
       }
     }
@@ -14267,6 +14372,60 @@ fn end_after_last_use(
   events.insert(at.1, (at.0, end));
 }
 
+/// A HoldEnd on a branch edge belongs to its arm even if the entire
+/// conditional occupies one source row. Keep it there during layout.
+fn place_skipped_hold(events: &mut [(usize, ExternalEvent)], r: &ResourceAccessPoint, loans: &[usize], end: &ExternalEvent) -> bool {
+  for (_, ev) in events {
+    let ExternalEvent::Branch { live_vars, skipped_holds, branches, split_point, merge_point, .. } = ev else { continue };
+    if let Some(hold) = skipped_holds.get_mut(r.hash()).filter(|hold| live_vars.contains(r)
+      && hold.event.is_none() && loans.iter().all(|l| hold.loans.contains_key(l))) {
+      if let Some(arm) = branches.get_mut(1) {
+        arm.e_data.insert(0, (branch_column_rows(*split_point, *merge_point).0, end.clone()));
+        hold.event = Some(end.get_id());
+        return true;
+      }
+    }
+    if branches.iter_mut().any(|arm| place_skipped_hold(&mut arm.e_data, r, loans, end)) { return true; }
+  }
+  false
+}
+
+/// If all arms leave this iteration, a later end in the same timeline
+/// can still be reached directly from the iterator's exhaustion edge.
+/// Match the placed end to the loop by its rustc jump target.
+fn mark_exhaustion_paths(
+  events: &mut [(usize, ExternalEvent)],
+  scopes: &HashMap<usize, ExitScope>,
+) {
+  let mut later = HashMap::<_, BTreeSet<u64>>::new();
+  for (line, event) in events.iter_mut().rev() {
+    for (target, column) in exhaustion_at(event, *line) {
+      later.entry(target).or_default().insert(column);
+    }
+    if let ExternalEvent::Branch { branches, id, on_exhaustion, .. } = event {
+      if !branches.is_empty() && branches.iter().all(|b| b.diverges) {
+        if let Some(columns) = scopes.get(id).and_then(|s| s.loop_id).and_then(|l| later.remove(&l)) {
+          *on_exhaustion = columns;
+        }
+      }
+      for arm in branches {
+        mark_exhaustion_paths(&mut arm.e_data, scopes);
+      }
+    }
+  }
+}
+
+/// The end's loan has an exhaustion edge to this loop's closing row.
+fn exhaustion_at(event: &ExternalEvent, line: usize) -> impl Iterator<Item = (rustc_hir::HirId, u64)> + '_ {
+  let end = match event {
+    ExternalEvent::StaticDie { from: ResourceTy::Value(r), exhaustion, .. }
+    | ExternalEvent::MutableDie { from: ResourceTy::Value(r), exhaustion, .. } => Some((*r.hash(), exhaustion)),
+    _ => None,
+  };
+  end.into_iter().flat_map(move |(hash, edges)| edges.iter()
+    .filter(move |edge| edge.closing_row == line).map(move |edge| (edge.target, hash)))
+}
+
 /// What `end_borrows_at_exits_in` needs from the visitor.
 struct ExitCtx<'b> {
   scopes: &'b HashMap<usize, ExitScope>,
@@ -14530,6 +14689,9 @@ fn end_borrows_at_exits_in(
       let Some((r, to)) = borrow_end_of(&tail[j].1).map(|(r, to)| (r.clone(), to.clone())) else {
         continue;
       };
+      if exhaustion_at(&tail[j].1, tail[j].0).next().is_some() {
+        continue;
+      }
       // (`events` aren't in line order yet: an end before the
       // conditional is the end of an earlier variable of the same name,
       // whose column a binding in the arms took over, #1400.)
@@ -14770,9 +14932,9 @@ fn end_lender_in_other_arms(
       *unique_id += 1;
       let (from, to) = (ResourceTy::Anonymous, ResourceTy::Value(lender.clone()));
       let ev = if mutable {
-        ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+        ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
       } else {
-        ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+        ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
       };
       let start = branch_type.get_start_end(b).0;
       let at = arm.e_data.iter().position(|(l, _)| *l >= start).unwrap_or(arm.e_data.len());
@@ -14902,9 +15064,9 @@ fn end_scrutinee_borrows_in_other_arms(events: &mut Vec<(usize, ExternalEvent)>,
           None => {
             let (from, to) = (ResourceTy::Anonymous, ResourceTy::Value(lender.clone()));
             if mutable {
-              ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+              ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
             } else {
-              ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+              ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
             }
           }
         };
@@ -15016,9 +15178,9 @@ fn end_let_else_scrutinee_borrows(
       *unique_id += 1;
       let to = ResourceTy::Value(lender.clone());
       let ev = if mutable {
-        ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+        ExternalEvent::MutableDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
       } else {
-        ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false }
+        ExternalEvent::StaticDie { from, to, id, static_lender: None, still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
       };
       arm.e_data.insert(at, (at_line, ev));
       added = true;
