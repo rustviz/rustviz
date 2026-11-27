@@ -89,9 +89,9 @@ pub struct Cell {
     /// paths only (`State.unnamed_maybe`).
     pub unnamed_maybe: bool,
     /// Lenders tracked through this column's own value.
-    pub borrowed_from: BTreeSet<String>,
+    pub borrowed_from: BTreeSet<usize>,
     /// Lenders tracked through each current holder, on this same boundary.
-    pub holder_sources: BTreeMap<String, BTreeSet<String>>,
+    pub holder_sources: BTreeMap<String, BTreeSet<usize>>,
     /// For `Maybe`: "moved", "unassigned" or "imaginary".
     pub cause: Option<&'static str>,
     pub mixed_init: Option<MixedInit>,
@@ -619,12 +619,6 @@ impl StateTable {
         loan.drop_holder.as_ref()
     }
 
-    /// The source lines of the loans of `lender` (a temporary's `(code)`
-    /// name) in the body that has `column`.
-    pub fn lender_lines(&self, function: FunctionStart, lender: &str) -> Vec<usize> {
-        self.bodies.get(&function.body).map_or_else(Vec::new, |b| b.loans.values().filter(|l| l.lender == lender).map(|l| l.line).collect())
-    }
-
     /// Whether `column` has no value on some row above `row` while in
     /// scope (`let x;`): a binding a pattern gives its value when it comes
     /// into scope (`if let Some(x) = o`) never has.
@@ -1115,6 +1109,7 @@ mod tests {
             slice_items: BTreeSet::new(),
             binding_loans: BTreeMap::new(),
             loans: vec![LoanInfo {
+                temp_fields: None, temp_borrow: None,
                 projected: None,
                 payload: None,
                 issue: None,
@@ -1148,6 +1143,7 @@ mod tests {
             }],
             rows,
             temps: Vec::new(),
+            promoted_operands: Default::default(),
             notes: Vec::new(),
             binding_sources: Vec::new(),
             joins: Default::default(),

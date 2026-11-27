@@ -155,13 +155,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// note on the first binding's dot at the block's end.
   fn branch_extended_temp_note(&mut self, l: &'tcx LetStmt<'tcx>) {
     let Some(init) = l.init else { return };
-    let mut temps = Vec::new();
-    self.branch_extended_temps(init, false, &mut temps);
-    temps.retain(|b| {
-      let ExprKind::AddrOf(_, _, place) = b.kind else { return true };
-      let Some(tmp) = crate::visitor::extended_temp_operand(place) else { return true };
-      !self.branch_temp_names.get(&tmp.hir_id).is_some_and(|n| self.raps.contains_key(n))
-    });
+    let mut temps = self.branch_extended_temps(init);
+    temps.retain(|(tmp, _, _)| !self.branch_temp_names.get(&tmp.hir_id).is_some_and(|n| self.raps.contains_key(n)));
     if temps.is_empty() {
       return;
     }
@@ -172,10 +167,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     });
     let Some((hash, name)) = first.and_then(|id| self.column_of_binding(id)) else { return };
-    let rustc_hir::Node::Stmt(stmt) = self.tcx.parent_hir_node(l.hir_id) else { return };
-    let rustc_hir::Node::Block(block) = self.tcx.parent_hir_node(stmt.hir_id) else { return };
-    let end = span_end_line(&block.span, &self.tcx);
-    for b in temps {
+    for (_, b, end) in temps {
       let line = span_to_line(&b.span, &self.tcx);
       let code = self.snippet(b).filter(|t| t.chars().count() <= 32 && !t.contains('\n'));
       let text = hover_messages::approx_note_branch_extended_temp(&name, code.as_deref(), line);
@@ -183,41 +175,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// The `&` borrows of temporaries inside a branch (`in_branch`) of
-  /// the extending expression `e` of a `let` initializer (the places
-  /// Rust's temporary lifetime extension reaches, see `walk_extending`,
-  /// and the branches of an `if` / `match`): temporaries whose type
-  /// needs drop.
-  pub(crate) fn branch_extended_temps(&self, e: &'tcx Expr<'tcx>, in_branch: bool, out: &mut Vec<&'tcx Expr<'tcx>>) {
-    if e.span.from_expansion() {
-      return;
-    }
-    let typeck = self.tcx.typeck(e.hir_id.owner);
-    match e.kind {
-      ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, _, operand) => {
-        let Some(tmp) = crate::visitor::extended_temp_operand(operand) else { return };
-        self.branch_extended_temps(tmp, in_branch, out);
-        if in_branch && !matches!(tmp.kind, ExprKind::AddrOf(..)) && self.needs_drop(typeck.expr_ty(tmp), e.hir_id.owner) {
-          out.push(e);
-        }
-      }
-      ExprKind::Struct(_, fields, _) => fields.iter().for_each(|f| self.branch_extended_temps(f.expr, in_branch, out)),
-      ExprKind::Tup(es) | ExprKind::Array(es) => es.iter().for_each(|x| self.branch_extended_temps(x, in_branch, out)),
-      ExprKind::Call(callee, args) if crate::visitor::is_ctor_path(callee, typeck) =>
-        args.iter().for_each(|x| self.branch_extended_temps(x, in_branch, out)),
-      ExprKind::Cast(inner, _) => self.branch_extended_temps(inner, in_branch, out),
-      ExprKind::Block(b, None) => {
-        if let Some(t) = b.expr {
-          self.branch_extended_temps(t, in_branch, out);
-        }
-      }
-      ExprKind::If(_, then, Some(els)) => {
-        self.branch_extended_temps(then, true, out);
-        self.branch_extended_temps(els, true, out);
-      }
-      ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal) => arms.iter().for_each(|a| self.branch_extended_temps(a.body, true, out)),
-      _ => {}
-    }
+  /// Rustc's remainder scope selects the extending let. Its MIR branches identify paths that bypass creation. Source order here only numbers the pictured columns.
+  pub(crate) fn branch_extended_temps(&self, init: &Expr<'_>) -> Vec<(&'tcx Expr<'tcx>, &'tcx Expr<'tcx>, usize)> {
+    let mut temps: Vec<_> = self.body_facts.into_iter().flat_map(|b| &b.temps).filter_map(|t| {
+      let ext = t.extension.as_ref()?;
+      if !t.conditional || ext.initializer != init.hir_id { return None; }
+      Some((self.tcx.hir_expect_expr(t.expression?), self.tcx.hir_expect_expr(ext.borrow?), ext.end))
+    }).collect();
+    temps.sort_by_key(|(_, b, _)| b.span);
+    temps
   }
 
   /// `*p` with `p` a raw pointer (#194): drawn on p's column only.

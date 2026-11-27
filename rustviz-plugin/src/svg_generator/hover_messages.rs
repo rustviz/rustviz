@@ -777,7 +777,12 @@ fn its_fields(fs: &[String]) -> String {
 // The move out of such a temporary, on its column.
 // `empties`: a pattern's bindings took everything in it that needs drop
 // (this move is the last of them, #1386).
-pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part: &TempPart, empties: bool) -> String {
+pub fn temporary_alternative_remainder(name: &String) -> String {
+    format!("Depending on which alternative matched, {} either has nothing left to drop or still owns part of its value", styled_name_html(name))
+}
+
+pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part: &TempPart, effect: Option<&super::data::TempMoveDisplay>) -> String {
+    let after = effect.map(|e| e.value);
     match part {
         TempPart::Field(f) => format!("{0}'s field {1} is moved to {2}", styled_name_html(my_name), styled_name_html(f), styled_name_html(to_name)),
         // `let q = P { n: 1, ..make_p() };`: a field of the base goes to
@@ -786,15 +791,26 @@ pub fn event_dot_move_out_of_temporary(my_name: &String, to_name: &String, part:
             let f = to_name.rsplit('.').next().unwrap_or(to_name).to_owned();
             format!("The struct update `..` moves {0}'s field {1} to {2}", styled_name_html(my_name), styled_name_html(&f), styled_name_html(to_name))
         }
-        _ if empties => format!(
+        _ if after == Some(crate::facts::TempValue::Conditional) => format!(
+            "The pattern moves a value from {0} into {1}. {2}",
+            styled_name_html(my_name), styled_name_html(to_name), temporary_alternative_remainder(my_name)
+        ),
+        _ if after == Some(crate::facts::TempValue::Empty) && effect.and_then(|e| e.field.as_deref()) != Some("") => {
+            let field = effect.and_then(|e| e.field.as_ref()).map_or_else(
+                || format!("a value from {}", styled_name_html(my_name)),
+                |f| format!("field {} of {}", styled_name_html(f), styled_name_html(my_name)));
+            format!("The pattern moves {field} into {}. Nothing that needs dropping is left in {}", styled_name_html(to_name), styled_name_html(my_name))
+        }
+        _ if after == Some(crate::facts::TempValue::Empty) => format!(
             "The pattern moves what {0} holds into {1}; nothing that needs dropping is left in {0}",
             styled_name_html(my_name), styled_name_html(to_name)
         ),
-        TempPart::Match(_) | TempPart::IfLet(_) | TempPart::WhileLet(_) | TempPart::LetChain(_) =>
+        TempPart::Match(_) | TempPart::IfLet(_) | TempPart::WhileLet(_) | TempPart::LetChain(_)
+            if matches!(after, Some(crate::facts::TempValue::Remaining | crate::facts::TempValue::Whole)) =>
             format!("The pattern moves part of {0}'s value into {1}; {0} keeps the rest", styled_name_html(my_name), styled_name_html(to_name)),
         // A destructuring assignment's (`(m, _) = pair();`, #625) or a
         // `let` / `let`-`else` pattern's temporary isn't split
-        // (`temp_emptying_moves` doesn't look at it).
+        // (its column stays on the enclosing timeline).
         TempPart::Assign(_) => format!("The assignment moves part of {0}'s value to {1}", styled_name_html(my_name), styled_name_html(to_name)),
         _ => format!("The pattern moves {0}'s value, or part of it, into {1}", styled_name_html(my_name), styled_name_html(to_name)),
     }
@@ -847,19 +863,21 @@ pub fn event_dot_extended_temporary_drop(my_name: &String, when: &String) -> Str
 
 // The same for a temporary a `let` extends through a branch, which only
 // that branch made (#1397, #1436): a drop flag decides.
-pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, made_at: Option<usize>) -> String {
+pub fn event_dot_extended_temporary_drop_made(my_name: &String, when: &String, made_at: Option<usize>, flag: bool) -> String {
+    let flag_clause = if flag { " (Rust tracks this with a runtime drop flag)" } else { "" };
     format!(
         "{0} goes out of scope {1}: a let borrowed it, so it lived past its statement. It \
-         is dropped here only if {2} (Rust tracks this with a runtime drop flag).",
+         is dropped here only if {2}{flag_clause}.",
         styled_name_html(my_name), when, temp_made_in(made_at)
     )
 }
 
 // Its drop at a `?` (#1436).
-pub fn event_dot_temp_drop_if_try_returns_made(my_name: &String, made_at: Option<usize>) -> String {
+pub fn event_dot_temp_drop_if_try_returns_made(my_name: &String, made_at: Option<usize>, flag: bool) -> String {
+    let flag_clause = if flag { " (Rust tracks this with a runtime drop flag)" } else { "" };
     format!(
         "If the `?` here returns early, {0} \
-         is dropped if {1} (Rust tracks this with a runtime drop flag). If the `?` succeeds, \
+         is dropped if {1}{flag_clause}. If the `?` succeeds, \
          nothing happens to {0} here.",
         styled_name_html(my_name), temp_made_in(made_at)
     )
@@ -891,8 +909,13 @@ pub fn event_dot_temporary_drop(ty: &String, when: &String, literal: bool, assig
 // (#469): what is left in it goes with it. Whether anything that needs
 // dropping is left can depend on the path taken (the arm that ran), so
 // this doesn't claim a resource is dropped.
-pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart) -> String {
+pub fn event_dot_temporary_part_drop(ty: &String, when: &String, part: &TempPart, flag: bool) -> String {
     match part {
+        TempPart::Match(field) if flag => {
+            let rest = field.as_ref().map_or_else(|| "whatever that arm's pattern didn't move out of it".to_owned(),
+                |f| format!("everything left except what that arm's pattern moved out of its field {}", styled_name_html(f)));
+            format!("This temporary {} goes out of scope {}, after the arm that ran. Rust drops {rest} if anything still needs dropping", styled_name_html(ty), when)
+        }
         TempPart::Field(f) => format!(
             "This temporary {0} is dropped {1}, and with it everything in it but its field {2}, which was moved out of it",
             styled_name_html(ty), when, styled_name_html(f)
@@ -5206,11 +5229,11 @@ pub fn event_dot_branch_merge_temp_made(my_name: &String, made_at: Option<usize>
 }
 
 // Its scope end, with the drop flag's drop.
-pub fn event_dot_go_out_of_scope_temp_made(my_name: &String, made_at: Option<usize>) -> String {
+pub fn event_dot_go_out_of_scope_temp_made(my_name: &String, made_at: Option<usize>, flag: bool) -> String {
+    let flag_clause = if flag { " (Rust tracks this with a runtime drop flag)" } else { "" };
     format!(
         "{0} goes out of scope at the end of the block: a let borrowed it, so it was kept alive \
-         past the end of its statement. It is dropped here only if {1} (Rust tracks \
-         this with a runtime drop flag).",
+         past the end of its statement. It is dropped here only if {1}{flag_clause}.",
         styled_name_html(my_name), temp_made_in(made_at)
     )
 }
@@ -7003,10 +7026,15 @@ pub fn arrow_end_title(from: &ResourceTy, to: &ResourceTy, static_lender: Option
         _ => column.clone(),
     };
     if let (Some(kind), Some(l)) = (kind, loan) {
-        if l.runs && l.issued_on.is_none() && (l.direct_holder.as_deref() == Some(&from.name())
-            || (l.kind == "unique" && l.direct_holders.contains(&from.name())))
-            && (l.lender == to.name() || l.through.as_deref() == Some(&to.name()) && l.lender == format!("*{}", to.name())) {
-            let value = if of_ref_var || crate::svg_generator::data::holds_copy_value(to) { "value" } else { "resource" };
+        let temporary = l.temp_borrow.filter(|(binding, _)| l.issuance_path.is_empty()
+            && from.extract_rap().and_then(|r| r.ref_local()) == Some(*binding)
+            && l.lender_local.is_some() && to.extract_rap().and_then(|r| r.owner_local()) == l.lender_local);
+        let named = (l.direct_holder.as_deref() == Some(&from.name())
+            || l.kind == "unique" && l.direct_holders.contains(&from.name()))
+            && (l.lender == to.name() || l.through.as_deref() == Some(&to.name()) && l.lender == format!("*{}", to.name()));
+        if l.runs && l.issued_on.is_none() && (temporary.is_some() || named) {
+            let plain = temporary.map_or_else(|| of_ref_var || crate::svg_generator::data::holds_copy_value(to), |(_, glue)| !glue);
+            let value = if plain { "value" } else { "resource" };
             return format!("{holder}'s {kind} borrow of {place} ends. This borrow no longer restricts access to {place}. Ending the borrow doesn't move the {value}");
         }
     }

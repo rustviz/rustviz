@@ -3688,7 +3688,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "p's borrow of the constant ANSWER ends (Rust stores the borrowed value for the whole program)",
             "q's borrow of the constant ORIGIN ends (Rust stores the borrowed value for the whole program)",
-            "v's borrow ends (what it borrows from isn't shown)",
+            "Immutable borrow from (temporary) to v",
+            "v's shared borrow of (temporary) ends. This borrow no longer restricts access to (temporary). Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "p's immutable borrow ends (what it borrows from isn't shown)",
@@ -5238,7 +5239,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to (temporary)",
             "(temporary) acquires ownership of a resource. This temporary value is borrowed by a let, so it lives until the end of the enclosing block, not just to the end of the statement",
             "Immutable borrow from (temporary) to r",
-            "If r holds a shared borrow affecting (temporary), that borrow ends here. It no longer restricts access to (temporary)",
+            "r's shared borrow of (temporary) ends. This borrow no longer restricts access to (temporary). Ending the borrow doesn't move the resource",
             "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
             "Move from Vec::new to (temporary 2)",
             "Mutable borrow from (temporary 2) to m",
@@ -12323,16 +12324,16 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary (String, String) is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
             "Move from make to (temporary 2)",
             "Partial move from (temporary 2) to s",
-            "The pattern moves what (temporary 2) holds into s; nothing that needs dropping is left in (temporary 2)",
+            "The pattern moves a value from (temporary 2) into s. Nothing that needs dropping is left in (temporary 2)",
             "The pattern of the branch that ran may have moved (temporary 2)'s value, or part of it, into its bindings",
-            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "This temporary Option<String> goes out of scope when the match ends, after the arm that ran. Rust drops whatever that arm's pattern didn't move out of it if anything still needs dropping. Rust checks a runtime drop flag to determine what still needs dropping.",
             "Move from res to (temporary 3)",
             "Move from (temporary 3) to u",
-            "The pattern moves what (temporary 3) holds into u; nothing that needs dropping is left in (temporary 3)",
+            "The pattern moves a value from (temporary 3) into u. Nothing that needs dropping is left in (temporary 3)",
             "This temporary Result<String, String> is dropped before the `else` block of this `if let` runs, and with it everything in it: the pattern didn't match, so it moved nothing out",
             "Move from res to (temporary 4)",
             "Move from (temporary 4) to w",
-            "The pattern moves what (temporary 4) holds into w; nothing that needs dropping is left in (temporary 4)",
+            "The pattern moves a value from (temporary 4) into w. Nothing that needs dropping is left in (temporary 4)",
             "This temporary Result<String, String> is dropped at the end of each iteration of this `while let` loop, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             "u goes out of scope. Its resource is dropped.",
         ],
@@ -12467,7 +12468,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from res to (temporary)",
             "Move from (temporary) to u",
-            "The pattern moves what (temporary) holds into u; nothing that needs dropping is left in (temporary)",
+            "The pattern moves a value from (temporary) into u. Nothing that needs dropping is left in (temporary)",
             "This temporary Result<String, String> is dropped before the `else` block of this `if` runs, if the let chain got as far as the `let` that makes it, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             "Move from pair to (temporary 2)",
             "Move from (temporary 2) to a",
@@ -12476,7 +12477,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary (String, String) is dropped when the condition of this `if` fails (before the code after the `if` runs), and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             "Move from res to (temporary 3)",
             "Move from (temporary 3) to w",
-            "The pattern moves what (temporary 3) holds into w; nothing that needs dropping is left in (temporary 3)",
+            "The pattern moves a value from (temporary 3) into w. Nothing that needs dropping is left in (temporary 3)",
         ],
         must_not_contain: &[
             "at the end of this `&&` / `||` operand",
@@ -17852,8 +17853,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // from make, the temporary one dot owning nothing).
             "Move from make to (temporary)",
             "Move from (temporary) to r",
-            "The pattern moves what (temporary) holds into r; nothing that needs dropping is left in (temporary)",
-            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "The pattern moves a value from (temporary) into r. Nothing that needs dropping is left in (temporary)",
+            "This temporary Option<String> goes out of scope when the match ends, after the arm that ran. Rust drops whatever that arm's pattern didn't move out of it if anything still needs dropping. Rust checks a runtime drop flag to determine what still needs dropping.",
             "Move from w to v",
             "w goes out of scope. No resource is dropped.",
             "Move from a to p",
@@ -24874,11 +24875,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary String is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), and with it everything in it: the pattern didn't match, so it moved nothing out",
             "This temporary String is dropped at the end of the block's final expression, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
             "Move from (temporary) to r",
-            "The pattern moves what (temporary) holds into r; nothing that needs dropping is left in (temporary)",
-            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "The pattern moves a value from (temporary) into r. Nothing that needs dropping is left in (temporary)",
+            "This temporary Option<String> goes out of scope when the match ends, after the arm that ran. Rust drops whatever that arm's pattern didn't move out of it if anything still needs dropping. Rust checks a runtime drop flag to determine what still needs dropping.",
             "Move from make_opt to (temporary)",
             "Partial move from (temporary) to r",
-            "This temporary Result<String, String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "This temporary Result<String, String> goes out of scope when the match ends, after the arm that ran. Rust drops whatever that arm's pattern didn't move out of it if anything still needs dropping. Rust checks a runtime drop flag to determine what still needs dropping.",
             "The pattern of the branch that ran may have moved (temporary)'s value, or part of it, into its bindings",
             "Move from make_p to (temporary)",
             "Move from (temporary) to name",
@@ -25068,7 +25069,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from String::from to (temporary)",
             "Immutable borrow from (temporary) to r",
-            "If r holds a shared borrow affecting (temporary), that borrow ends here. It no longer restricts access to (temporary)",
+            "r's shared borrow of (temporary) ends. This borrow no longer restricts access to (temporary). Ending the borrow doesn't move the resource",
             "Immutable borrow from (temporary) to t: Some's signature gives the value it returns the same lifetime as its argument; t isn't a reference, but its value holds one",
             "If t holds a shared borrow affecting (temporary), that borrow ends here. It no longer restricts access to (temporary)",
             "(temporary) goes out of scope at the end of the block: a let borrowed it, so it was kept alive past the end of its statement. It is dropped here.",
@@ -27799,21 +27800,21 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from make_opt to (temporary)",
             "Partial move from (temporary) to r",
-            "The pattern moves what (temporary) holds into r; nothing that needs dropping is left in (temporary)",
+            "The pattern moves a value from (temporary) into r. Nothing that needs dropping is left in (temporary)",
             "The pattern of the branch that ran may have moved (temporary)'s value, or part of it, into its bindings",
-            "This temporary Option<String> is dropped when the match ends, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
+            "This temporary Option<String> goes out of scope when the match ends, after the arm that ran. Rust drops whatever that arm's pattern didn't move out of it if anything still needs dropping. Rust checks a runtime drop flag to determine what still needs dropping.",
             "Move from make to (temporary)",
             "Move from (temporary) to r",
             "Move from make_res to (temporary)",
             "Move from (temporary) to s",
-            "The pattern moves what (temporary) holds into s; nothing that needs dropping is left in (temporary)",
+            "The pattern moves a value from (temporary) into s. Nothing that needs dropping is left in (temporary)",
             "This temporary Result<String, String> is dropped before the `else` block of this `if let` runs, and with it everything in it: the pattern didn't match, so it moved nothing out",
             "This temporary Result<String, String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs), and with it everything in it: the pattern didn't match, so it moved nothing out",
             "The pattern moves part of (temporary)'s value into s; (temporary) keeps the rest",
             "This temporary P is dropped when the block of this `if let` ends (its pattern matched), and with it whatever the pattern didn't move out of it",
             "Move from make_q to (temporary)",
             "Move from (temporary) to tag",
-            "The pattern moves what (temporary) holds into tag; nothing that needs dropping is left in (temporary)",
+            "The pattern moves field .tag of (temporary) into tag. Nothing that needs dropping is left in (temporary)",
             "Move from (..) to (temporary)",
             "Move from (temporary) to a",
             "Move from (temporary) to b",
@@ -27825,7 +27826,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "(temporary)'s resource is mutably borrowed by r; (temporary) can't be used while the borrow is live",
             "This temporary Result<String, String> is dropped here, where `break` leaves early, after the arm that ran, and with it whatever that arm's pattern didn't move out of it",
             "Move from make_res to (temporary 2)",
-            "The pattern moves what (temporary 2) holds into s; nothing that needs dropping is left in (temporary 2)",
+            "The pattern moves a value from (temporary 2) into s. Nothing that needs dropping is left in (temporary 2)",
             "This temporary Result<String, String> is dropped at the end of each iteration of this `while let` loop, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
         ],
         must_not_contain: &[
@@ -27861,7 +27862,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from make_res to (temporary)",
             "Move from (temporary) to s",
-            "The pattern moves what (temporary) holds into s; nothing that needs dropping is left in (temporary)",
+            "The pattern moves a value from (temporary) into s. Nothing that needs dropping is left in (temporary)",
             "This temporary Result<String, String> is dropped before the `else` block of this `if` runs, if the let chain got as far as the `let` that makes it, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             "This temporary Result<String, String> is dropped before the `else` block of this `if` runs, and with it whatever the pattern didn't move out of it (all of it, if the pattern didn't match)",
             "(temporary) hasn't been made yet: the let chain makes it only if its parts before the `let` match",
@@ -46610,4 +46611,285 @@ fn direct_holder_none_connector_keeps_its_branch_context() {
     let svg = run_with_local_backend("assign_arm_ref_binding_1327").timeline_panel_string();
     check_review_tip(&svg, "o@L8:branch_line:full_privilege",
         &["This segment leads from the None branch to where the branches join.", "o can be used on this path."], &[]);
+}
+
+#[test]
+fn p4_temporary_same_line_loans_use_their_own_columns() {
+    let rv = run_with_local_backend("rv3_temporary_places");
+    let b = fact_body(rv.facts().unwrap(), "same_line");
+    let temps: Vec<_> = b["temps"].as_array().unwrap().iter().filter(|t| t["what"] == "make()").collect();
+    assert_eq!(temps.len(), 2);
+    assert_ne!(temps[0]["local"], temps[1]["local"]);
+    assert_ne!(temps[0]["created_at"], temps[1]["created_at"]);
+    let svg = rv.timeline_panel_string();
+    for (t, (holder, owner, drawn, other)) in temps.iter().zip([
+        ("x", "left", "(temporary)", "(temporary 2)"),
+        ("y", "right", "(temporary 2)", "(temporary)"),
+    ]) {
+        // Separate MIR reference assignments, each into its own binding.
+        let loan = b["loans"].as_array().unwrap().iter().find(|l| l["source"] == "temporary"
+            && l["direct_holders"] == serde_json::json!([holder])).unwrap();
+        assert_eq!(t["local"], loan["lender_local"]);
+        assert_eq!(t["extended"], true);
+        assert_eq!(t["conditional"], true);
+        let drops = row_facts(b, 11);
+        let end = drops.iter().find(|f| f["ev"] == "TempDrop" && f["place"]["local"] == t["local"]).unwrap();
+        assert_eq!(end["remainder"]["value"], "conditional");
+        assert_eq!(end["flag"], true);
+        check_review_tip(&svg, &format!("{owner}@L9-10:line:partial_privilege"),
+            &[&format!("from {drawn} and {owner} through {holder}")], &[other, "a temporary value"]);
+    }
+}
+
+#[test]
+fn p4_temporary_partial_drops_distinguish_shared_and_exit_only() {
+    let rv = run_with_local_backend("rv3_temporary_places");
+    let facts = rv.facts().unwrap();
+    let field = serde_json::json!([{"field": 1}]);
+    for (func, what, rows) in [("shared", "items()", &[31, 33][..]), ("exit_only", "pair()", &[40, 42][..])] {
+        let b = fact_body(facts, func);
+        let temp = b["temps"].as_array().unwrap().iter().find(|t| t["what"] == what).unwrap();
+        // In both functions the second field moves. The drop trace prints
+        // outer / first exactly once after the inner / second has dropped.
+        assert!(temp["moves"].as_array().unwrap().iter().any(|m| m["from"]["projection"] == field
+            && m["after"] == "remaining"));
+        let mut ends = Vec::new();
+        for &row in rows {
+            ends.extend(row_facts(b, row).into_iter().filter(|f| f["ev"] == "TempDrop"
+                && f["what"] == what && f["drop_route"] != "unwind"));
+        }
+        for e in &ends {
+            assert_eq!(e["place"]["local"], temp["local"]);
+            assert_eq!(e["remainder"]["value"], "remaining");
+            assert_eq!(e["remainder"]["absent"], serde_json::json!([{"local":temp["local"],"projection":field}]));
+        }
+        if func == "shared" {
+            assert_eq!(ends.len(), 2);
+            assert!(ends.iter().all(|f| f["drop_route"] == "shared"));
+            assert_eq!(ends[0]["occurrence"]["at"], ends[1]["occurrence"]["at"]);
+            assert_eq!(ends[0]["early_exit"], 31);
+            assert!(ends[1]["early_exit"].is_null());
+        } else {
+            assert_eq!(ends.len(), 3);
+            assert!(ends[..2].iter().all(|f| f["drop_route"] == "exit_only" && f["early_exit"] == 40));
+            assert_eq!(ends[0]["occurrence"]["at"], ends[1]["occurrence"]["at"]);
+            assert_ne!(ends[0]["occurrence"]["exit"], ends[1]["occurrence"]["exit"]);
+            assert_ne!(ends[0]["occurrence"]["at"], ends[2]["occurrence"]["at"]);
+        }
+    }
+    check_review_tip(&rv.timeline_panel_string(), "(temporary)@L31:dot:temporary_drop",
+        &["where `break` leaves early", "everything in it but its field 1"], &["at the end of this statement"]);
+}
+
+#[test]
+fn p4_temporary_cleanup_drops_only_initialized_parts() {
+    let rv = run_with_local_backend("rv3_temporary_places");
+    let facts = rv.facts().unwrap();
+    let panic = fact_body(facts, "exceptional");
+    let drops: Vec<_> = row_facts(panic, 48).into_iter().filter(|f| f["ev"] == "TempDrop" && f["what"] == "pair()").collect();
+    assert!(!drops.is_empty());
+    for d in drops {
+        assert_eq!(d["drop_route"], "unwind");
+        assert_ne!(d["occurrence"]["at"], d["occurrence"]["exit"]);
+        assert_eq!(d["remainder"]["value"], "remaining");
+        assert_eq!(d["remainder"]["absent"][0]["projection"], serde_json::json!([{"field":1}]));
+    }
+    let bounds = row_facts(fact_body(facts, "bounds"), 93);
+    assert!(bounds.iter().any(|f| f["ev"] == "TempDrop" && f["what"] == "pair()"
+        && f["drop_route"] == "unwind" && f["remainder"]["value"] == "remaining"));
+    // The call which produces the tuple can unwind without initializing
+    // its destination. Aborting never enters the cleanup ladder.
+    assert!(!row_facts(panic, 45).iter().any(|f| f["ev"] == "TempDrop" && f["what"] == "pair()"));
+    assert!(!row_facts(fact_body(facts, "aborting"), 57).iter().any(|f| f["ev"] == "TempDrop"));
+}
+
+#[test]
+fn p4_temporary_alternatives_share_one_move_with_two_remainders() {
+    let rv = run_with_local_backend("rv3_temporary_places");
+    let b = fact_body(rv.facts().unwrap(), "alternatives");
+    let temp = b["temps"].as_array().unwrap().iter().find(|t| t["what"] == "payload(two)").unwrap();
+    let moves = temp["moves"].as_array().unwrap();
+    assert_eq!(moves.len(), 2);
+    assert_eq!(moves[0]["into"], moves[1]["into"]);
+    // One(x) has no remaining payload. Two(x, _) still drops field 1.
+    for (variant, expected) in [(0, "empty"), (1, "remaining")] {
+        assert!(moves.iter().any(|m| m["from"]["projection"] == serde_json::json!([{"downcast":variant},{"field":0}])
+            && m["after"] == expected));
+    }
+    check_review_tip(&rv.timeline_panel_string(), "(temporary)@L85:dot:move",
+        &["Depending on which alternative matched", "nothing left to drop", "still owns part"],
+        &["(temporary) keeps the rest"]);
+    let arrays = run_with_local_backend("temporary_let_else_update_matched_field");
+    let temps = fact_body(arrays.facts().unwrap(), "main")["temps"].as_array().unwrap();
+    let trio = temps.iter().find(|t| t["what"] == "trio()" && t["created_line"] == 91).unwrap();
+    assert_eq!(trio["moves"][2]["after"], "empty");
+}
+
+#[test]
+fn p4_temporary_guarded_drop_and_promoted_operands() {
+    // ElaborateDrops checks the payload's boolean flag after the guard.
+    let split = run_with_local_backend("scrutinee_temp_split_1386");
+    check_review_tip(&split.timeline_panel_string(), "(temporary)@L41:dot:branch_join+temporary_drop",
+        &["whatever that arm's pattern didn't move out of it", "runtime drop flag"], &[]);
+    // Only Ok reaches this break, and its only String was moved to s.
+    let loop_body = fact_body(split.facts().unwrap(), "while_let");
+    assert!(!row_facts(loop_body, 132).iter().any(|f| f["ev"] == "TempDrop"));
+    assert!(row_facts(loop_body, 128).iter().any(|f| f["ev"] == "TempDrop" && f["what"] == "make_res()"));
+    // Both &Ok(N) and &Ok(N + 1) are backed by MIR promoted constants.
+    let rv = run_with_local_backend("known_bugs/1700_promoted_named_constant");
+    let b = fact_body(rv.facts().unwrap(), "other_borrows");
+    assert!(b["temps"].as_array().unwrap().is_empty());
+    assert!(fact_body(rv.facts().unwrap(), "runtime_value")["temps"].as_array().unwrap().iter()
+        .any(|t| t["what"] == "Err(message)" && t["extended"] == true));
+}
+
+#[test]
+fn temp_review_nested_staging_preserves_the_pictured_remainder() {
+    let rv = run_with_local_backend("rv3_temporary_review");
+    for (row, binding) in [(8, "s"), (13, "name")] {
+        let moves = rv_elements(&rv.timeline_panel_string(), "(temporary");
+        let tip = moves.iter().find(|(id, title, ..)| id.contains(&format!("@L{row}:dot:move"))
+            && title.contains(&format!("into {binding}"))).expect("move from the staged call result");
+        assert!(tip.1.contains("keeps the rest"), "{:?}", tip.1);
+        assert!(!tip.1.contains("value, or part of it"), "{:?}", tip.1);
+    }
+}
+
+#[test]
+fn temp_review_last_drop_field_is_not_the_whole_value() {
+    let rv = run_with_local_backend("scrutinee_temp_split_1386");
+    // The MIR copies .0.1 into n and moves .1 into b.
+    check_review_tip(&rv.timeline_panel_string(), "(temporary)@L84:dot:move+duplicate",
+        &["field .1 of (temporary) into b", "Nothing that needs dropping is left", "is copied"],
+        &["moves what (temporary) holds into b"]);
+}
+
+#[test]
+fn temp_review_segment_after_or_pattern_depends_on_the_variant() {
+    let rv = run_with_local_backend("rv3_temporary_review");
+    // The active segment starts with the binding and covers its use.
+    let segments = rv_elements(&rv.timeline_panel_string(), "(temporary)@L31-");
+    let active = segments.iter().filter(|(id, _, ..)| id.contains(":branch_line:") && !id.contains("gray"));
+    let mut found = false;
+    for (_, title, ..) in active {
+        assert!(title.contains("Depending on which alternative matched") && title.contains("nothing left to drop")
+            && title.contains("still owns part"), "{title}");
+        assert!(!title.contains("is the owner of the resource"), "{title}");
+        found = true;
+    }
+    assert!(found, "missing active segment after One(x) | Two(x, _)");
+}
+
+#[test]
+fn temp_review_guarded_drop_keeps_scope_and_payload_distinct() {
+    let rv = run_with_local_backend("scrutinee_temp_split_1386");
+    check_review_tip(&rv.timeline_panel_string(), "(temporary)@L41:dot:branch_join+temporary_drop",
+        &["goes out of scope when the match ends", "after the arm that ran",
+          "whatever that arm's pattern didn't move out of it", "if anything still needs dropping", "runtime drop flag"],
+        &["This temporary Option<String> is dropped when the match ends"]);
+}
+
+#[test]
+fn temp_review_loan_end_names_the_extended_vec() {
+    let rv = run_with_local_backend("ref_static_lender_const");
+    check_review_tip(&rv.timeline_panel_string(), "v>(temporary)@L15:arrow:static_die",
+        &["v's shared borrow of (temporary) ends. This borrow no longer restricts access to (temporary)"],
+        &["If v holds a shared borrow", "moves the resource to v"]);
+    let mutable = run_with_local_backend("rv3_temporary_review");
+    check_review_tip(&mutable.timeline_panel_string(), "x>(temporary)@L21:arrow:mutable_die",
+        &["x's mutable borrow of (temporary) ends. This borrow no longer restricts access to (temporary)"],
+        &["If x holds a mutable borrow"]);
+}
+
+#[test]
+fn temp_review_promoted_call_argument_has_no_local_drop() {
+    let rv = run_with_local_backend("known_bugs/1700_promoted_named_constant");
+    let titles = timeline_tooltips(&rv.timeline_panel_string());
+    for false_text in ["Move from Ok to (temporary", "Rust drops it as soon as its statement"] {
+        assert!(!titles.iter().any(|s| s.contains(false_text)), "{false_text}");
+    }
+    assert!(rv_elements(&rv.timeline_panel_string(), "(temporary)@L25:").iter()
+        .any(|(_, t, ..)| t.contains("goes out of scope")), "the runtime Err still ends");
+}
+
+#[test]
+fn temp_review_creation_precedes_any_decision_to_drop() {
+    let rv = run_with_local_backend("rv3_temporary_review");
+    let facts = rv.facts().unwrap();
+    for (func, row) in [("before_abort", 40), ("early_return", 46)] {
+        let body = fact_body(facts, func);
+        let t = body["temps"].as_array().unwrap().iter().find(|t| t["what"] == "make()").unwrap();
+        assert_eq!(t["conditional"], true, "{func}");
+        let loan = body["loans"].as_array().unwrap().iter().find(|l| l["source"] == "temporary").unwrap();
+        assert_eq!(loan["lender_local"], t["local"]);
+        assert!(!rv_elements(&rv.timeline_panel_string(), &format!("(temporary)>r@L{row}:arrow:static_borrow")).is_empty());
+    }
+    for row in [42, 66] {
+        check_review_tip(&rv.timeline_panel_string(), &format!("(temporary)@L{row}:dot:owner_go_out_of_scope"),
+            &["ends here because this call never returns"], &["is dropped here"]);
+    }
+    let end = row_facts(fact_body(facts, "early_return"), 48);
+    assert!(end.iter().any(|e| e["ev"] == "TempDrop" && e["flag"] == false));
+    check_review_tip(&rv.timeline_panel_string(), "(temporary)@L48:dot:", &["It is dropped here"], &["runtime drop flag"]);
+}
+
+#[test]
+fn temp_review_nonmatching_result_drops_whole() {
+    let rv = run_with_local_backend("scrutinee_temp_split_1386");
+    let row = row_facts(fact_body(rv.facts().unwrap(), "while_let"), 128);
+    let end = row.iter().find(|e| e["ev"] == "TempDrop" && e["what"] == "make_res()").unwrap();
+    assert_eq!(end["remainder"], serde_json::json!({"value":"whole","absent":[],"maybe_absent":[]}));
+}
+
+#[test]
+fn temp_review_cleanup_follows_each_propagating_edge() {
+    let rv = run_with_local_backend("rv3_temporary_review");
+    let facts = rv.facts().unwrap();
+    let mut missing = Vec::new();
+    for (func, row) in [("indirect", 61), ("implicit", 66), ("overwrite", 70)] {
+        let drops = row_facts(fact_body(facts, func), row);
+        if !drops.iter().any(|e| e["what"] == "make()" && e["drop_route"] == "unwind"
+            && e["remainder"]["value"] == "whole" && e["occurrence"]["successor"].is_array()) {
+            missing.push(func);
+        }
+    }
+    assert!(missing.is_empty(), "missing cleanup of the live String in {missing:?}");
+}
+
+#[test]
+fn temp_review_array_construction_distinguishes_return_from_unwind() {
+    let rv = run_with_local_backend("rv3_temporary_review");
+    let constructing = fact_body(rv.facts().unwrap(), "constructing");
+    let pair = constructing["temps"].as_array().unwrap().iter().find(|t| t["what"] == "pair()").unwrap();
+    let earlier = row_facts(constructing, 75);
+    let unwinds: Vec<_> = earlier.iter().filter(|e| e["ev"] == "TempDrop" && e["drop_route"] == "unwind"
+        && e["occurrence"]["exit"] == pair["created_at"][0]).collect();
+    assert_eq!(unwinds.len(), 1);
+    assert_eq!(unwinds[0]["what"], "make()", "the call has not initialized its pair on this edge");
+    let b = fact_body(rv.facts().unwrap(), "building_array");
+    let temps = b["temps"].as_array().unwrap();
+    let element = |code| temps.iter().find(|t| t["what"] == code).unwrap();
+    let first = element("make()");
+    let second = element("f()");
+    let call = &second["created_at"][0];
+    let row = row_facts(b, 82);
+    let cleanup: Vec<_> = row.iter().filter(|e| e["ev"] == "TempDrop" && e["drop_route"] == "unwind"
+        && &e["occurrence"]["exit"] == call).map(|e| &e["place"]["local"]).collect();
+    assert_eq!(cleanup, [&first["local"]], "only the first call returned");
+    for (offset, t) in [first, second].into_iter().enumerate() {
+        assert_eq!(t["moves"][0]["into"], serde_json::json!({"local":0,
+            "projection":[{"constant_index":{"offset":offset,"min_length":2,"from_end":false}}]}));
+    }
+}
+
+#[test]
+fn temp_review_noncopy_call_result_transfers_without_drop_glue() {
+    let rv = run_with_local_backend("rv3_temporary_review");
+    let b = fact_body(rv.facts().unwrap(), "noncopy");
+    let value = b["temps"].as_array().unwrap().iter().find(|t| t["what"] == "std::convert::identity(p)")
+        .expect("identity returns the mutable reference");
+    assert_eq!(value["moves"].as_array().unwrap().len(), 1);
+    assert_eq!(value["moves"][0]["from"]["local"], value["local"]);
+    assert!(value["moves"][0]["into"].is_null(), "sink takes the reference as an argument");
+    assert_eq!(value["drop_lines"], serde_json::json!([]));
 }
