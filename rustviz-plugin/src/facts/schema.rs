@@ -471,6 +471,17 @@ pub struct Parts {
     pub maybe: Vec<String>,
 }
 
+/// The borrow checker considers both a skipped assignment and a move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MixedInit {
+    pub may_hold_value: bool,
+    pub may_hold_value_at_runtime: bool,
+    pub whole_move: bool,
+    pub imaginary_move: bool,
+    /// At a join, a write reaches it from one arm and another skips it.
+    pub assigned_in_some_arms: bool,
+}
+
 /// States of the columns after a row, as the next row sees them.
 #[derive(Serialize, Clone, Default)]
 pub struct State {
@@ -490,6 +501,10 @@ pub struct State {
     /// (moved only on a way borrowck checks but that never runs: an
     /// or-pattern's unreachable alternative; still not usable).
     pub cause: BTreeMap<String, &'static str>,
+    /// For wording where both a move and a skipped assignment reach the
+    /// boundary. Runtime drop wording uses the executable paths (Q5).
+    #[serde(skip)]
+    pub mixed_init: BTreeMap<String, MixedInit>,
     /// variable column (a whole local: `r`, `h`; not a field column such
     /// as `h.r` or `p.0`) -> the loans its value keeps borrowed where the
     /// next row of the same path starts, as the borrow checker counts

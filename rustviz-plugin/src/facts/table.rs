@@ -11,6 +11,7 @@
 use rustc_hir::def_id::DefId;
 use rustc_data_structures::fx::FxIndexMap;
 use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, Lent, Parts, State};
+pub use super::schema::MixedInit;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A function declaration as drawn in the source panel. Two declarations
@@ -92,6 +93,7 @@ pub struct Cell {
     pub holder_sources: BTreeMap<String, BTreeSet<String>>,
     /// For `Maybe`: "moved", "unassigned" or "imaginary".
     pub cause: Option<&'static str>,
+    pub mixed_init: Option<MixedInit>,
     /// The loans its value keeps borrowed here, as the borrow checker
     /// counts them (by loan id; `State.holds`): none for a reference no
     /// later row uses, a moved-out or unassigned variable, or a field
@@ -333,6 +335,7 @@ impl StateTable {
                         own.unnamed_maybe = n.unnamed_maybe;
                         own.may = n.may;
                         own.cause = n.cause;
+                        own.mixed_init = n.mixed_init;
                         own.always_assigned = n.always_assigned;
                         own.reassigned = n.reassigned;
                     }
@@ -373,6 +376,10 @@ impl StateTable {
 
     pub fn join_cell(&self, function: FunctionStart, column: &str, span: rustc_span::Span) -> Option<&Cell> {
         self.bodies.get(&function.body)?.joins.get(&span)?.get(column)
+    }
+
+    pub fn incoming_cell(&self, function: FunctionStart, column: &str, row: usize) -> Option<&Cell> {
+        self.bodies.get(&function.body)?.rows.get(&row)?.before.as_ref()?.get(column)
     }
 
     /// On a shared row, the only write is in one arm and a real sibling
@@ -837,6 +844,7 @@ fn cells_of(st: &State) -> Cells {
                 lent,
                 parts,
                 cause: st.cause.get(col).copied(),
+                mixed_init: st.mixed_init.get(col).copied(),
                 always_assigned: st.always_assigned.contains(col),
                 reassigned: st.reassigned.get(col).copied(),
                 moved_in_arm: st.moved_in_arm.contains(col),

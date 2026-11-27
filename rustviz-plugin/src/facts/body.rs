@@ -996,15 +996,17 @@ fn may_after(
     set
 }
 
-/// A variable's storage starting or ending leaves it (and its fields)
-/// with no value; an assignment gives the place and its fields one.
+/// A variable's new storage has no assignment yet. When its storage
+/// ends, that path no longer describes an in-scope unassigned variable.
 fn unassigned_transfer(md: &MoveData<'_>, body: &Body<'_>, set: &mut BTreeSet<MovePathIndex>, loc: Location) {
-    if let Some(StatementKind::StorageLive(l) | StatementKind::StorageDead(l)) =
-        body.basic_blocks[loc.block].statements.get(loc.statement_index).map(|s| &s.kind)
-    {
-        if let LookupResult::Exact(root) = md.rev_lookup.find(Place::from(*l).as_ref()) {
-            set.extend(descendants(md, root));
+    match body.basic_blocks[loc.block].statements.get(loc.statement_index).map(|s| &s.kind) {
+        Some(StatementKind::StorageLive(l)) => {
+            if let LookupResult::Exact(root) = md.rev_lookup.find(Place::from(*l).as_ref()) {
+                set.extend(descendants(md, root));
+            }
         }
+        Some(StatementKind::StorageDead(l)) => set.retain(|m| md.move_paths[*m].place.local != *l),
+        _ => {}
     }
     for ii in md.init_loc_map[loc].iter() {
         for d in descendants(md, md.inits[*ii].path) {
@@ -1021,9 +1023,12 @@ fn moved_transfer(md: &MoveData<'_>, body: &Body<'_>, set: &mut BTreeSet<MovePat
         body.basic_blocks[loc.block].statements.get(loc.statement_index).map(|s| &s.kind)
     {
         set.retain(|m| md.move_paths[*m].place.local != *l);
+        // MoveData also marks StorageDead as a deinitialization. This
+        // transfer tracks moves of values within the local's lifetime.
+        return;
     }
     for mo in md.loc_map[loc].iter() {
-        set.insert(md.moves[*mo].path);
+        set.extend(descendants(md, md.moves[*mo].path));
     }
     for ii in md.init_loc_map[loc].iter() {
         for d in descendants(md, md.inits[*ii].path) {
@@ -3703,6 +3708,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         // shadows is reached only by borrowck's imaginary edges): what runs
         // is read there only.
         let rt_exits: Vec<Location> = exits.iter().copied().filter(|e| runs.contains(&e.block)).collect();
+        let moved_here = |mpi, include_parts| {
+            let paths = if include_parts { descendants(&move_data, mpi) } else { vec![mpi] };
+            exits.iter().any(|e| {
+                let set = may_after(&moved_entry, &|st, l| moved_transfer(&move_data, body, st, l), *e, after);
+                paths.iter().any(|m| set.contains(m))
+            })
+        };
         for (mpi, place, name) in &columns {
             let s = flow.state(exits, after, *mpi);
             let rt_mpi = match rt_md.rev_lookup.find(place.as_ref()) {
@@ -3715,14 +3727,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             // dataflows.
             let rt_may = |entry: &BTreeMap<rustc_middle::mir::BasicBlock, BTreeSet<MovePathIndex>>, unassigned: bool| {
                 rt_mpi.is_some_and(|rm| {
-                    let (anc, desc) = (ancestors(&rt_md, rm), descendants(&rt_md, rm));
+                    let desc = descendants(&rt_md, rm);
                     rt_exits.iter().any(|e| {
                         let set = if unassigned {
                             may_after(entry, &|st, l| unassigned_transfer(&rt_md, &rt_body, st, l), *e, after)
                         } else {
                             may_after(entry, &|st, l| moved_transfer(&rt_md, &rt_body, st, l), *e, after)
                         };
-                        if unassigned { set.contains(&rm) } else { set.iter().any(|m| anc.contains(m) || desc.contains(m)) }
+                        if unassigned { set.contains(&rm) } else { desc.iter().any(|m| set.contains(m)) }
                     })
                 })
             };
@@ -3776,14 +3788,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             record_type(name, *place);
             if w == "maybe" {
                 // Moved on some way here, or only never assigned?
-                let moved = exits.iter().any(|e| {
-                    let mut set = moved_entry.get(&e.block).cloned().unwrap_or_default();
-                    for i in 0..e.statement_index + usize::from(after) {
-                        moved_transfer(&move_data, body, &mut set, Location { block: e.block, statement_index: i });
-                    }
-                    let (anc, desc) = (ancestors(&move_data, *mpi), descendants(&move_data, *mpi));
-                    set.iter().any(|m| anc.contains(m) || desc.contains(m))
-                });
+                let moved = moved_here(*mpi, true);
                 // Moved only on borrowck's imaginary edges (the unreachable
                 // alternative), never on a path that runs: it still can't be
                 // used, but nothing was moved. (A maybe that is only "never
@@ -3794,7 +3799,28 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 if !moved && rt_here.as_ref().is_some_and(|r| r.may_init && !r.may_uninit) {
                     st.always_assigned.insert(name.clone());
                 }
-                st.cause.insert(name.clone(), if imaginary { "imaginary" } else if moved { "moved" } else { "unassigned" });
+                let mixed = moved && never_assigned_somewhere();
+                let whole_move = mixed && moved_here(*mpi, false);
+                if mixed {
+                    st.mixed_init.insert(name.clone(), MixedInit {
+                        may_hold_value: rt_here.as_ref().map_or(s.may_init, |r| r.may_init),
+                        may_hold_value_at_runtime: rt_here.as_ref().is_some_and(|r| r.may_init),
+                        whole_move,
+                        imaginary_move: imaginary,
+                        assigned_in_some_arms: false,
+                    });
+                }
+                // A move of a field doesn't move the aggregate. A path
+                // that skipped assigning the whole place gives E0381
+                // even if another path moved a field (E0382 for that field).
+                let cause = if !moved || (mixed && !whole_move) {
+                    "unassigned"
+                } else if imaginary {
+                    "imaginary"
+                } else {
+                    "moved"
+                };
+                st.cause.insert(name.clone(), cause);
             }
             if (w == "partly" || w == "own") && (!s.sub_moved.is_empty() || !s.sub_maybe.is_empty()) {
                 // A part borrowck counts as moved on some paths only is moved
@@ -3916,16 +3942,26 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 let imaginary = c == "moved" && !through_ref && !rt_exits.is_empty()
                     && match rt_md.rev_lookup.find(fp.as_ref()) {
                         LookupResult::Parent(Some(rm)) => {
-                            let ancestors = ancestors(&rt_md, rm);
                             rt_exits.iter().all(|&loc| {
                                 let moved = may_after(&rt_moved_entry, &|st, l| moved_transfer(&rt_md, &rt_body, st, l), loc, after);
                                 let unassigned = may_after(&rt_unassigned_entry, &|st, l| unassigned_transfer(&rt_md, &rt_body, st, l), loc, after);
-                                ancestors.iter().all(|p| !moved.contains(p) && !unassigned.contains(p))
+                                !moved.contains(&rm) && !unassigned.contains(&rm)
                             })
                         }
                         _ => false,
                     };
-                st.cause.insert(name.clone(), if imaginary { "imaginary" } else { c });
+                // A sibling move can affect the parent's usability without
+                // moving this field. Only a move of its tracked ancestor
+                // can give this synthesized field a mixed history.
+                let mut cause = if imaginary { "imaginary" } else { c };
+                if let Some(mixed) = st.mixed_init.get(&pn).copied().filter(|_| !through_ref) {
+                    if mixed.whole_move {
+                        st.mixed_init.insert(name.clone(), mixed);
+                    } else {
+                        cause = "unassigned";
+                    }
+                }
+                st.cause.insert(name.clone(), cause);
             }
         }
         // When different locals are active on different paths the column has no single state.
@@ -4252,12 +4288,17 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // belonging to the else expression, and read the state before them.
     use rustc_hir::{intravisit, Expr, ExprKind};
     #[derive(Default)]
-    struct Conditionals<'hir>(Vec<(&'hir Expr<'hir>, &'hir Expr<'hir>, &'hir Expr<'hir>, Span)>);
-    impl<'hir> intravisit::Visitor<'hir> for Conditionals<'hir> {
+    struct BranchSpans<'hir> {
+        if_else: Vec<(&'hir Expr<'hir>, &'hir Expr<'hir>, &'hir Expr<'hir>, Span)>,
+        matches: Vec<(Span, &'hir [rustc_hir::Arm<'hir>])>,
+    }
+    impl<'hir> intravisit::Visitor<'hir> for BranchSpans<'hir> {
         fn visit_expr(&mut self, expr: &'hir Expr<'hir>) {
             match expr.kind {
                 ExprKind::If(guard, then, Some(els)) if !expr.span.from_expansion() =>
-                    self.0.push((guard, then, els, expr.span)),
+                    self.if_else.push((guard, then, els, expr.span)),
+                ExprKind::Match(_, arms, rustc_hir::MatchSource::Normal) if !expr.span.from_expansion() =>
+                    self.matches.push((expr.span, arms)),
                 _ => {}
             }
             intravisit::walk_expr(self, expr);
@@ -4270,14 +4311,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             .then_some((term.source_info.span.with_parent(None), bb, imaginary_target))
     }).collect();
     let span_of = |loc| body.source_info(loc).span.source_callsite().with_parent(None);
-    let mut conditionals = Conditionals::default();
-    if let Some(hir) = def_id.as_local().filter(|_| !edge_targets.is_empty())
-        .and_then(|id| tcx.hir_maybe_body_owned_by(id))
-    {
-        intravisit::Visitor::visit_expr(&mut conditionals, hir.value);
+    let mut branch_spans = BranchSpans::default();
+    if let Some(hir) = def_id.as_local().and_then(|id| tcx.hir_maybe_body_owned_by(id)) {
+        intravisit::Visitor::visit_expr(&mut branch_spans, hir.value);
     }
     let mut imaginary_edges = Vec::new();
-    for (guard, then, els, conditional) in conditionals.0 {
+    for (guard, then, els, conditional) in branch_spans.if_else {
         let arm = els.span.with_parent(None);
         let guard_span = guard.span.with_parent(None);
         let then_span = then.span.with_parent(None);
@@ -4573,19 +4612,79 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
     }
+    // rustc gives the Goto out of each match arm the last statement's
+    // source info, or the match's closing brace for an empty block. The
+    // common MIR target is the join even though the edge spans differ.
+    let mut match_joins = BTreeSet::new();
+    for (span, arms) in branch_spans.matches {
+        let end = span.with_lo(span.hi() - rustc_span::BytePos(1));
+        for &bb in &runs {
+            let preds = &body.basic_blocks.predecessors()[bb];
+            if preds.len() < 2 { continue; }
+            let mut matched_arms = BTreeSet::new();
+            let joins_here = preds.iter().filter(|p| checked.contains(p)).all(|&p| {
+                let data = &body.basic_blocks[p];
+                let term = data.terminator();
+                let loc = body.terminator_loc(p);
+                if !matches!(term.kind, TerminatorKind::Goto { target } if target == bb)
+                    || cx.rows.exit_only.contains(&loc) || cx.rows.early_exit.contains_key(&loc)
+                {
+                    return false;
+                }
+                let source = term.source_info.span;
+                match data.statements.last() {
+                    None => source == end,
+                    Some(last) if last.source_info.span == source => {
+                        if let Some(i) = arms.iter().position(|arm| arm.body.span.contains(source)) {
+                            matched_arms.insert(i);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                }
+            });
+            if joins_here && matched_arms.len() >= 2 {
+                continuations.entry(span).or_default().insert(bb);
+                match_joins.insert((span, bb));
+            }
+        }
+    }
     let mut joins = BTreeMap::new();
     for (span, targets) in continuations {
         if targets.len() != 1 { continue; }
         let bb = *targets.first().expect("one continuation");
-        let state = state_at(&[Location { block: bb, statement_index: 0 }], false, false);
+        let mut state = state_at(&[Location { block: bb, statement_index: 0 }], false, false);
+        if match_joins.contains(&(span, bb)) {
+            if state.mixed_init.is_empty() { continue; }
+            state.state.retain(|name, _| state.mixed_init.contains_key(name));
+        }
         let join = joins.entry(span).or_insert(Join { state, assignments: BTreeMap::new(), dead_implicit_else: false });
         let preds: Vec<_> = body.basic_blocks.predecessors()[bb].iter()
             .filter(|p| checked.contains(p)).map(|p| body.terminator_loc(*p)).collect();
         if preds.len() < 2 { continue; }
-        if !preds.iter().all(|p| body.source_info(*p).span == span
-            && matches!(body.basic_blocks[p.block].terminator().kind, TerminatorKind::Goto { target } if target == bb)) {
+        let goto_join = |p: &Location| matches!(body.basic_blocks[p.block].terminator().kind, TerminatorKind::Goto { target } if target == bb);
+        let terminates_at_join = |p: &Location| body.source_info(*p).span == span
+            && goto_join(p);
+        let runtime_preds = || preds.iter().filter(|p| runs.contains(&p.block));
+        if !runtime_preds().all(|p| goto_join(p) && span.contains(body.source_info(*p).span))
+            && !match_joins.contains(&(span, bb))
+        {
             continue;
         }
+        for (_, place, name) in columns.iter().chain(&synth) {
+            let Some(mixed) = join.state.mixed_init.get_mut(name) else { continue; };
+            let writes_here = |l| move_data.init_loc_map[l].iter().any(|i| {
+                let dest = move_data.move_paths[move_data.inits[*i].path].place;
+                dest.local == place.local && place.projection.starts_with(dest.projection)
+            });
+            let mut incoming_writes = runtime_preds().map(|&p| reaches(span, vec![p], &writes_here));
+            if let Some(first) = incoming_writes.next() {
+                mixed.assigned_in_some_arms = incoming_writes.any(|writes| writes != first);
+            }
+        }
+        if !preds.iter().all(terminates_at_join) { continue; }
         // The implicit else of an if with no else assigns unit at the
         // zero-width end of the if. Its predecessor cannot execute.
         let mut implicit_else = preds.iter().filter(|p| body.basic_blocks[p.block].statements.iter().any(|s|

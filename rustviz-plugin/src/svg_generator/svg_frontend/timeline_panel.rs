@@ -1599,6 +1599,11 @@ fn render_branch_dots(
                 Some(hover_messages::event_dot_imaginary_change(rap.name(), assigned, usable))
             }
         });
+        let mixed_init = join.filter(|c| c.mixed_init.is_some_and(|mixed| match init {
+            Some(InitJoin::AllMoved) => mixed.may_hold_value,
+            Some(InitJoin::Maybe { .. }) => !is_branch_temp_col(rap),
+            _ => false,
+        }));
         let title = if imaginary_join.is_some() {
             imaginary_join
         } else if visualization_data.row_layout.ended_at_fork.contains(&(event.get_id(), *hash)) {
@@ -1607,6 +1612,10 @@ fn render_branch_dots(
             Some(hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()))
         } else if ended_before() {
             Some(hover_messages::event_dot_branch_merge_borrow_ended_before(&is.real_name()))
+        } else if let Some(cell) = mixed_init {
+            Some(hover_messages::event_dot_branch_merge_mixed_init(
+                rap.name(), cell, !rap.drops_nothing(), rap.is_mut(), &rap.drop_note(),
+            ))
         } else if let Some(InitJoin::AllMoved) = init {
             Some(hover_messages::event_dot_branch_merge_init_all_moved(&is.real_name(), rap.is_mut()))
         } else if let (Some(InitJoin::Maybe { moved }), false) = (init, matches!(event, Event::Branch { maybe_held: true, .. })) {
@@ -1838,13 +1847,17 @@ fn scope_end_by_rustc(vd: &VisualizationData, row: usize, ro: &ResourceAccessPoi
         return None;
     }
     let src = rv_attrs::line_of(row, &vd.row_lines)?;
-    let how = vd.state_table.scope_drop(*vd.fn_source_lines.get(ro.hash())?, ro.name(), src)?;
+    let function = *vd.fn_source_lines.get(ro.hash())?;
+    let how = vd.state_table.scope_drop(function, ro.name(), src)?;
     // The history's drop flag (`init_at_end`, `maybe_moved_at_end`).
-    let flag = (!ro.holds_value() && matches!(init_at_end(history), Some(InitJoin::Loop | InitJoin::Maybe { .. })))
+    let init = init_at_end(history);
+    let flag = (!ro.holds_value() && matches!(init, Some(InitJoin::Loop | InitJoin::Maybe { .. })))
         || (!resource_hold && maybe_moved_at_end(history));
+    let mixed = matches!(init, Some(InitJoin::Maybe { moved: true }))
+        && vd.state_table.incoming_cell(function, ro.name(), src).is_some_and(|c| c.mixed_init.is_some());
     let note = ro.drop_note();
     match how {
-        "drops_if_init" if !flag =>
+        "drops_if_init" if !flag || mixed =>
             Some((hover_messages::event_dot_go_out_of_scope_maybe_kept(name, &note), true)),
         "nothing_to_drop" if resource_hold || flag => Some((
             hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_no_resource_dropped_suffix(),
@@ -9711,7 +9724,7 @@ fn imaginary_leg(
     let (state, title) = match cell.init {
         Init::Moved => return None,
         Init::Unassigned => (uninit, hover_messages::state_uninitialized(rap.name())),
-        Init::Maybe => (uninit, hover_messages::state_maybe(rap.name(), cell.cause)),
+        Init::Maybe => (uninit, hover_messages::state_maybe_init(rap.name(), &cell)),
         Init::Own | Init::Partly if rap.is_ref() => {
             if cell.lent.is_empty() || (!rap.is_mutref() && cell.lent.iter().all(|l| l.kind == "shared")) {
                 let title = timeline_segment_title(&full, rap, vd, None);
@@ -9755,7 +9768,7 @@ fn imaginary_move_note(
     let cell = cells.get(rap.name())?;
     let title = match cell.init {
         Init::Moved => hover_messages::state_moved_out(rap.name()),
-        Init::Maybe if cell.cause == Some("moved") => hover_messages::state_maybe(rap.name(), cell.cause),
+        Init::Maybe if cell.cause == Some("moved") || cell.mixed_init.is_some() => hover_messages::state_maybe_init(rap.name(), cell),
         _ => {
             let parts = cell.parts.as_ref().filter(|parts| Some(*parts) != entry.parts.as_ref())?;
             if parts.moved.is_empty() && parts.maybe.is_empty() { return None; }
@@ -10798,7 +10811,9 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
         Init::Moved => return Some((layout.clone(), hover_messages::state_moved_out(name))),
         Init::Unassigned => return Some((layout.clone(), hover_messages::state_uninitialized(name))),
         Init::Maybe => {
-            let title = if cell.cause == Some("imaginary") && !rap.holds_value() && !rap.is_ref() {
+            let title = if cell.mixed_init.is_some() {
+                hover_messages::state_maybe_init(name, &cell)
+            } else if cell.cause == Some("imaginary") && !rap.holds_value() && !rap.is_ref() {
                 format!("{}. {}", timeline_segment_title(&full, rap, vd, Some(row)), hover_messages::state_maybe(name, cell.cause))
             } else if cell.always_assigned {
                 hover_messages::state_imaginary_unassigned(name)
