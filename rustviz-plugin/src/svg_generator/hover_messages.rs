@@ -6640,6 +6640,28 @@ pub fn event_dot_break_alt_move_to_caller(my_name: &String, alt: &crate::svg_gen
     format!("{0} is moved to the caller if the {1} ended with {2}", moved, alt_noun(alt), alt_how(alt))
 }
 
+pub fn closure_receiver(from: &str, callee: &str, mutable: bool, staged: bool) -> String {
+    let who = styled_name_html(callee);
+    let from = styled_name_html(from);
+    let how = if mutable { "mutable reference" } else { "shared reference" };
+    let access = if mutable { "may read or write through it" } else { "may read through it" };
+    let mut title = if staged {
+        format!("{from} is borrowed by {how} as the receiver before the arguments are evaluated. If they finish, {who} {access}")
+    } else {
+        format!("Calling {who} borrows {from} by {how} as the receiver. The call {access}")
+    };
+    if mutable {
+        title.push_str(&format!(". Other code can't use {from} while this mutable borrow is live"));
+    }
+    title
+}
+
+pub fn unique_closure_capture(from: &ResourceTy, to: &ResourceTy) -> String {
+    let reference = styled_name_html(&from.name());
+    let closure = styled_name_html(&to.name());
+    format!("{closure} captures {reference} by unique immutable borrow. The closure can write through {reference}, and other code cannot use {reference} while the capture is live")
+}
+
 // `f()` of a closure rustc inferred to be `FnOnce` (#271): `f` is
 // moved into the call, and each value it captured by value is dropped
 // or moved out of it inside the call. `fates` comes from the closure
@@ -6657,23 +6679,38 @@ pub fn event_dot_closure_call_once(
         CallTiming::AfterArguments => format!("{f} is moved before the arguments are evaluated. If they finish, "),
         CallTiming::Direct => String::new(),
     };
-    let Some(fates) = fates else {
-        return format!("{prefix}{f} is moved into the call (FnOnce::call_once takes its receiver by value)");
-    };
     let mut msg = format!(
-        "{prefix}{f} is moved into the call (an FnOnce closure can only be called once)");
-    for fate in fates {
+        "{prefix}{f} is moved into the call (FnOnce::call_once takes its receiver by value). After the move, {f} cannot be called again unless it is reinitialized");
+    for fate in fates.into_iter().flatten() {
         let s = styled_name_html(&fate.name);
-        let tail = match fate.outcomes.iter().copied().collect::<Vec<_>>().as_slice() {
-            [Dropped] if fate.needs_drop => "is dropped during the call",
-            [Dropped] => "is consumed during the call (it has nothing to drop)",
-            [Returned] => "is moved out of the closure as the call's result",
-            [Dropped, Returned] => "may be dropped during the call or moved out as the call's result",
-            [Transferred] | [Dropped, Transferred] => "is moved on or dropped by the call",
-            _ => continue,
+        let outcomes = &fate.outcomes;
+        let known: Vec<_> = outcomes.iter().filter_map(|outcome| match outcome {
+            Dropped if fate.needs_drop => Some("dropped during the call"),
+            Dropped => Some("consumed during the call (it has nothing to drop)"),
+            Returned => Some("moved out as the call's result"),
+            Transferred => Some("transferred out of the closure during the call"),
+            ScopeEnd => Some("kept until it goes out of scope (it has nothing to drop)"),
+            NoExit | Unknown => None,
+        }).collect();
+        if known.is_empty() { continue; }
+        let after_arguments = timing == CallTiming::AfterArguments;
+        let (condition, verb, tail) = match known.as_slice() {
+            [_] if outcomes.contains(&Returned) && outcomes.contains(&NoExit) && !outcomes.contains(&Unknown) =>
+                ("If the call returns, ", "is", "moved out of the closure as the call's result".to_owned()),
+            [_] if outcomes.len() == 1 => (
+                if after_arguments { "If the call starts, " } else { "" },
+                "is",
+                if outcomes.contains(&Returned) { "moved out of the closure as the call's result".to_owned() } else { known[0].to_owned() },
+            ),
+            _ => (if after_arguments { "If the call starts, " } else { "" }, "may be", known.join(" or ")),
         };
-        let during = if matches!(timing, CallTiming::AfterArguments) { "If the call starts, " } else { "" };
-        msg.push_str(&format!(". {during}{s}, which {f} captured, {tail}"));
+        let subject = if fate.borrowed {
+            let the = if condition.is_empty() { "The" } else { "the" };
+            format!("{the} value held in {f}'s capture of {s}")
+        } else {
+            format!("{s}, which {f} captured,")
+        };
+        msg.push_str(&format!(". {condition}{subject} {verb} {tail}"));
     }
     msg
 }
@@ -6685,16 +6722,16 @@ pub fn event_dot_closure_call_once(
 // #281); that's not a call of the closure.
 /// `called` / `moved`: what the branches did with the closure, an
 /// `FnOnce` call (#271) or a move (`v.push(f)`, `let g = f;`, #1158).
-pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: bool, count: usize, called: bool, moved: bool) -> String {
+pub fn event_dot_closure_go_out_of_scope_maybe_moved(my_name: &String, by_cond: bool, count: usize, called: bool, moved: bool, drop_flag: bool) -> String {
     let what = match (called, moved) {
         (true, true) => "called or moved",
         (true, false) => "called",
         _ => "moved",
     };
     let cond = if by_cond { format!("nothing above {} it", what) } else { format!("no branch above {} it", what) };
+    let flag = if drop_flag { " (Rust tracks this with a runtime drop flag)" } else { "" };
     format!(
-        "{0} goes out of scope. Its captured {1} dropped here only if {2} \
-         (Rust tracks this with a runtime drop flag).",
+        "{0} goes out of scope. Its captured {1} dropped here only if {2}{flag}.",
         styled_name_html(my_name),
         if count == 1 { "resource is" } else { "resources are" },
         cond
@@ -6886,7 +6923,7 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
     }
     if let (ExternalEvent::Move { .. }, ResourceTy::Value(ResourceAccessPoint::Function(f))) = (external_event, from) {
         if f.mir_result && f.callable_result && !to.is_closure() {
-            title = format!("Move of the result of {styled_from_string}() to {styled_to_string}");
+            title = arrow_callable_result(f, &styled_to_string);
         }
     }
     // A Copy-typed value a call returns (`let n = v.len();`): the
@@ -6945,6 +6982,19 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
         title.push_str(&arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed, &via.tie, via.carrier, &via.passed_on, option_ref));
     }
     title
+}
+
+pub fn arrow_callable_result(f: &Function, destination: &str) -> String {
+    let call = styled_name_html(&f.name);
+    match f.inside.as_deref() {
+        Some("Ok" | "Some") => {
+            let variant = f.inside.as_deref().unwrap();
+            format!("If {call}() returns {variant}, move its payload to {destination}")
+        }
+        Some("") => format!("Move of part of the result of {call}() to {destination}"),
+        Some(wrapper) => format!("Move of the value inside the {wrapper} {call}() returns to {destination}"),
+        None => format!("Move of the result of {call}() to {destination}"),
+    }
 }
 
 /// The one arrow drawn for a reference field's borrows from, or borrow

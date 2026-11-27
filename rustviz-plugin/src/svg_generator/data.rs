@@ -1532,6 +1532,7 @@ pub struct CapturedFate {
     pub name: String,
     pub outcomes: std::collections::BTreeSet<crate::facts::call_relationships::CaptureFate>,
     pub needs_drop: bool,
+    pub borrowed: bool,
 }
 
 /// A borrow that reaches a variable through the reference a call

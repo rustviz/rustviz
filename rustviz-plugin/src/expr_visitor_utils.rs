@@ -1776,13 +1776,24 @@ pub fn rc_call_of_expr(call: &Expr, tcx: &TyCtxt) -> Option<RcCall> {
 
 /// The function RAP for `call`'s result, with `Rc` clone / downgrade
 /// calls marked as such.
-pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt) -> ResourceAccessPoint {
+pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt, raps: &BodyRaps) -> ResourceAccessPoint {
   let mut rap = rap;
   if let ResourceAccessPoint::Function(f) = &mut rap {
     let typeck = tcx.typeck(call.hir_id.owner);
-    f.callable_result = typeck.type_dependent_def_id(call.hir_id)
-      .is_some_and(|method| crate::facts::call_relationships::kind(*tcx, Some(method))
-        == crate::facts::call_relationships::CallKind::FnOnce);
+    f.callable_result = crate::facts::call_relationships::kind(*tcx, typeck.type_dependent_def_id(call.hir_id)).is_callable();
+    if f.callable_result {
+      if let ExprKind::Call(callee, _) = call.kind {
+        if let ExprKind::Path(qpath) = callee.kind {
+          if let rustc_hir::def::Res::Local(id) = typeck.qpath_res(&qpath, callee.hir_id) {
+            // The result begins at a function icon, but the callee is
+            // still this particular closure binding (including shadows).
+            if let Some(binding) = raps.binding(id) {
+              f.name.clone_from(binding.rap.name());
+            }
+          }
+        }
+      }
+    }
   }
   let rap = match rc_call_of_expr(call, tcx) {
     Some(rc_call) => rap.with_rc_call(rc_call),
@@ -1878,12 +1889,12 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> ResourceTy {
       // pointer) yields the call's result, not `f`'s own value: name
       // the call's Function RAP, never the variable (#254, #299).
       let key = hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n));
-      key.and_then(|n| raps.get(&n).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
+      key.and_then(|n| raps.get(&n).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx, raps)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::MethodCall(name_and_generic_args, ..) => {
       hirid_to_var_name(name_and_generic_args.hir_id, &tcx)
-        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
+        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx, raps)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::Block(b, _) => {

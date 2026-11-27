@@ -1890,8 +1890,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   // Adds an owner RAP that binds a closure literal. Routed through
   // a separate constructor (rather than an extra arg on add_owner) so
   // we don't churn every call site — closures are the only producer.
-  pub fn add_closure_owner(&mut self, name: String, mutability: bool, is_plain_value: bool, scope: usize, is_global: bool) {
-    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value, interior_mut: InteriorMut::No, is_closure: true, ..Default::default()}), scope, is_global);
+  pub fn add_closure_owner(&mut self, name: String, mutability: bool, is_plain_value: bool, interior_mut: InteriorMut, scope: usize, is_global: bool) {
+    self.add_rap(ResourceAccessPoint::Owner(Owner{name: name, hash: self.rap_hashes as u64, is_mut: mutability, is_copy: false, is_plain_value, interior_mut, is_closure: true, ..Default::default()}), scope, is_global);
   }
 
   // Adds a reference RAP
@@ -4219,23 +4219,44 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       return;
     }
-    let Some((read, invocation)) = facts.value_flow.call_receiver(call.span, method, callee.span) else { return };
+    let Some((read, invocations, staged)) = facts.value_flow.call_receiver(call.span, method, callee.span) else { return };
+    let records: Vec<_> = invocations.iter().filter_map(|&at| facts.call_relationships.call(at)).collect();
     let row = read.site.row;
     match (&read.effect, kind) {
       (OperandEffect::Borrow { source, mutable, of_ref_slot }, CallKind::Fn | CallKind::FnMut)
         if *mutable == (kind == CallKind::FnMut) =>
       {
-        // The ordinary reference-pass event includes the normal
-        // continuation. A call proven to diverge has no such endpoint.
-        if !invocation.and_then(|at| facts.call_relationships.call(at)).is_some_and(|call| call.can_return) {
+        // The reference-pass event supplies a normal continuation.
+        if records.is_empty() || !records.iter().all(|call| call.can_return) {
           return;
         }
         let Some(from) = self.transfer_source(source, callee) else { return };
         let Some(to) = self.raps.get(&fn_key(name)).map(|r| ResourceTy::Value(r.rap.clone())) else { return };
         let ty = self.tcx.typeck(callee.hir_id.owner).expr_ty(callee).peel_refs();
         if matches!(ty.kind(), TyKind::Param(_) | TyKind::Alias(..) | TyKind::Dynamic(..)) {
-          self.row_layout.opaque_call_receivers.insert(*self.unique_id);
+          self.row_layout.opaque_callable_columns.insert(*from.hash());
         }
+        use crate::svg_generator::hover_messages as hover;
+        let mut title = hover::closure_receiver(&from.name(), name, *mutable, staged);
+        if !*mutable && self.ty_has_interior_mut(ty, callee.hir_id.owner) == InteriorMut::Yes {
+          title.push_str(". Interior mutability lets the call change data reached through the receiver");
+        }
+        // Origins and liveness must agree at every lowering of the call.
+        let mut loans = facts.loans.iter().filter(|loan| loan.direct_holders.contains(&source.column)
+          && records.iter().all(|call| call.receiver_loans.contains(&loan.loan)));
+        if let Some(loan) = loans.next().filter(|_| loans.next().is_none()) {
+          if let Some(lender) = loan.lender_local.and_then(|local| self.raps.place(local, &loan.lender)) {
+            title.push_str(". ");
+            title.push_str(&hover::state_shared_by(lender.rap.name(), Some(&source.column), lender.rap.drops_nothing()));
+          }
+        }
+        if records.iter().all(|call| call.receiver_borrow_ends) {
+          title.push_str(". When the call returns, its receiver borrow ends");
+        }
+        if read.exact {
+          self.transfer_sites.insert(*self.unique_id, read.site);
+        }
+        self.row_layout.closure_receivers.insert(*self.unique_id, title);
         if *mutable {
           let reborrow = matches!(from, ResourceTy::Deref(_) | ResourceTy::DerefField(..));
           self.add_pass_by_mref_ev(row, to, from, reborrow, false, ImplicitRef::No, *of_ref_slot);
@@ -4249,18 +4270,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       (OperandEffect::Move(source), CallKind::FnOnce) => {
         let Some(closure) = self.transfer_source(source, callee) else { return };
-        let timing = match invocation {
-          None if self.mir_call(call).is_some() => CallTiming::Direct,
-          None => CallTiming::Never,
-          Some(at) if at.block != read.site.at.block => CallTiming::AfterArguments,
-          Some(_) => CallTiming::Direct,
+        let timing = match (invocations.is_empty(), staged) {
+          (true, _) => CallTiming::Never,
+          (false, true) => CallTiming::AfterArguments,
+          (false, false) => CallTiming::Direct,
         };
-        let record = invocation.and_then(|at| facts.call_relationships.call(at));
+        let record = records.first().filter(|first| records.iter().all(|call|
+          call.capture_fates == first.capture_fates && call.borrowed_captures == first.borrowed_captures));
         let fates = match self.tcx.typeck(callee.hir_id.owner).expr_ty(callee).kind() {
           TyKind::Closure(id, _) => id.as_local().zip(record).map(|(local, call)| {
             let typeck = self.tcx.typeck(local);
-            typeck.closure_min_captures_flattened(local).zip(&call.capture_fates)
-              .filter_map(|(capture, outcomes)| {
+            typeck.closure_min_captures_flattened(local).zip(&call.capture_fates).enumerate()
+              .filter_map(|(field, (capture, outcomes))| {
                 if !matches!(capture.info.capture_kind, rustc_middle::ty::UpvarCapture::ByValue | rustc_middle::ty::UpvarCapture::ByUse)
                   || self.ty_is_copy(capture.place.ty(), callee.hir_id.owner) { return None; }
                 let rap = self.capture_column(capture)?;
@@ -4268,12 +4289,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
                   name: rap.name().to_owned(),
                   outcomes: outcomes.clone(),
                   needs_drop: self.needs_drop(capture.place.ty(), callee.hir_id.owner),
+                  borrowed: call.borrowed_captures.contains(&field),
                 })
               }).collect()
           }),
           _ => None,
         };
         let id = *self.unique_id;
+        if read.exact {
+          self.transfer_sites.insert(id, read.site);
+        }
         *self.unique_id += 1;
         self.add_external_event(row, ExternalEvent::ClosureCall { closure, fates, timing, id });
       }
@@ -7687,10 +7712,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // A closure that holds only references (or Copy captures) has
       // nothing to drop: what it holds is a "value", not a "resource"
       // (#484, #791).
-      // A captured std lock counts as a resource on every host, as
-      // for `ty_is_plain` (#813).
-      let plain = !self.needs_drop(ty, expr.hir_id.owner) && !ty_has_std_sync_primitive(self.tcx, ty);
-      self.add_closure_owner(name, mutability, plain, self.current_scope, !self.inside_branch);
+      let plain = !self.needs_drop(ty, expr.hir_id.owner);
+      self.add_closure_owner(name, mutability, plain, self.ty_has_interior_mut(ty, expr.hir_id.owner), self.current_scope, !self.inside_branch);
     }
     else {
       // Plain values, including a function item or function pointer
@@ -11295,7 +11318,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
       // Same Anonymous fallback as the Call arm — chained / macro /
       // desugared method calls may not have a registered name.
       let from = hirid_to_var_name(name_and_generic_args.hir_id, &self.tcx)
-        .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| fn_result_rap(rhs, rd.rap.with_mir_result(), &self.tcx)))
+        .and_then(|n| self.raps.get(&fn_key(&n)).map(|rd| fn_result_rap(rhs, rd.rap.with_mir_result(), &self.tcx, &self.raps)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value);
       let Some(call) = self.mir_call(rhs).filter(|c| c.has_result) else { return };
       let evt = if matches!(lhs, ResourceTy::Caller) && call.copyable { Evt::Copy } else { evt };
@@ -12102,17 +12125,19 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   let evt = if matches!(lhs, ResourceTy::Caller) && call.copyable { Evt::Copy } else { evt };
   // The result is produced by the invocation. The receiver's pass or
   // consumption is already recorded by closure_call_events.
-  if !matches!(fn_expr.kind, ExprKind::Path(_)) {
+  let callable = crate::facts::call_relationships::kind(self.tcx, call.callee).is_callable();
+  if !callable && !matches!(fn_expr.kind, ExprKind::Path(_)) {
     self.bind_from_anonymous(line_num, lhs);
     return;
   }
-  let from = match hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
+  let name = hirid_to_var_name(fn_expr.hir_id, &self.tcx).or_else(|| callable.then(|| self.callee_text(fn_expr)));
+  let from = match name {
     Some(n) => {
       if !self.raps.contains_key(&fn_key(&n)) {
         self.add_fn(n.clone());
       }
       self.raps.get(&fn_key(&n))
-        .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.with_mir_result(), &self.tcx)))
+        .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.with_mir_result(), &self.tcx, &self.raps)))
         .unwrap_or(ResourceTy::Anonymous)
     }
     None => ResourceTy::Anonymous,
@@ -12430,8 +12455,8 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
     let evt_kind = match fact.transfer {
       CaptureTransfer::Copy => Evt::Copy,
       CaptureTransfer::Move => Evt::Move,
-      CaptureTransfer::Shared | CaptureTransfer::Unique => Evt::SBorrow,
-      CaptureTransfer::Mutable => Evt::MBorrow,
+      CaptureTransfer::Shared => Evt::SBorrow,
+      CaptureTransfer::Mutable | CaptureTransfer::Unique => Evt::MBorrow,
       CaptureTransfer::Unknown => continue,
     };
     let capture_id = *self.unique_id;
@@ -12442,6 +12467,9 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
     }
 
     self.row_layout.closure_captures.entry(bind).or_default().extend(capture_id..*self.unique_id);
+    if fact.transfer == CaptureTransfer::Unique {
+      self.row_layout.unique_closure_captures.extend(capture_id..*self.unique_id);
+    }
 
     // For ref captures, find the matching MIR loan and emit
     // a Die event at its kill line so the borrow returns on

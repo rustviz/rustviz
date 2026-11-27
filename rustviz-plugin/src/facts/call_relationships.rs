@@ -80,6 +80,8 @@ pub enum CaptureFate {
     Dropped,
     Returned,
     Transferred,
+    ScopeEnd,
+    NoExit,
     Unknown,
 }
 
@@ -111,13 +113,19 @@ pub(crate) enum ReturnSource {
 #[derive(Serialize)]
 pub(crate) struct CallRelationship {
     #[serde(serialize_with = "super::schema::location")]
-    location: Location,
+    pub location: Location,
     pub row: usize,
     pub kind: CallKind,
     pub can_return: bool,
     callee: Option<String>,
     pub return_sources: Option<BTreeSet<ReturnSource>>,
     pub capture_fates: Vec<BTreeSet<CaptureFate>>,
+    #[serde(skip)]
+    pub borrowed_captures: BTreeSet<usize>,
+    #[serde(skip)]
+    pub receiver_loans: BTreeSet<usize>,
+    #[serde(skip)]
+    pub receiver_borrow_ends: bool,
 }
 
 #[derive(Default, Serialize)]
@@ -258,7 +266,7 @@ pub(super) fn collect<'tcx>(
             .or_else(|| callee.filter(|def| tcx.trait_of_assoc(*def).is_none()))
             .and_then(DefId::as_local)
             .filter(|id| tcx.hir_maybe_body_owned_by(*id).is_some());
-        let (return_sources, capture_fates) = local
+        let (return_sources, (capture_fates, borrowed_captures)) = local
             .map(|id| {
                 summaries
                     .entry((id, kind == CallKind::FnOnce))
@@ -269,7 +277,7 @@ pub(super) fn collect<'tcx>(
                         let fates = if closure.is_some() && kind == CallKind::FnOnce {
                             capture_fates(tcx, callee, &blocks)
                         } else {
-                            Vec::new()
+                            Default::default()
                         };
                         (sources, fates)
                     })
@@ -285,6 +293,9 @@ pub(super) fn collect<'tcx>(
             callee: callee.map(|id| tcx.def_path_str(id)),
             return_sources: target.and(return_sources),
             capture_fates,
+            borrowed_captures,
+            receiver_loans: BTreeSet::new(),
+            receiver_borrow_ends: false,
         });
     }
     facts
@@ -305,6 +316,73 @@ fn projection(place: Place<'_>) -> Option<Vec<Projection>> {
 
 fn starts_with<'tcx>(place: Place<'tcx>, prefix: Place<'tcx>) -> bool {
     place.local == prefix.local && place.projection.starts_with(prefix.projection.as_slice())
+}
+
+/// Writable pointer operands can expose a slot even if this body never
+/// forms its address. Include their reaching copies and moves.
+fn writable_arguments<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    blocks: &BTreeSet<BasicBlock>,
+    at: Location,
+    args: impl Iterator<Item = Place<'tcx>>,
+) -> Vec<Place<'tcx>> {
+    let mut arguments: Vec<_> = args.collect();
+    let mut work = Vec::new();
+    while let Some(place) = arguments.pop() {
+        match place.ty(&body.local_decls, tcx).ty.kind() {
+            TyKind::RawPtr(..) | TyKind::Ref(_, _, rustc_hir::Mutability::Mut) => work.push((at, place)),
+            // Fn, FnMut and FnOnce bundle the explicit operands in a tuple.
+            TyKind::Tuple(fields) => arguments.extend(fields.iter().enumerate().map(|(i, ty)| {
+                place.project_deeper(&[ProjectionElem::Field(rustc_abi::FieldIdx::from_usize(i), ty)], tcx)
+            })),
+            _ => {}
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut places = Vec::new();
+    while let Some((at, place)) = work.pop() {
+        if !seen.insert((at, place)) || place.projection.len() > 32 {
+            continue;
+        }
+        places.push(place.project_deeper(&[ProjectionElem::Deref], tcx));
+        if let Some((i, assign)) = body[at.block].statements[..at.statement_index].iter().enumerate().rev().find_map(|(i, st)| {
+            let StatementKind::Assign(a) = &st.kind else { return None };
+            (starts_with(place, a.0) || starts_with(a.0, place)).then_some((i, a))
+        }) {
+            if starts_with(place, assign.0) {
+                let suffix = &place.projection[assign.0.projection.len()..];
+                let source = match &assign.1 {
+                    Rvalue::Use(operand) => operand.place().map(|p| p.project_deeper(suffix, tcx)),
+                    Rvalue::Aggregate(kind, fields) if matches!(**kind, AggregateKind::Tuple) => {
+                        match suffix {
+                            [ProjectionElem::Field(field, _), rest @ ..] =>
+                                fields[*field].place().map(|p| p.project_deeper(rest, tcx)),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(source) = source {
+                    work.push((Location { statement_index: i, ..at }, source));
+                }
+            }
+            continue;
+        }
+        work.extend(body.basic_blocks.predecessors()[at.block].iter().copied()
+            .filter(|pred| blocks.contains(pred) && normal_successors(body, *pred).contains(&at.block))
+            .map(|pred| (body.terminator_loc(pred), place)));
+    }
+    places
+}
+
+fn may_write<'tcx>(place: Place<'tcx>, exposed: Place<'tcx>, address: bool) -> bool {
+    if starts_with(place, exposed) {
+        !address || place.projection[exposed.projection.len()..].contains(&ProjectionElem::Deref)
+    } else {
+        !address && starts_with(exposed, place)
+            && !exposed.projection[place.projection.len()..].contains(&ProjectionElem::Deref)
+    }
 }
 
 /// Trace the value at each normal return back to a reaching definition.
@@ -337,7 +415,8 @@ fn return_sources<'tcx>(
     if blocks.iter().any(|&bb| matches!(body[bb].terminator().kind, TerminatorKind::TailCall { .. })) {
         sources.insert(ReturnSource::Unknown);
     }
-    'trace: while let Some((at, mut place, mut selected, mut string_contents, mut address)) = work.pop() {
+    let mut call_writes = BTreeMap::new();
+    'trace: while let Some((at, mut place, mut selected, string_contents, mut address)) = work.pop() {
         if !seen.insert((at, place, selected, string_contents, address)) {
             continue;
         }
@@ -385,10 +464,7 @@ fn return_sources<'tcx>(
                     continue 'trace;
                 }
             };
-            if exposed.iter().any(|&p| {
-                starts_with(place, p)
-                    && (!address || place.projection[p.projection.len()..].contains(&ProjectionElem::Deref))
-            }) {
+            if exposed.iter().any(|&p| may_write(place, p, address)) {
                 sources.insert(ReturnSource::Unknown);
                 continue 'trace;
             }
@@ -425,6 +501,7 @@ fn return_sources<'tcx>(
             let term = body[pred].terminator();
             let mut source = place;
             let mut selected = selected;
+            let mut string_contents = string_contents;
             if let TerminatorKind::Call { func, args, destination, target: Some(target), .. } = &term.kind {
                 if *target == at.block
                     && starts_with(place, *destination)
@@ -446,6 +523,11 @@ fn return_sources<'tcx>(
                     source = arg.project_deeper(&place.projection[destination.projection.len()..], tcx);
                     selected |= span.is_some_and(|s| term.source_info.span.source_equal(s));
                     string_contents = true;
+                } else if call_writes.entry(pred).or_insert_with(|| writable_arguments(
+                    tcx, body, blocks, body.terminator_loc(pred), args.iter().filter_map(|arg| arg.node.place()),
+                )).iter().any(|&exposed| may_write(place, exposed, address)) {
+                    sources.insert(ReturnSource::Unknown);
+                    continue;
                 }
             }
             work.push((body.terminator_loc(pred), source, selected, string_contents, address));
@@ -502,28 +584,40 @@ fn capture_fates<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     blocks: &BTreeSet<BasicBlock>,
-) -> Vec<BTreeSet<CaptureFate>> {
+) -> (Vec<BTreeSet<CaptureFate>>, BTreeSet<usize>) {
     use CaptureFate::*;
-    let Some(environment) = body.args_iter().next() else { return Vec::new() };
-    let TyKind::Closure(_, args) = *body.local_decls[environment].ty.kind() else { return Vec::new() };
+    let Some(environment) = body.args_iter().next() else { return Default::default() };
+    let TyKind::Closure(_, args) = *body.local_decls[environment].ty.kind() else { return Default::default() };
     let mut effects = PlaceEffects::default();
     effects.visit_body(body);
     let env = body.typing_env(tcx);
-    args.as_closure()
+    let mut borrowed = BTreeSet::new();
+    let fates = args.as_closure()
         .upvar_tys()
         .iter()
         .enumerate()
         .map(|(field, ty)| {
-            let field = rustc_abi::FieldIdx::from_usize(field);
             let needs_drop = tcx.erase_and_anonymize_regions(ty).needs_drop(tcx, env);
-            let field = Place::from(environment).project_deeper(&[ProjectionElem::Field(field, ty)], tcx);
-            let mut work = vec![(START_BLOCK, field)];
+            let place = Place::from(environment).project_deeper(
+                &[ProjectionElem::Field(rustc_abi::FieldIdx::from_usize(field), ty)], tcx);
+            let mut work = vec![((START_BLOCK, place), false)];
             let mut seen = std::collections::HashSet::new();
+            let mut active = std::collections::HashSet::new();
             let mut outcomes = BTreeSet::new();
-            'path: while let Some((bb, mut carrier)) = work.pop() {
-                if !seen.insert((bb, carrier)) || !blocks.contains(&bb) {
+            'path: while let Some((site @ (bb, mut carrier), leaving)) = work.pop() {
+                if leaving {
+                    active.remove(&site);
                     continue;
                 }
+                if active.contains(&site) {
+                    outcomes.insert(NoExit);
+                    continue;
+                }
+                if !seen.insert(site) || !blocks.contains(&bb) {
+                    continue;
+                }
+                active.insert(site);
+                work.push((site, true));
                 let data = &body[bb];
                 for i in 0..=data.statements.len() {
                     let at = Location { block: bb, statement_index: i };
@@ -535,8 +629,13 @@ fn capture_fates<'tcx>(
                             continue;
                         }
                         let fate = match effect {
+                            PlaceContext::MutatingUse(MutatingUseContext::Borrow) if starts_with(place, carrier) => {
+                                // The slot stays owned. A mutable borrow can change its contents.
+                                borrowed.insert(field);
+                                continue;
+                            }
                             PlaceContext::MutatingUse(MutatingUseContext::Drop) if starts_with(carrier, place) => {
-                                Dropped
+                                if needs_drop { Dropped } else { ScopeEnd }
                             }
                             PlaceContext::NonMutatingUse(NonMutatingUseContext::Move) if place == carrier => {
                                 if let Some(st) = data.statements.get(i) {
@@ -581,7 +680,7 @@ fn capture_fates<'tcx>(
                         matches!(st.kind,
                     StatementKind::StorageDead(l) if l == carrier.local)
                     }) {
-                        outcomes.insert(Unknown);
+                        outcomes.insert(if needs_drop { Unknown } else { ScopeEnd });
                         continue 'path;
                     }
                 }
@@ -589,13 +688,14 @@ fn capture_fates<'tcx>(
                 if successors.is_empty() {
                     outcomes.insert(match data.terminator().kind {
                         TerminatorKind::Return if carrier.local == RETURN_PLACE => Returned,
-                        TerminatorKind::Return if !needs_drop => Dropped,
+                        TerminatorKind::Return if !needs_drop => ScopeEnd,
                         _ => Unknown,
                     });
                 }
-                work.extend(successors.into_iter().map(|next| (next, carrier)));
+                work.extend(successors.into_iter().map(|next| ((next, carrier), false)));
             }
             outcomes
         })
-        .collect()
+        .collect();
+    (fates, borrowed)
 }

@@ -193,14 +193,15 @@ impl DotLayer {
     /// event recorded, if that is drawn here: borrowed by f, f reads
     /// from s, no longer borrowed.
     fn add_call(&mut self, hash: u64, x: i64, y: i64, column: &TimelineColumnData,
-                title: String, id: usize, ev: &'static str, row: usize) {
+                title: String, id: usize, ev: &'static str, row: usize, receiver: bool) {
         let dot = self.entry(hash, x, y, row, column);
         dot.call = true;
         dot.events.push(ev);
-        let at = dot.lines.iter()
-            .position(|(lend, _)| *lend == Some(id))
-            .map_or(dot.lines.len(), |i| i + 1);
-        dot.lines.insert(at, (None, title));
+        let lend = dot.lines.iter().position(|(lend, _)| *lend == Some(id));
+        if !receiver || lend.is_none() {
+            let at = lend.map_or(if receiver { 0 } else { dot.lines.len() }, |i| i + 1);
+            dot.lines.insert(at, (None, title));
+        }
     }
 
     /// Puts each approximation note on the event dots it belongs to
@@ -1899,7 +1900,12 @@ fn render_scope_end_dot(
         } else {
             None
         };
-        if is_closure {
+        if visualization_data.row_layout.opaque_callable_columns.contains(hash) {
+            data.title = hover_messages::event_dot_owner_go_out_of_scope(&name);
+            if resource_hold {
+                data.title.push_str(". Rust drops the callable value if its concrete type needs drop.");
+            }
+        } else if is_closure {
             // Closure value going out of scope: only
             // surface "Its captured resources are
             // dropped" when at least one upvar was
@@ -1914,17 +1920,29 @@ fn render_scope_end_dot(
             // away (`let g = f;`); then there's nothing left to
             // drop (#271).
             let move_count = closure_move_capture_count(visualization_data, *hash);
-            let maybe_moved = move_count > 0 && !resource_hold && maybe_moved_at_end(history);
-            if move_count > 0 && (resource_hold || maybe_moved) {
+            let drop = (|| visualization_data.state_table.local_scope_drop(
+                *visualization_data.fn_source_lines.get(hash)?, ro.name(),
+                rv_attrs::line_of(*line_number, &visualization_data.row_lines)?, ro.owner_local(),
+            ))();
+            let maybe_moved = match drop {
+                Some("drops_if_init") => true,
+                Some(_) => false,
+                None => !resource_hold && maybe_moved_at_end(history),
+            };
+            let drops_here = match drop {
+                Some("drops" | "drops_if_init") => true,
+                Some("nothing_to_drop") => false,
+                _ => resource_hold || maybe_moved,
+            };
+            if move_count > 0 && drops_here {
                 let cx = timeline_data.x_val;
                 let cy = event_y;
                 // Called (so moved) on some paths only: the drop
                 // flag decides whether its captures are dropped.
                 let title = if maybe_moved {
-                {
                     let (called, moved) = closure_used_up_in_branches(history);
-                    hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, moved_by_chain_condition(history), move_count, called, moved)
-                }
+                    hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(
+                        &name, moved_by_chain_condition(history), move_count, called, moved, drop == Some("drops_if_init"))
                 } else {
                     hover_messages::event_dot_closure_go_out_of_scope(&name, move_count)
                 };
@@ -2515,11 +2533,10 @@ fn render_dot(
         if is_closure_capture_event {
             continue;
         }
-        // Keep these history events for the layout. The call dot already
-        // explains the reference pass for this opaque callable.
-        if visualization_data.row_layout.opaque_call_receivers.contains(&event.get_id())
-            && matches!(event, Event::StaticLend { .. } | Event::MutableLend { .. }
-                | Event::StaticReacquire { .. } | Event::MutableReacquire { .. })
+        // The receiver title sits in the lend's position, before any scope
+        // end sharing the dot. The synthetic reacquire adds no proof.
+        if visualization_data.row_layout.closure_receivers.contains_key(&event.get_id())
+            && matches!(event, Event::StaticReacquire { .. } | Event::MutableReacquire { .. })
         {
             continue;
         }
@@ -3123,6 +3140,28 @@ fn render_dot(
         if let Some(title) = visualization_data.row_layout.aggregate_titles.get(&event.get_id()) {
             data.title.clone_from(title);
         }
+        if let Event::StaticLend { .. } | Event::MutableLend { .. } = event {
+            if let Some(title) = layout.closure_receivers.get(&event.get_id()) {
+                data.title.clone_from(title);
+            }
+        }
+        if layout.unique_closure_captures.contains(&event.get_id()) {
+            if let Event::MutableLend { is, to, .. } = event {
+                data.title = hover_messages::unique_closure_capture(is, to);
+            }
+        }
+        if let Event::MutableDie { is: holder, to: lender, .. } | Event::MutableReacquire { from: holder, is: lender, .. } = event {
+            if let Some(loan) = (|| {
+                let [loan] = visualization_data.state_table.end_loans.get(&event.get_id())?.as_slice() else { return None };
+                let function = *visualization_data.fn_source_lines.get(holder.hash())?;
+                let loan = visualization_data.state_table.loan(function, *loan)?;
+                (holder.is_closure() && loan.kind == "unique" && lender.is_ref()
+                    && loan.lender == lender.name() && loan.direct_holders.contains(&holder.name())).then_some(loan)
+            })() {
+                data.title = hover_messages::arrow_end_title(holder, lender, None,
+                    true, Some(loan), Some("unique immutable"), None);
+            }
+        }
         let rap = &visualization_data.timelines[hash].resource_access_point;
         if let Some(state) = one_dot_holder_state(history, i, rap, &visualization_data.row_layout) {
             let tip = timeline_segment_title(&state, rap, visualization_data, None);
@@ -3434,7 +3473,8 @@ fn closure_used_up_in_branches(history: &[(usize, Event)]) -> (bool, bool) {
                         walk(&b.e_data, true, out);
                     }
                 }
-                Event::ClosureCall { .. } if in_branch => out.0 = true,
+                Event::ClosureCall { timing: crate::svg_generator::data::CallTiming::Direct, .. } if in_branch => out.0 = true,
+                Event::ClosureCall { .. } if in_branch => out.1 = true,
                 Event::Move { .. } if in_branch => out.1 = true,
                 _ => {}
             }
@@ -4196,6 +4236,13 @@ fn collect_closure_captures(
                     out.push((format!("*{}", name), hover_messages::capture_verb_immutably_reborrowed()));
                 }
             }
+            ExternalEvent::MutableBorrow { from, to, id, .. }
+                if matches_closure(to, closure_hash) && visualization_data.row_layout.unique_closure_captures.contains(id) =>
+            {
+                if let Some(name) = upvar_name(from) {
+                    out.push((name, "uniquely borrowed"));
+                }
+            }
             ExternalEvent::MutableBorrow { from, to, is_reborrow: true, .. } if matches_closure(to, closure_hash) => {
                 if let Some(name) = upvar_name(from) {
                     out.push((format!("*{}", name), hover_messages::capture_verb_mutably_reborrowed()));
@@ -4340,13 +4387,15 @@ fn closure_move_capture_count(
     visualization_data: &VisualizationData,
     closure_hash: u64,
 ) -> usize {
+    if visualization_data.timelines.get(&closure_hash).is_some_and(|t| t.resource_access_point.drops_nothing()) {
+        return 0;
+    }
     let events = all_external_events(visualization_data);
     // A capture by move brings a resource along only if what is moved
     // needs drop: not a reference (`move || r.push('!')` with `r: &mut
     // String` moves the reference; references never own, #1148), nor a
     // value with nothing to drop (#484).
-    let owns_resource = |from: &ResourceTy| from.extract_rap()
-        .is_none_or(|r| !r.is_ref() && !r.holds_value());
+    let owns_resource = |from: &ResourceTy| from.extract_rap().is_some_and(|r| !r.drops_nothing());
     fn count(events: &[&(usize, ExternalEvent)], owns_resource: &dyn Fn(&ResourceTy) -> bool, closure_hash: u64, depth: usize) -> usize {
         if depth > 8 {
             return 0;
@@ -4504,6 +4553,14 @@ fn timeline_segment_title(
 ) -> String {
     if let State::FullPrivilege { s: LineState::Uninit } = state {
         return state.print_message_with_name(rap.name());
+    }
+    if visualization_data.row_layout.opaque_callable_columns.contains(rap.hash()) && !rap.is_ref() {
+        match state {
+            State::FullPrivilege { .. } => return format!("{} owns the callable value", styled_name_html(rap.name())),
+            State::PartialPrivilege { .. } => return hover_messages::state_partial_privilege(rap.name(), true),
+            State::ResourceMoved { dropped_by_hand: false, .. } => return hover_messages::state_value_moved(rap.name(), rap.is_mut()),
+            _ => {}
+        }
     }
     if matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }) && !rap.is_ref() {
         if let Some((into, mutable, sources, chain)) = or_alt_lend_at(visualization_data, rap, line) {
@@ -7417,6 +7474,9 @@ fn render_generic_arrow(
             _ => {}
         }
     }
+    if layout.unique_closure_captures.contains(&id) {
+        title = hover_messages::unique_closure_capture(from, to);
+    }
     if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::VecElement { id, nested: true, .. } if *id == external_event.get_id())) {
         title.push_str(". The element goes into an inner vector held by the destination");
     }
@@ -7541,7 +7601,10 @@ fn render_generic_arrow(
             // get position of to_variable
             let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
 
-            let title = if visualization_data.row_layout.reassigned_receivers.contains(&external_event.get_id()) {
+            let receiver = layout.closure_receivers.get(&id);
+            let title = if let Some(title) = receiver {
+                title.clone()
+            } else if visualization_data.row_layout.reassigned_receivers.contains(&external_event.get_id()) {
                 format!("{} may read or write through the receiver reserved before {} was reassigned", styled_name_html(&function.name), styled_name_html(&from_variable.name()))
             } else if let Some((_, place)) = visualization_data.row_layout.projected_loan_places.get(&external_event.get_id()) {
                 let shared = visualization_data.row_layout.shared_projected_calls.contains(&external_event.get_id());
@@ -7569,6 +7632,7 @@ fn render_generic_arrow(
                 external_event.get_id(),
                 rv_attrs::external_event_name(external_event),
                 *line_number,
+                receiver.is_some(),
             );
         }
         (from_variable, ResourceTy::Value(ResourceAccessPoint::Function(to_function)), _e) => { // (Some(variable), Some(function), _)
@@ -7830,7 +7894,7 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
                 None => format!("The caller receives the value {styled_fn}() returns"),
             }
         } else if f.callable_result && matches!(external_event, ExternalEvent::Move { .. }) {
-            format!("Move of the result of {styled_fn}() to the caller")
+            hover_messages::arrow_callable_result(f, "the caller")
         } else { hover_messages::arrow_fn_return_title(matches!(external_event, ExternalEvent::Copy { .. }), named_call, &styled_fn) };
         let ev = rv_attrs::external_event_name(external_event);
         let rv = Rv::new(rv_attrs::ARROW).event(ev).var(&f.name).to("caller").row(*line_number).attrs();

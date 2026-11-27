@@ -195,19 +195,28 @@ impl ValueFlow {
 
     /// Follow the implicit receiver's own operand to slot zero of this
     /// invocation. Ordinary closure arguments are fields of slot one.
-    pub fn call_receiver(&self, span: Span, callee: DefId, receiver: Span) -> Option<(Read, Option<Location>)> {
+    pub fn call_receiver(&self, span: Span, callee: DefId, receiver: Span) -> Option<(Read, Vec<Location>, bool)> {
         let slots = CallSlots { span: Some(span), callee: Some(callee), ..CallSlots::default() };
         let operands = &self.operands;
-        if operands.calls.get(&span.with_parent(None)).is_some_and(|calls| calls.iter().any(|c| c.callee == Some(callee))) {
-            let read = Operands::common_read(operands.argument_reads(receiver, slots))?;
-            let at = read.exact.then(|| self.unique_argument(&read, slots).map(|(at, _)| at)).flatten();
-            return Some((read, at));
+        let calls: BTreeSet<_> = operands.calls.get(&span.with_parent(None)).into_iter().flatten()
+            .filter(|call| call.callee == Some(callee)).filter_map(|call| call.site.map(|site| site.at)).collect();
+        if !calls.is_empty() {
+            let reads = || operands.argument_reads(receiver, slots);
+            let read = Operands::common_read(reads())?;
+            let mut matched = BTreeSet::new();
+            let mut staged = false;
+            for operand in reads() {
+                let (at, _) = self.unique_argument(operand, slots)?;
+                staged |= at.block != operand.site.at.block;
+                matched.insert(at);
+            }
+            return (calls == matched).then(|| (read, matched.into_iter().collect(), staged));
         }
         // A call whose arguments diverge can still stage its receiver.
         // The compiler provided a resolved FnOnce method but no call
         // terminator. Keep only an unforwarded transfer into a temporary.
         let read = self.read(receiver)?;
-        (read.staging.is_some() && read.destinations.is_empty() && read.exact).then_some((read, None))
+        (read.staging.is_some() && read.destinations.is_empty() && read.exact).then_some((read, Vec::new(), true))
     }
 
     pub fn drops_argument(&self, read: &Read, slots: CallSlots) -> bool {

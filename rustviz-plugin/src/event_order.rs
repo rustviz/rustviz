@@ -1391,8 +1391,10 @@ pub struct RowLayout {
     pub(crate) retained_references: BTreeMap<usize, (String, String)>,
     pub(crate) reassigned_receivers: BTreeSet<usize>,
     arm_points: BTreeMap<usize, Point>,
-    /// Receiver uses of type-erased callables carry only the call tooltip.
-    pub(crate) opaque_call_receivers: BTreeSet<usize>,
+    pub(crate) closure_receivers: BTreeMap<usize, String>,
+    /// Bindings whose callable representation is unknown in this body.
+    pub(crate) opaque_callable_columns: BTreeSet<u64>,
+    pub(crate) unique_closure_captures: BTreeSet<usize>,
     pub(crate) closure_captures: BTreeMap<usize, Vec<usize>>,
     pub(crate) field_generations: BTreeMap<usize, FieldGeneration>,
     pub(crate) later_field_effects: BTreeSet<usize>,
@@ -1427,7 +1429,9 @@ impl RowLayout {
         self.copied_ends.append(&mut other.copied_ends);
         self.retained_references.append(&mut other.retained_references);
         self.reassigned_receivers.append(&mut other.reassigned_receivers);
-        self.opaque_call_receivers.append(&mut other.opaque_call_receivers);
+        self.closure_receivers.append(&mut other.closure_receivers);
+        self.opaque_callable_columns.append(&mut other.opaque_callable_columns);
+        self.unique_closure_captures.append(&mut other.unique_closure_captures);
         self.closure_captures.append(&mut other.closure_captures);
         self.field_generations.append(&mut other.field_generations);
         self.later_field_effects.append(&mut other.later_field_effects);
