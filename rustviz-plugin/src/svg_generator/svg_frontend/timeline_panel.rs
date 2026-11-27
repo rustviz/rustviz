@@ -1634,7 +1634,14 @@ fn render_branch_dots(
         } else if visualization_data.row_layout.ended_at_fork.contains(&(event.get_id(), *hash)) {
             Some(hover_messages::state_ref_borrow_ended(&is.real_name()))
         } else if borrow_ended_in_every_arm {
-            Some(hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name()))
+            let mut title = hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name());
+            if rap.is_ref() && !rap.is_mutref() && join.is_some_and(|j| j.cell.init == crate::facts::table::Init::Own)
+                && branch_history.iter().all(|b| b.e_data.iter().any(|(_, e)|
+                    visualization_data.row_layout.fork_arrow_titles.contains_key(&e.get_id()))) {
+                title.push_str(". ");
+                title.push_str(&hover_messages::event_dot_branch_merge_unchanged(&is.real_name()));
+            }
+            Some(title)
         } else if ended_before() {
             Some(hover_messages::event_dot_branch_merge_borrow_ended_before(&is.real_name()))
         } else if rap.is_ref() && init.is_some() && !mixed_moved {
@@ -2973,6 +2980,19 @@ fn render_dot(
                 let name = styled_name_html(visualization_data.timelines[hash].resource_access_point.name());
                 data.title = format!("{name} stops using its shared reference made from a mutable borrow. A copy keeps the original mutable borrow live.");
             }
+        }
+        if matches!(event, Event::RefDie { .. } | Event::MutableDie { .. } | Event::StaticDie { .. }) {
+            if let Some(text) = layout.holder_handoff_titles.get(&event.get_id()) {
+                data.title.clone_from(text);
+            }
+        }
+        if matches!(event, Event::MutableLend { .. } | Event::StaticLend { .. }) {
+            if let Some(text) = layout.result_lend_titles.get(&event.get_id()) {
+                data.title.clone_from(text);
+            }
+        }
+        if let Some(cases) = visualization_data.row_layout.fork_end_cases.get(&event.get_id()) {
+            data.title.clone_from(cases);
         }
         if visualization_data.row_layout.reassigned_receivers.contains(&event.get_id()) {
             let name = styled_name_html(visualization_data.timelines[hash].resource_access_point.name());
@@ -4666,6 +4686,7 @@ fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationD
     let to = match replay.holder.as_ref() {
         _ if iterator => hover_messages::LentTo::LoopIterator,
         Some((name, true)) => hover_messages::LentTo::Closure(name),
+        Some((_, false)) if replay.qualified_result => hover_messages::LentTo::Unknown,
         Some((name, false)) => hover_messages::LentTo::Var(name),
         None => hover_messages::LentTo::Unknown,
     };
@@ -4694,6 +4715,7 @@ fn lent_place(rap: &ResourceAccessPoint, of_ref_var: bool, binding_borrowed: boo
 #[derive(Default)]
 struct ReplayedLend<'a> {
     holder: Option<(String, bool)>,
+    qualified_result: bool,
     of_ref_var: bool,
     alt: Option<&'a BreakAlt>,
 }
@@ -4756,6 +4778,9 @@ fn replayed_lent_holder<'a>(
     // its segment. Only one of the value breaks actually supplied it.
     let alt = holders.first().and_then(|h| borrow_break_alt(h.2, visualization_data))
         .filter(|alt| holders.iter().all(|h| borrow_break_alt(h.2, visualization_data) == Some(*alt)));
+    // The call's result may be shared or have multiple possible lenders.
+    // Preserve its binding identity for other consumers of the replay.
+    let qualified_result = holders.iter().any(|h| visualization_data.row_layout.result_lend_titles.contains_key(&h.2));
     // A call that handed its borrow on to its result isn't the holder.
     let mut holders: Vec<(String, bool)> = holders.into_iter()
         .map(|h| h.0)
@@ -4768,7 +4793,7 @@ fn replayed_lent_holder<'a>(
         [one] if !one.0.is_empty() => Some(one.clone()),
         _ => None,
     };
-    ReplayedLend { holder, of_ref_var, alt }
+    ReplayedLend { holder, qualified_result, of_ref_var, alt }
 }
 
 /// The lender's dot of a borrow of a whole struct or tuple by a pattern
@@ -7332,12 +7357,15 @@ fn render_generic_arrow(
             let kind = ids.first().and_then(|id| kind_of(*id)).filter(|k| ids.iter().all(|id| kind_of(*id) == Some(*k)));
             hover_messages::arrow_end_title(from, to, static_lender.as_ref(), *of_ref_var, loan, kind, layout.pattern_payloads.get(&id))
         }
-        _ => hover_messages::arrow_full_title(external_event, from, to, option_ref),
+        _ => hover_messages::arrow_full_title(external_event, from, to, option_ref,
+            visualization_data.row_layout.result_lend_titles.get(&external_event.get_id())),
     };
 
     let projected = layout.projected_loan_places.get(&id)
         .map(|(_, place)| hover_messages::projected_place_html(place));
-    if let Some(operand) = layout.aggregate_titles.get(&id) {
+    if let Some(end) = layout.fork_arrow_titles.get(&id) {
+        title.clone_from(end);
+    } else if let Some(operand) = layout.aggregate_titles.get(&id) {
         title.clone_from(operand);
     } else if let Some(&detail) = layout.stored_loans.get(&id) {
         match external_event {
@@ -9754,6 +9782,9 @@ fn render_branches(
             // leading so it's dashed).
             let is_active = i == 0 && !branch.e_data.is_empty();
             let arm_label = ty.string_of_branch(i);
+            // Each leg can have a different entry state when the discriminant
+            // proves that a variant cannot hold its sibling's reference.
+            let parent_active = branch.entry_state.as_ref().map(branch_entry_state).unwrap_or_else(|| parent_active.clone());
             let leading_state = arm_entry_state(&parent_active, is_active);
             let explain_drop_loan = |seg: &mut BranchSeg, joining| {
                 if !rap.is_ref() && matches!(seg.state, State::PartialPrivilege { s: LineState::Full }
@@ -10095,6 +10126,12 @@ fn render_branches(
                     // explanation and the owner's state once the loan ends.
                     if let Some(seg) = segs.get_mut(n) {
                         explain_drop_loan(seg, true);
+                        if matches!(seg.state, State::FullPrivilege { s: LineState::Gray }) {
+                            if let Some(title) = fieldless_join_title(visualization_data, rap, ev, i, branch) {
+                                seg.title.push(' ');
+                                seg.title.push_str(&title);
+                            }
+                        }
                         if matches!(seg.state, State::FullPrivilege { s: LineState::Gray })
                             && !rap.is_ref() && !rap.holds_borrow()
                             && branch.e_data.iter().any(|(l, e)| Some(*l) == last_dot
@@ -10301,6 +10338,17 @@ fn render_branches(
             let mut segs = trim_dashes_under_solid(segs);
             if let Some(span) = branch.source_span.filter(|_| branch.imaginary.is_none()) {
                 segs = part_loans_in_arm(segs, rap, visualization_data, span, branch.source, branch_x);
+            }
+
+            // This leg combines several feasible incoming edges. Its
+            // approach to the qualified end has the same path dependence.
+            if let Some((row, cases)) = branch.e_data.iter()
+                .filter(|(_, e)| matches!(e, Event::MutableReacquire { .. } | Event::StaticReacquire { .. })).find_map(|(row, e)|
+                visualization_data.row_layout.fork_end_cases.get(&e.get_id()).map(|cases| (row, cases))) {
+                for seg in segs.iter_mut().filter(|seg| seg.rows.1 <= *row
+                    && matches!(seg.state, State::RevokedPrivilege { .. } | State::PartialPrivilege { s: LineState::Full })) {
+                    seg.title.clone_from(cases);
+                }
             }
 
             // The arm's own source lines, as the y-range that hovering
@@ -11621,6 +11669,27 @@ fn append_drop_holder(title: &mut String, name: &str, holder: &crate::facts::sch
     if !title.contains(&clause) {
         title.push_str(&clause);
     }
+}
+
+/// Keep the ordinary owner explanation on the connector from a proven
+/// fieldless edge. The two columns are the lender and its former holder.
+fn fieldless_join_title(vd: &VisualizationData, rap: &ResourceAccessPoint, event: &Event,
+    arm: usize, branch: &BranchData) -> Option<String> {
+    let Event::Branch { id, join, .. } = event else { return None };
+    if !vd.row_layout.fieldless_lenders.iter().any(|(&(b, a, lender), holder)|
+        b == *id && a == arm && (*rap.hash() == lender || rap.hash() == holder)) { return None; }
+    let function = *vd.fn_source_lines.get(rap.hash())?;
+    let source = branch.source?;
+    let table = &vd.state_table;
+    let cell = table.arm_boundary_cell(function, rap.name(), source, true).cloned()
+        .or_else(|| join.as_ref().map(|j| j.cell.clone()))
+        .or_else(|| {
+            let end = branch.source_span?.end.0;
+            table.source_arm_cell(function, rap.name(), end, source)
+                .or_else(|| table.cell(function, rap.name(), end, end))
+        })?;
+    (cell.init == crate::facts::table::Init::Own && cell.parts.is_none() && !cell.unnamed_maybe
+        && !cell.may_lend && cell.lent.is_empty()).then(|| owner_value_title(rap, vd, function, &cell, None))
 }
 
 /// The ownership clause for a cell with its whole value.

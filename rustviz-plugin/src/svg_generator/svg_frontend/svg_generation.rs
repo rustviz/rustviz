@@ -1000,8 +1000,8 @@ struct OneLineArmGaps {
     fork_above: bool,
 }
 
-/// Split proven successive assignments to the same slot into drawing rows.
-fn ordered_store_rows(events: &[ExternalEvent], order: &BTreeMap<usize, (usize, usize)>) -> Option<Vec<Vec<ExternalEvent>>> {
+/// Give successive MIR effects on the same source line distinct drawing rows.
+fn ordered_effect_rows(events: &[ExternalEvent], order: &BTreeMap<usize, (usize, usize)>) -> Option<Vec<Vec<ExternalEvent>>> {
     let &(group, _) = order.get(&events.first()?.get_id())?;
     let mut rows = BTreeMap::<_, Vec<_>>::new();
     for event in events {
@@ -1302,7 +1302,7 @@ pub fn mutate_branch_lines(
                         on_pattern_line.then(|| side_by_side_bindings(ev, b_data)).flatten()
                             .or_else(|| chain_bindings_side_by_side(ev, binding_columns).then(Vec::new))
                     });
-                    let ordered = res.as_deref().and_then(|ev| ordered_store_rows(ev, store_order));
+                    let ordered = res.as_deref().and_then(|ev| ordered_effect_rows(ev, store_order).or_else(|| ordered_effect_rows(ev, &row_layout.call_rows)));
                     let ex = match res {
                     Some(ev) if ordered.is_some() => {
                         let mut row = new_line_num;
@@ -1488,6 +1488,7 @@ pub fn mutate_branch_lines(
     // among themselves: a write drawn below the end of the reference it
     // writes through, `r.name = a` with r's last use, #1349, still comes
     // first.)
+    row_layout.align_field_handoffs(&mut b_data.e_data);
     sort_line_ends_by_row(&mut b_data.e_data, &src_line);
     note_still_borrowed_on_later_rows(&mut b_data.e_data, &src_line);
     extra_lines - old_extra_lines
@@ -2033,7 +2034,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
             let res = line_ev.map(|evs| evs.iter()
                 .filter(|e| !arm_drawn.contains(&e.get_id()))
                 .cloned().collect::<Vec<_>>());
-            let ordered = res.as_deref().and_then(|ev| ordered_store_rows(ev, &visualization_data.state_table.store_order));
+            let ordered = res.as_deref().and_then(|ev| ordered_effect_rows(ev, &visualization_data.state_table.store_order).or_else(|| ordered_effect_rows(ev, &visualization_data.row_layout.call_rows)));
             let ex = match res {
                 Some(ev) if ordered.is_some() => {
                     let mut row = final_line_num;
@@ -2216,7 +2217,24 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
 
         i += 1;
     }
+    // A scope inside a condition block can be on the parent timeline.
+    // The traversal has already laid out the whole conditional, including
+    // rows below later arms. Only padding at or above the MIR scope end
+    // belongs to its source line (including that line's arrow tracks).
+    #[expect(clippy::disallowed_methods, reason = "collected by ascending visual row")]
+    let padding: BTreeMap<_, _> = line_insertion_map.iter().filter(|(_, n)| **n > 0).map(|(&at, &extra)| (at, extra)).collect();
+    for (row, event) in &mut placed {
+        if visualization_data.row_layout.scope_end_ids.contains(&event.get_id()) {
+            let mut last = visualization_data.preprocess_external_events[sequence[&event.get_id()]].0;
+            for (&at, &extra) in &padding {
+                if at > last { break; }
+                last += extra;
+            }
+            *row = (*row).min(last);
+        }
+    }
     visualization_data.row_layout.align(&mut placed, &event_line_map_replace);
+    visualization_data.row_layout.align_field_handoffs(&mut placed);
     crate::event_order::replay(&mut placed, &sequence, &visualization_data.row_layout);
     for (row, event) in placed {
         visualization_data.append_processed_external_event(event, row);

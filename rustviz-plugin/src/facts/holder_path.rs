@@ -12,12 +12,20 @@ use std::collections::{BTreeSet, HashSet};
 
 pub(super) struct HolderPath<'a, 'tcx> {
     pub tcx: TyCtxt<'tcx>,
+    pub borrowed_slots: BTreeSet<rustc_middle::mir::Local>,
     pub runs: &'a BTreeSet<rustc_middle::mir::BasicBlock>,
     pub body: &'a Body<'tcx>,
 }
 
 /// The displayed slots on the way to the operand, newest first. Each MIR
 /// assignment has at most one source for the projected field being traced.
+pub(super) struct Trace {
+    pub steps: Vec<HolderStep>,
+    /// The reaching value comes from the loan's actual borrow instruction
+    /// through copies, moves or a reborrow of the same referent.
+    pub exact: bool,
+}
+
 impl<'tcx> HolderPath<'_, 'tcx> {
     fn source(
         &self,
@@ -66,12 +74,17 @@ impl<'tcx> HolderPath<'_, 'tcx> {
         issued: Option<Location>,
         named: &impl Fn(Place<'tcx>) -> Option<EndPlace>,
         carries: &impl Fn(Place<'tcx>, Location) -> bool,
-    ) -> Vec<HolderStep> {
+    ) -> Trace {
+        let mut direct = true;
+        let mut issued_here = false;
         let mut path = Vec::new();
         let mut cursor = (point, place);
         let mut seen = HashSet::new();
         while seen.insert(cursor) {
             let (before, slot) = cursor;
+            // An indirect write could replace an address-taken slot without
+            // assigning its local. Its origin still gives possible lenders.
+            direct &= slot.projection.is_empty() && !self.borrowed_slots.contains(&slot.local);
             let name = named(slot);
             let mut definition = None;
 
@@ -103,6 +116,7 @@ impl<'tcx> HolderPath<'_, 'tcx> {
                                 break None;
                             }
                             definition = Some(term);
+                            direct = false;
                             // A result may keep the arguments' loans. Attribute
                             // it only when a single argument carried this loan.
                             break unique(args.iter().filter_map(|a| a.node.place()).filter(|p| carries(*p, term)))
@@ -127,8 +141,11 @@ impl<'tcx> HolderPath<'_, 'tcx> {
                         };
                         definition = Some(at);
                         if Some(at) == issued {
+                            issued_here = pair.0 == slot && matches!(pair.1, Rvalue::Ref(..));
                             break None;
                         }
+                        direct &= matches!(&pair.1, Rvalue::Use(_))
+                            || matches!(&pair.1, Rvalue::Ref(_, _, place) if place.projection.as_slice() == [ProjectionElem::Deref]);
                         break self.source(&pair.1, rest, |p| carries(p, at)).filter(|p| carries(*p, at)).map(|p| (at, p));
                     }
                     _ => {}
@@ -144,7 +161,7 @@ impl<'tcx> HolderPath<'_, 'tcx> {
             let Some(source) = source else { break };
             cursor = source;
         }
-        path
+        Trace { steps: path, exact: direct && issued_here }
     }
 
     /// The value tested by an enum switch. Its payload can still carry a

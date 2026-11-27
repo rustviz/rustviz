@@ -1148,11 +1148,178 @@ impl Order<'_, '_> {
         shadowed.then(|| loan.lender.clone())
     }
 
+    /// Moving an aggregate consumes its reference fields at that instruction.
+    /// A field's HoldEnd belongs on the move even if other arrows on this
+    /// source row cause the renderer to insert additional drawing rows.
+    fn field_handoff(&self, moved: &E, end: &E, point: Option<Point>, row: &Row) -> Option<Location> {
+        let E::Move { from: ResourceTy::Value(parent), .. } = moved else { return None };
+        let E::RefDie { from: ResourceTy::Value(field), .. } = end else { return None };
+        let local = parent.owner_local()?;
+        if !field.is_member() || field.get_owner() != *parent.hash() { return None; }
+        let ids = self.ends.get(&end.get_id())?;
+        normal_facts(row).find(|m| matches!(&m.fact, Fact::Move { path, .. } if path == parent.name())
+            && m.place_local == Some(local) && Some(fact_point(m)) == point
+            && normal_facts(row).any(|e| matches!(e.fact, Fact::HoldEnd { loan, .. } if ids.contains(&loan))
+                && e.occurrence.at == m.occurrence.at && e.end_places.iter().any(|p|
+                    p.local == local.index() && !p.projection.is_empty() && &p.name == field.name()))).map(|e| e.location)
+    }
+
+    /// A call consumes the moved argument before its return initializes the
+    /// result. The operand and result can have different source lines. On a
+    /// single line, reserve distinct drawing rows for the two instructions.
+    fn order_call_handoff(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout,
+                          moved: usize, at: Location) {
+        use rustc_middle::mir::{Operand, Rvalue, StatementKind};
+        let bb = &self.body[at.block];
+        let Some(st) = bb.statements.get(at.statement_index) else { return };
+        let StatementKind::Assign(pair) = &st.kind else { return };
+        let Rvalue::Use(Operand::Move(_)) = pair.1 else { return };
+        let term = bb.terminator();
+        let TerminatorKind::Call { args, destination, target: Some(_), .. } = &term.kind else { return };
+        let Some(local) = destination.as_local() else { return };
+        if at.statement_index + 1 != bb.statements.len()
+            || !args.iter().any(|arg| matches!(arg.node, Operand::Move(place) if place == pair.0))
+            || term.source_info.span.from_expansion() { return; }
+        if self.body.basic_blocks.iter().filter(|block|
+            matches!(block.terminator().kind, TerminatorKind::Call { destination, .. } if destination.as_local() == Some(local)))
+            .count() != 1 { return; }
+        let arrives = |e: &E| matches!(e, E::StaticBorrow { to, via: Some(_), .. } | E::MutableBorrow { to, via: Some(_), .. }
+            if to.extract_rap().and_then(|r| r.ref_local()) == Some(local));
+        let is_field = |e: &E| layout.field_handoffs.get(&e.get_id()) == Some(&moved);
+        let mut members = events.iter().enumerate().filter(|(_, (_, e))| e.get_id() == moved || is_field(e) || arrives(e));
+        let Some((start, _)) = members.next() else { return };
+        let Some((last, _)) = members.last() else { return };
+        let group = &mut events[start..=last];
+        if !group.iter().any(|(_, e)| arrives(e)) ||
+            !group.iter().all(|(_, e)| e.get_id() == moved || is_field(e) || arrives(e)) { return; }
+        let &(arg_row, ref operand) = group.iter().find(|(_, e)| e.get_id() == moved).unwrap();
+        let operand = operand.clone();
+        let result_row = self.tcx.sess.source_map().lookup_char_pos(term.source_info.span.hi()).line;
+        if arg_row == result_row && map.get(&arg_row).is_some_and(|arrows|
+            arrows.iter().any(|e| e.get_id() != moved && !arrives(e))) { return; }
+        for (line, e) in group.iter().filter(|(_, e)| arrives(e)) {
+            if !map.get(line).is_some_and(|arrows| arrows.iter().any(|a| a.get_id() == e.get_id())) { return; }
+        }
+        // The MIR call consumes this whole operand. Its fields leave their
+        // slots together, and the reference it returns can have several
+        // possible lenders. Keep the two instructions' dots distinct.
+        use crate::svg_generator::hover_messages::styled_name_html;
+        let E::Move { from, to, .. } = &operand else { return };
+        for (_, event) in group.iter() {
+            if is_field(event) {
+                let (field, _) = endpoints(event);
+                layout.holder_handoff_titles.insert(event.get_id(), format!(
+                    "{}'s reference moves with {} into the call to {}",
+                    styled_name_html(&field.name()), styled_name_html(&from.name()), styled_name_html(&to.name())));
+            }
+        }
+        if let Some(loans) = self.facts.returned_reference_loans.get(&self.body.terminator_loc(at.block)) {
+            let candidates: Vec<_> = loans.iter().filter_map(|&id| self.loan(id))
+                .filter(|loan| loan.source == "borrow" && loan.whole.contains(&loan.lender)).collect();
+            let names: BTreeSet<_> = candidates.iter().map(|loan| styled_name_html(&loan.lender)).collect();
+            for (_, event) in group.iter().filter(|(_, e)| arrives(e) && loans.len() > 1) {
+                let (source, result) = endpoints(event);
+                let Some(loan) = candidates.iter().find(|loan| names_lender(source, loan)
+                    && source.extract_rap().and_then(|r| r.owner_local()) == loan.lender_local) else { continue };
+                let result = styled_name_html(&result.name());
+                let source = styled_name_html(&source.name());
+                let known = candidates.len() == loans.len();
+                let possible = if known { names.iter().cloned().collect::<Vec<_>>().join(" or ") } else { source.clone() };
+                let access = if known && names.len() == 2 && candidates.iter().all(|loan| loan.kind == "mut") {
+                    "both unavailable".to_owned()
+                } else if loan.kind == "mut" {
+                    format!("{source} unavailable")
+                } else {
+                    format!("{source} shared")
+                };
+                layout.result_lend_titles.insert(event.get_id(), format!(
+                    "{result} may refer to {possible}. Rust keeps {access} until the last use of {result}"));
+            }
+        }
+        group.sort_by_key(|(_, e)| (arrives(e), is_field(e)));
+        for (line, e) in group.iter_mut().filter(|(_, e)| arrives(e)) {
+            if *line != result_row {
+                map.get_mut(line).unwrap().retain(|a| a.get_id() != e.get_id());
+                map.entry(result_row).or_default().push(e.clone());
+                *line = result_row;
+            }
+            if arg_row == result_row { layout.call_rows.insert(e.get_id(), (moved, 1)); }
+        }
+        if arg_row == result_row {
+            layout.call_rows.insert(moved, (moved, 0));
+            let arrows = map.entry(arg_row).or_default();
+            if !arrows.iter().any(|e| e.get_id() == moved) { arrows.insert(0, operand); }
+        }
+    }
+
+    /// An arm can obtain a shared reference from a call that borrowed an
+    /// owner exclusively. The result carries the restriction without
+    /// granting write access. Identify its binding at the MIR loan end.
+    fn describe_shared_call_result(&self, events: &[(usize, E)], layout: &mut RowLayout) {
+        use crate::svg_generator::hover_messages::styled_name_html;
+        for (_, end) in events {
+            let E::MutableDie { from: ResourceTy::Value(holder), to: ResourceTy::Value(owner),
+                still_borrowed_by, .. } = end else { continue };
+            let Some(local) = holder.ref_local() else { continue };
+            if holder.is_mutref() || !still_borrowed_by.is_empty() { continue; }
+            let mut loans = self.facts.loans.iter().filter(|l| {
+                l.kind == "mut" && !l.issuance_path.is_empty() && l.lender_local == owner.owner_local()
+                    && l.whole.contains(owner.name()) && l.via_call.contains(holder.name())
+            });
+            let Some(loan) = loans.next() else { continue };
+            if loans.next().is_some() || self.ends.get(&end.get_id()).is_some_and(|ids| ids != &[loan.loan]) { continue; }
+            let mut edges = self.facts.rows.iter().flat_map(normal_facts)
+                .filter(|e| matches!(e.fact, Fact::BorrowEnd { loan: id, .. } if id == loan.loan));
+            let Some(edge) = edges.next() else { continue };
+            if edges.next().is_some() || !matches!(edge.end_places.as_slice(),
+                [p] if p.local == local.index() && p.projection.is_empty()) { continue; }
+
+            // The result may be unused. Only describe a last use when
+            // the return edge belongs to a call that used the result,
+            // directly or through a reborrow of that local.
+            let call = self.body[edge.location.block].terminator();
+            let TerminatorKind::Call { args, target: Some(target), .. } = &call.kind else { continue };
+            if edge.location != self.body.terminator_loc(edge.location.block)
+                || edge.occurrence.successor != Some(target.start_location()) { continue; }
+            let through = self.facts.rows.iter().flat_map(normal_facts).any(|e| {
+                matches!(e.fact, Fact::BorrowEnd { loan: id, .. } if e.occurrence == edge.occurrence
+                    && self.loan(id).is_some_and(|l| l.lender_local == Some(local) && l.through.as_ref() == Some(holder.name())))
+            });
+            if !through && !args.iter().any(|arg| arg.node.place().and_then(|p| p.as_local()) == Some(local)) { continue; }
+
+            let mut starts = events.iter().filter_map(|(_, e)| match e {
+                E::MutableBorrow { from: ResourceTy::Value(source), to: ResourceTy::Value(result),
+                    via: Some(_), .. } if source == owner && result == holder => Some(e.get_id()),
+                _ => None,
+            });
+            let Some(start) = starts.next() else { continue };
+            if starts.next().is_some() { continue; }
+            let owner = styled_name_html(owner.name());
+            let holder = styled_name_html(holder.name());
+            layout.result_lend_titles.insert(start, format!(
+                "{holder} provides shared access. The mutable borrow of {owner} stays live while {holder} is in use"));
+            let ended = format!("The mutable borrow of {owner} ends after the last use of {holder}. This borrow no longer restricts access to {owner}");
+            layout.holder_handoff_titles.insert(end.get_id(), ended.clone());
+            layout.fork_arrow_titles.insert(end.get_id(), ended);
+        }
+    }
+
     fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout) {
+        for (line, e) in events.iter() {
+            if let E::GoOutOfScope { ro, early: None, .. } = e {
+                if let Some(local) = ro.ref_local() {
+                    if self.facts.rows.iter().any(|r| r.line == *line && normal_facts(r).any(|e|
+                        e.place_local == Some(local) && matches!(e.fact, Fact::ScopeEnd { .. }))) {
+                        layout.scope_end_ids.insert(e.get_id());
+                    }
+                }
+            }
+        }
         let mut lines: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, (line, ev)) in events.iter_mut().enumerate() {
             if let E::Branch { branches, .. } = ev {
                 for arm in branches {
+                    self.describe_shared_call_result(&arm.e_data, layout);
                     self.order_list(&mut arm.e_data, &mut arm.line_map, layout);
                 }
             }
@@ -1161,6 +1328,7 @@ impl Order<'_, '_> {
             }
             lines.entry(*line).or_default().push(i);
         }
+        let mut handoffs = BTreeMap::new();
         for (line, indices) in lines {
             if indices.len() < 2 {
                 continue;
@@ -1216,6 +1384,10 @@ impl Order<'_, '_> {
                     if points[i].zip(points[j]).is_some_and(|(x, y)| x.2 >= 0 && y.2 >= 0 && self.earlier(x, y)) {
                         layout.before.insert(ids);
                     }
+                    if let Some(at) = self.field_handoff(a, b, points[i], row) {
+                        layout.field_handoffs.insert(b.get_id(), a.get_id());
+                        handoffs.insert(a.get_id(), at);
+                    }
                     if gives_back_to(a, b) && self.restores_before_end(a, b, row, points[i], points[j]) {
                         layout.restored.insert(ids);
                     }
@@ -1251,6 +1423,7 @@ impl Order<'_, '_> {
                 events[i].1 = ev;
             }
         }
+        for (id, at) in handoffs { self.order_call_handoff(events, map, layout, id, at); }
     }
 }
 
@@ -1396,6 +1569,13 @@ pub struct RowLayout {
     pub(crate) retained_references: BTreeMap<usize, (String, String)>,
     pub(crate) reassigned_receivers: BTreeSet<usize>,
     arm_points: BTreeMap<usize, Point>,
+    pub(crate) fork_arrow_titles: BTreeMap<usize, String>,
+    pub(crate) fork_end_cases: BTreeMap<usize, String>,
+    /// Owner columns whose incoming loan cannot be present in the selected enum variant.
+    pub(crate) fieldless_lenders: BTreeMap<(usize, usize, u64), u64>,
+    pub(crate) scope_end_ids: BTreeSet<usize>,
+    pub(crate) holder_handoff_titles: BTreeMap<usize, String>,
+    pub(crate) result_lend_titles: BTreeMap<usize, String>,
     pub(crate) closure_captures: BTreeMap<usize, Vec<usize>>,
     pub(crate) field_generations: BTreeMap<usize, FieldGeneration>,
     pub(crate) later_field_effects: BTreeSet<usize>,
@@ -1404,6 +1584,8 @@ pub struct RowLayout {
     dependencies: BTreeSet<(usize, usize)>,
     end_order: BTreeSet<(usize, usize)>,
     before: BTreeSet<(usize, usize)>,
+    field_handoffs: BTreeMap<usize, usize>,
+    pub(crate) call_rows: BTreeMap<usize, (usize, usize)>,
     same_dot: BTreeMap<usize, Vec<usize>>,
 }
 
@@ -1421,6 +1603,12 @@ impl RowLayout {
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.terminal_calls.append(&mut other.terminal_calls);
         self.scope_ends.append(&mut other.scope_ends);
+        self.fork_arrow_titles.append(&mut other.fork_arrow_titles);
+        self.fork_end_cases.append(&mut other.fork_end_cases);
+        self.fieldless_lenders.append(&mut other.fieldless_lenders);
+        self.scope_end_ids.append(&mut other.scope_end_ids);
+        self.holder_handoff_titles.append(&mut other.holder_handoff_titles);
+        self.result_lend_titles.append(&mut other.result_lend_titles);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.shadowed_borrow_lenders.append(&mut other.shadowed_borrow_lenders);
         self.closure_result_holders.append(&mut other.closure_result_holders);
@@ -1443,6 +1631,8 @@ impl RowLayout {
         self.field_generations.append(&mut other.field_generations);
         self.later_field_effects.append(&mut other.later_field_effects);
         self.name_field_ends.append(&mut other.name_field_ends);
+        self.call_rows.append(&mut other.call_rows);
+        self.field_handoffs.append(&mut other.field_handoffs);
         self.same_dot.append(&mut other.same_dot);
         self.before.append(&mut other.before);
         self.dependencies.append(&mut other.dependencies);
@@ -1488,6 +1678,16 @@ impl RowLayout {
 
     pub(crate) fn between(&self, first: usize, middle: usize, last: usize) -> bool {
         self.before.contains(&(first, middle)) && self.before.contains(&(middle, last))
+    }
+
+    pub(crate) fn align_field_handoffs(&self, placed: &mut [(usize, E)]) {
+        if self.field_handoffs.is_empty() { return; }
+        let rows: HashMap<_, _> = placed.iter().map(|(row, e)| (e.get_id(), *row)).collect();
+        for (row, e) in placed {
+            if let Some(anchor) = self.field_handoffs.get(&e.get_id()).and_then(|id| rows.get(id)) {
+                *row = *anchor;
+            }
+        }
     }
 
     pub(crate) fn align(&self, placed: &mut [(usize, E)], map: &BTreeMap<usize, Vec<E>>) {
@@ -1544,6 +1744,8 @@ mod tests {
                 caller_slot: None,
                 transfer_paths: Vec::new(),
                 end_places: Vec::new(),
+                exact_end_places: Vec::new(),
+                lender_writable: false,
                 continuing_places: Vec::new(),
                 fieldless_operand: None,
                 drop_route: DropRoute::Unwind,

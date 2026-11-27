@@ -1636,7 +1636,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         if matches!(fact, Fact::BorrowEnd { .. }) {
             order.2 = 1;
         }
-        let ev = Ev { location: l, display_location: at, place_local: None, drop_route: DropRoute::Normal, occurrence: Occurrence { at: l, exit: (at != l).then_some(at), successor: None }, end_places: vec![], continuing_places: vec![], fieldless_operand: None, caller_slot: None, transfer_paths: vec![], col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order };
+        let ev = Ev { location: l, display_location: at, place_local: None, drop_route: DropRoute::Normal, occurrence: Occurrence { at: l, exit: (at != l).then_some(at), successor: None }, end_places: vec![], exact_end_places: vec![], lender_writable: false, continuing_places: vec![], fieldless_operand: None, caller_slot: None, transfer_paths: vec![], col: self.rows.col.get(&at).copied().unwrap_or(0), arm: self.rows.arm_of(at), fact, order };
         (row, ev)
     }
 }
@@ -3207,6 +3207,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         held_in(&os, p)
     };
+    let mut returned_reference_loans = BTreeMap::new();
     let mut closure_result_loans = ClosureResults::default();
     let mut receiver_loans = std::collections::HashMap::new();
     let mut argument_stores = std::collections::HashMap::<_, Vec<_>>::new();
@@ -3335,8 +3336,17 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let term = data.terminator();
             let TerminatorKind::Call { args, destination, target: Some(return_to), .. } = &term.kind else { continue };
             let dest_ty = decl_place_ty(tcx, body, *destination);
-            if dest_ty.is_ref() || dest_ty.is_closure() { continue; }
-            let loc = Location { block: bb, statement_index: data.statements.len() };
+            let loc = body.terminator_loc(bb);
+            if let TyKind::Ref(region, ..) = *dest_ty.kind() {
+                if destination.as_local().is_some_and(|l| cx.names.locals.contains_key(&l)) {
+                    if let Some(vid) = region_vid(region) {
+                        let held = held_in(&[Origin::from(vid)], t.start_index(return_to.start_location()));
+                        if !held.is_empty() { returned_reference_loans.insert(loc, held); }
+                    }
+                }
+                continue;
+            }
+            if dest_ty.is_closure() { continue; }
             if !args.iter().filter_map(|a| a.node.place()).any(|p| decl_place_ty(tcx, body, p).is_closure()) { continue; }
             // Even a call with no retained loan is a distinct occurrence
             // of a repeated guard. One recoverable result cannot identify
@@ -3656,7 +3666,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
     }
 
-    let source_slots = super::holder_path::HolderPath { tcx, body, runs: &runs };
+    let source_slots = super::holder_path::HolderPath {
+        tcx, body, runs: &runs,
+        borrowed_slots: rustc_mir_dataflow::impls::borrowed_locals(body).iter().collect(),
+    };
     let iterators: Vec<_> = body.local_decls.indices().filter(|l| for_iter(*l) && !cx.names.locals.contains_key(l)).collect();
     let end_provenance = |flow: &mut Flow<'_, '_, 'tcx>, loc: Location, bi: BorrowIndex, li: &LoanInfo, only: Option<Place<'tcx>>| {
         let caller_slot = bi.index().checked_sub(base).and_then(|id| untracked[id].param).and_then(|param| {
@@ -3668,6 +3681,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         });
         let mut places = BTreeSet::new();
         let mut transfers = BTreeSet::new();
+        let mut exact = BTreeSet::new();
         if let Some(t) = table {
             let issued = if bi.index() < base {
                 bwf.borrow_set.location_map().get_index(bi.index()).map(|(at, _)| *at)
@@ -3688,7 +3702,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     .then_some(EndPlace::new(tcx, p, name))
             };
             let carries = |p, at| held_by_place(p, t.start_index(at)).contains(&bi.index());
-            let mut record = |mut path: Vec<HolderStep>| {
+            let mut record = |trace: super::holder_path::Trace| {
+                let mut path = trace.steps;
+                if let Some(last) = path.first().filter(|_| trace.exact) { exact.insert(last.place.clone()); }
                 if let Some(last) = path.first() { places.insert(last.place.clone()); }
                 if path.len() > 1 {
                     path.reverse();
@@ -3720,7 +3736,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if only.is_none() && places.iter().any(|p| p.name == "<iterator>") {
                 for (mpi, p, n) in &columns {
                     if !li.via_call.contains(n) || flow.state(&[loc], false, *mpi).word() != "own" { continue; }
-                    let mut chain = source_slots.trace(loc, *p, issued, &named, &carries);
+                    let mut chain = source_slots.trace(loc, *p, issued, &named, &carries).steps;
                     if chain.iter().skip(1).any(|s| s.place.name == "<iterator>" && places.contains(&s.place)) {
                         chain.reverse();
                         transfers.insert(chain);
@@ -3728,7 +3744,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
             }
         }
-        (places.into_iter().collect::<Vec<_>>(), transfers.into_iter().collect::<Vec<_>>(), caller_slot)
+        (places.into_iter().collect::<Vec<_>>(), transfers.into_iter().collect::<Vec<_>>(), caller_slot, exact.into_iter().collect())
     };
     // Direct holders and projected origins are now known. Resolve each
     // edge at its MIR location, including call argument temporaries.
@@ -3751,7 +3767,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     for ev in evs.values_mut().flatten() {
         let Fact::BorrowEnd { loan, holder, why, .. } = &mut ev.fact else { continue };
         let Some(li) = loans.iter().find(|li| li.loan == *loan) else { continue };
-        let (mut places, paths, caller_slot) = end_provenance(&mut flow, ev.location, BorrowIndex::from_usize(*loan), li, None);
+        let (mut places, paths, caller_slot, exact) = end_provenance(&mut flow, ev.location, BorrowIndex::from_usize(*loan), li, None);
         if places.is_empty() && unused.contains(loan) {
             if let Some(param) = untracked[*loan - base].param {
                 places.push(EndPlace::new(tcx, Place::from(param), cx.names.locals[&param].clone()));
@@ -3785,7 +3801,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         if let Some(inputs) = drop_inputs.get(&at) {
             for &(source, field) in inputs {
-                let (fields, _, _) = end_provenance(&mut flow, source, BorrowIndex::from_usize(*loan), li, Some(field));
+                let (fields, _, _, _) = end_provenance(&mut flow, source, BorrowIndex::from_usize(*loan), li, Some(field));
                 explicit_drop_ends.entry((at, *loan)).or_default().extend(fields);
             }
         }
@@ -3793,6 +3809,18 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         if let Some(to) = ev.occurrence.successor.filter(|s| executed_successors(ev.location).contains(s)) {
             ev.fieldless_operand = source_slots.fieldless_operand(ev.location, to).and_then(|place|
                 Some(EndPlace::new(tcx, place, cx.name(place)?)));
+        }
+        ev.exact_end_places = exact;
+        if let Some((local, successor)) = bwf.borrow_set.location_map().get_index(*loan)
+            .and_then(|(_, data)| data.borrowed_place().as_local()).zip(ev.occurrence.successor)
+        {
+            if let Some(mpi) = move_data.rev_lookup.find_local(local).filter(|_| body.local_decls[local].mutability.is_mut())
+            {
+                inscope.seek_before_primary_effect(successor);
+                ev.lender_writable = flow.state(&[successor], false, mpi).word() == "own"
+                    && !inscope.get().iter().any(|id| bwf.borrow_set.location_map().get_index(id.index())
+                        .is_some_and(|(_, other)| other.borrowed_place().local == local));
+            }
         }
         ev.end_places = places;
         ev.transfer_paths = paths;
@@ -3906,7 +3934,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         let to_col = cx.rows.col.get(&s).copied().unwrap_or(0);
                         let mut f = cx.ev(loc, Fact::HoldEnd { loan: l.loan, holder: h.clone(), to_line, to_col });
                         f.1.occurrence.successor = Some(s);
-                        let (_, paths, _) = end_provenance(&mut flow, loc, bi, l, Some(hp));
+                        let (_, paths, _, _) = end_provenance(&mut flow, loc, bi, l, Some(hp));
                         f.1.end_places.push(EndPlace::new(tcx, hp, h.clone()));
                         // Propagation across this edge requires the same live
                         // reference origin on both ends. The successor alone
@@ -6199,10 +6227,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         Some((branch, state_at(&[first], false, false, None, None)))
     }).collect();
     let mut arm_boundaries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, ArmBoundaries>>::default();
+    let fieldless_arms: Vec<_> = evs.values().flatten().filter_map(|e| {
+        let place = e.fieldless_operand.as_ref()?;
+        if !e.end_places.contains(place) { return None; }
+        super::control::entered(&switches, SwitchEdge { switch: e.location, successor: e.occurrence.successor?.block })
+    }).collect();
     let arm_edges: Vec<_> = switches.iter().filter_map(|exit| {
         let arm = super::SourceArm { branch: exit.branch?, index: exit.arm? };
         let edge = exit.edge;
-        (!drop_holders_at_reassign.is_empty() && executed_successors(edge.switch).contains(&edge.successor.start_location()))
+        ((!drop_holders_at_reassign.is_empty() || fieldless_arms.contains(&arm)) && executed_successors(edge.switch).contains(&edge.successor.start_location()))
             .then_some((arm, edge.successor))
     }).collect();
     let mut arm_entries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, BTreeSet<_>>>::default();
@@ -7126,6 +7159,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         explicit_drop_ends,
         switches,
         bindings: cx.names.bindings.into(),
+        returned_reference_loans,
         closure_result_loans,
         conditional_ends,
         aggregate_loans,

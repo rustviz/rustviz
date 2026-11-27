@@ -164,6 +164,9 @@ pub struct BodyFacts {
     /// Loans carried by the operands of this MIR aggregate, in operand order.
     #[serde(skip)]
     pub aggregate_loans: std::collections::HashMap<rustc_span::Span, Vec<AggregateLoan>>,
+    /// Loans in the outer reference origin on this call's normal return edge.
+    #[serde(skip)]
+    pub(crate) returned_reference_loans: BTreeMap<Location, BTreeSet<usize>>,
     /// Loans from a closure operand that reach the named call destination.
     #[serde(serialize_with = "closure_calls", skip_serializing_if = "ClosureResults::is_empty")]
     pub(crate) closure_result_loans: ClosureResults,
@@ -1190,6 +1193,13 @@ pub struct Ev {
     pub display_location: rustc_middle::mir::Location,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub end_places: Vec<EndPlace>,
+    /// Ending reference values traced to the issuing borrow without crossing
+    /// an opaque call or an ambiguous reaching definition.
+    #[serde(skip)]
+    pub exact_end_places: Vec<EndPlace>,
+    /// A mutable owned local is initialized and unrestricted on this successor.
+    #[serde(skip)]
+    pub lender_writable: bool,
     /// Initialized, named reference slots whose MIR origins contain this loan
     /// on the HoldEnd successor. Unpictured temporaries can carry it too.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1239,7 +1249,7 @@ mod tests {
     fn dedup_keeps_ends_with_distinct_mir_successors() {
         let first = Ev {
             location: Location::START, display_location: Location::START, place_local: None, drop_route: DropRoute::Normal, occurrence: super::Occurrence { at: Location::START, exit: None, successor: Some(BasicBlock::from_usize(1).start_location()) },
-            end_places: vec![], continuing_places: vec![], fieldless_operand: None, caller_slot: None, transfer_paths: vec![],
+            end_places: vec![], exact_end_places: vec![], lender_writable: false, continuing_places: vec![], fieldless_operand: None, caller_slot: None, transfer_paths: vec![],
             col: 8, arm: None, order: (0, 0, 1),
             fact: Fact::HoldEnd { loan: 0, holder: "other.r".into(), to_line: 4, to_col: 1 },
         };

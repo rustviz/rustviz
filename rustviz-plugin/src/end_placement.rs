@@ -9,7 +9,9 @@ use rustc_span::Span;
 use rustc_utils::BodyExt;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod cases;
 mod exit;
+mod normal;
 
 type Events = Vec<(usize, ExternalEvent)>;
 type LineMap = BTreeMap<usize, Vec<ExternalEvent>>;
@@ -465,6 +467,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut remove = BTreeSet::new();
     let mut put = Vec::new();
     for (line, ev, origin) in slots {
+      // The normal-fork pass has already placed this return on its
+      // particular MIR edge, including a call after a nested decision.
+      if self.row_layout.has_arm_point(ev.get_id()) { continue; }
       let (from, to) = endpoints(&ev);
       let (Some(r), lender) = (from.extract_rap(), to.extract_rap()) else { continue };
       if lender.is_some_and(|r| r.is_fn()) {

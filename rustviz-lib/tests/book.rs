@@ -634,12 +634,18 @@ const BOOK: &[Snippet] = &[
             "L5 third₂ is initialized with a copy of a value inside third",
             "L5 a value inside third is copied",
             "L5 Immutable borrow from v to third₂: third₂ is a reference copied out of third",
+            "L5 After the reference is copied out of third, the shared borrow of v continues in third₂",
+            "L7 This segment leads from the None branch to where the branches join. v is the owner of the resource",
+            "L7 This segment leads from the None branch to where the branches join. third owns a value that can hold references (third isn't a reference itself). third holds a copyable value",
             // One line for the end and the copy's borrow (#1450).
             "L5 v's resource is no longer borrowed by third, but is still immutably borrowed by third₂; v is read-only while the borrow is live",
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "third's shared borrow of third ends",
+            "L6 Return immutably borrowed resource from third to v",
+            "After the reference is copied out of third, the borrow continues in third₂",
+            "Return immutably borrowed resource from third to third",
             "third isn't a reference, but its value holds one",
             "L3 v's resource is no longer immutably borrowed",
             "=L5 Partial copy from third to third",
