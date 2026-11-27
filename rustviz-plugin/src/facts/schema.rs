@@ -36,10 +36,31 @@ pub struct Extraction {
     pub maybe: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct AggregateLoan {
+    pub loan: usize,
+    /// This operand makes a reference, rather than carrying an older one.
+    pub issued: bool,
+    /// The aggregate can be constructed on a path that skips the issue.
+    pub conditional: bool,
+}
+
 #[derive(Serialize)]
 pub struct BodyFacts {
+    /// Loans carried by the operands of this MIR aggregate, in operand order.
+    #[serde(skip)]
+    pub aggregate_loans: std::collections::HashMap<rustc_span::Span, Vec<AggregateLoan>>,
     #[serde(skip)]
     pub evaluated_spans: Vec<rustc_span::Span>,
+    /// Borrow issues whose references are staged directly in an aggregate.
+    #[serde(skip)]
+    pub issued_operand_loans: BTreeSet<usize>,
+    /// Loans whose references themselves reach an aggregate assigned to the return place.
+    #[serde(skip)]
+    pub returned_operand_loans: BTreeSet<usize>,
+    /// A path reaching an end of this loan can bypass the borrow altogether.
+    #[serde(skip)]
+    pub conditional_ends: BTreeSet<usize>,
     /// Standard vec! constructions that can complete on the body's normal CFG.
     #[serde(skip)]
     pub constructed_vecs: std::collections::HashMap<rustc_span::hygiene::ExpnId, usize>,
@@ -188,6 +209,8 @@ pub struct ColumnInfo {
 
 #[derive(Serialize, Clone, Debug)]
 pub struct LoanInfo {
+    #[serde(skip)]
+    pub issue: Option<rustc_middle::mir::Location>,
     pub loan: usize,
     /// "borrow": a borrow borrowck tracks (its `BorrowIndex`) of a user
     /// place. The others restrict no column (`columns` is empty, no `lent`

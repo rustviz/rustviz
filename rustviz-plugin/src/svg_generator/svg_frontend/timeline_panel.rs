@@ -2870,6 +2870,9 @@ fn render_dot(
         if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedTransfer { id, .. } if *id == event.get_id())) {
             data.title = format!("{} {}", hover_messages::UNREACHED_TRANSFER, data.title);
         }
+        if let Some(title) = visualization_data.row_layout.aggregate_titles.get(&event.get_id()) {
+            data.title.clone_from(title);
+        }
         // push to individual timelines
         let lend_id = match event {
             Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => Some(*id),
@@ -6910,6 +6913,9 @@ fn render_generic_arrow(
         None => hover_messages::arrow_full_title(external_event, from, to, option_ref),
     };
 
+    if let Some(operand) = visualization_data.row_layout.aggregate_titles.get(&external_event.get_id()) {
+        title.clone_from(operand);
+    }
     if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::VecElement { id, nested: true, .. } if *id == external_event.get_id())) {
         title.push_str(". The element goes into an inner vector held by the destination");
     }
@@ -7375,6 +7381,7 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             _ => message(&rap.name().to_string()),
         };
 
+        let title = visualization_data.row_layout.aggregate_titles.get(id).cloned().unwrap_or(title);
         let rv = Rv::new(rv_attrs::ARROW).event(rv_attrs::external_event_name(external_event))
             .var(rap.name()).to("caller").row(*line_number).attrs();
         dots.lanes.capture(Drawn {

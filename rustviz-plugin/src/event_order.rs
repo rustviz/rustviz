@@ -30,6 +30,7 @@ struct Order<'a, 'tcx> {
     spans: &'a HashMap<usize, Span>,
     field_overwrite_ends: &'a BTreeSet<usize>,
     ends: &'a BTreeMap<usize, Vec<usize>>,
+    issues: &'a BTreeMap<usize, usize>,
 }
 
 fn place(r: &ResourceTy) -> Option<String> {
@@ -104,6 +105,9 @@ impl Order<'_, '_> {
     }
 
     fn point(&self, ev: &E, row: &Row, straight_line: bool) -> Option<Point> {
+        if let Some(id) = self.issues.get(&ev.get_id()) {
+            return row.facts.iter().find(|f| matches!(f.fact, Fact::Borrow { loan, .. } if loan == *id)).map(fact_point);
+        }
         let source = self.spans.get(&ev.get_id());
         let blocks = self.body.basic_blocks.reverse_postorder();
         if matches!(ev, E::Branch { .. }) {
@@ -1193,6 +1197,7 @@ pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
         spans: &visitor.event_spans,
         field_overwrite_ends: &visitor.field_overwrite_ends,
         ends: &visitor.end_loans,
+        issues: &visitor.aggregate_issues,
     };
     order.place_arm_ends(
         visitor.preprocessed_events,
@@ -1271,6 +1276,8 @@ pub(crate) struct FieldGeneration {
 /// Coincident effects on one column can include a dot without an arrow.
 #[derive(Default, Debug)]
 pub struct RowLayout {
+    /// Both column dots and the connecting arrow describe the same aggregate operand.
+    pub(crate) aggregate_titles: BTreeMap<usize, String>,
     pub(crate) ended_before_call: BTreeMap<usize, BTreeSet<String>>,
     pub(crate) ended_at_fork: BTreeSet<(usize, u64)>,
     pub(crate) after_destructor: BTreeMap<usize, String>,
@@ -1292,6 +1299,7 @@ pub struct RowLayout {
 
 impl RowLayout {
     pub fn append(&mut self, other: &mut Self) {
+        self.aggregate_titles.append(&mut other.aggregate_titles);
         self.ended_at_fork.append(&mut other.ended_at_fork);
         self.after_destructor.append(&mut other.after_destructor);
         self.copied_ends.append(&mut other.copied_ends);

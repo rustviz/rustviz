@@ -2399,6 +2399,31 @@ pub fn event_dot_reborrow_to_caller(ref_name: &String, place: &String) -> String
     )
 }
 
+pub fn aggregate_reference_return(direct: Option<(&String, &String)>, mutable: bool) -> String {
+    let what = if mutable { "a mutable reference" } else { "a reference" };
+    let reference = match direct {
+        Some((target, through)) => format!("{what} to {}, reborrowed through {}", styled_name_html(target), styled_name_html(through)),
+        None => what.to_owned(),
+    };
+    format!("If this operand reaches the returned value, the caller receives {reference}, not the resource it points to. The data it points to is not copied")
+}
+
+pub fn aggregate_reservation(through: &String, holder: &String) -> String {
+    format!("A mutable reborrow through {} is reserved for {}. Shared reads are allowed while the remaining operands are evaluated. Exclusive access begins at activation",
+        styled_name_html(through), styled_name_html(holder))
+}
+
+pub fn aggregate_arm_borrow(lender: &String, holder: &String, mutable: bool, conditional: bool) -> String {
+    let path = if conditional { "If this operand is selected, " } else { "" };
+    let kind = if mutable { "mutable" } else { "shared" };
+    format!("{path}{} holds a {kind} borrow of {}. The borrow checker keeps the borrowed place restricted while {} is in use",
+        styled_name_html(holder), styled_name_html(lender), styled_name_html(holder))
+}
+
+pub fn conditional_aggregate_end(holder: &String, lender: &String) -> String {
+    format!("If {} holds the borrow of {}, that borrow ends here", styled_name_html(holder), styled_name_html(lender))
+}
+
 /// Marks, in the place of a returned reborrow (`DerefField`), a
 /// reference a call returned rather than a place written out.
 const REBORROW_VIA_CALL: char = '\u{1e}';
@@ -4144,12 +4169,14 @@ pub fn state_reserved(my_name: &String, call: Option<&str>) -> String {
 pub fn state_ref_reserved(name: &str, mutable: bool, call: Option<&str>, binding_reserved: bool, binding_shared: bool) -> String {
     let me = styled_name_html(name);
     let kind = if mutable { "mutable" } else { "shared" };
-    let by = call.map_or_else(|| "a call".to_owned(), |c| format!("the call to {}", styled_name_html(c)));
+    // An aggregate can also reserve a reborrow while evaluating its operands.
+    let (by, until) = call.map_or_else(|| (String::new(), "Until activation"),
+        |c| (format!(" by the call to {}", styled_name_html(c)), "Until the call starts"));
     let mut title = format!("{me} holds a {kind} reference. ");
     if binding_reserved {
-        title.push_str(&format!("The reference {me} is reserved for a mutable borrow by {by}. Until the call starts, shared reads of {me} are allowed. The reservation blocks moving, replacing, or mutably borrowing the reserved reference"));
+        title.push_str(&format!("The reference {me} is reserved for a mutable borrow{by}. {until}, shared reads of {me} are allowed. The reservation blocks moving, replacing, or mutably borrowing the reserved reference"));
     } else {
-        title.push_str(&format!("Access through {me} is reserved for a mutable borrow by {by}. Until the call starts, shared reads through {me} are allowed. The reservation blocks moving the reference or taking another mutable borrow of the reserved place"));
+        title.push_str(&format!("Access through {me} is reserved for a mutable borrow{by}. {until}, shared reads through {me} are allowed. The reservation blocks moving the reference or taking another mutable borrow of the reserved place"));
     }
     if binding_shared {
         title.push_str(&format!(". The binding {me} is also shared and cannot be replaced while that shared borrow is live"));

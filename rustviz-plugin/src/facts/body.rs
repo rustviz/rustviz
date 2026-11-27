@@ -287,6 +287,83 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         self.rows.row.get(&l).copied().unwrap_or(0)
     }
 
+    /// Follow the reaching definitions of the temporaries staging an aggregate
+    /// operand. An implicit reborrow has its own issue location. A raw address,
+    /// a scalar read through a reference, and a call result are not that loan.
+    fn operand_loans(
+        &self, operand: &Operand<'tcx>, at: Location, issued: &BTreeMap<Location, usize>,
+        runs: &BTreeSet<rustc_middle::mir::BasicBlock>, carried: &impl Fn(Place<'tcx>, Location) -> Vec<usize>, out: &mut Vec<AggregateLoan>,
+    ) {
+        let Some(place) = operand.place() else { return };
+        let construction = at.block;
+        let doms = self.body.basic_blocks.dominators();
+        // A reference can already exist before the branch that selects it.
+        // Its use as an operand, as well as its issue, can be conditional.
+        let mut record = |loan, issued, site: Location| {
+            let conditional = !doms.dominates(site.block, construction);
+            if let Some(existing) = out.iter_mut().find(|b| b.loan == loan && b.issued == issued) {
+                existing.conditional &= conditional;
+            } else {
+                out.push(AggregateLoan { loan, issued, conditional });
+            }
+        };
+        let mut work = vec![(place, at)];
+        let mut seen = std::collections::HashSet::new();
+        while let Some((place, at)) = work.pop() {
+            let ty = decl_place_ty(self.tcx, self.body, place);
+            if !seen.insert((place, at)) || ty.is_raw_ptr() || regions_of(ty).is_empty() {
+                continue;
+            }
+            if self.is_user(place) {
+                for id in carried(place, at) {
+                    record(id, false, at);
+                }
+                continue;
+            }
+            if !place.projection.is_empty() { continue; }
+            let block = &self.body.basic_blocks[at.block];
+            let def = block.statements[..at.statement_index].iter().enumerate().rev().find(|(_, st)| match &st.kind {
+                StatementKind::Assign(a) => a.0.local == place.local,
+                StatementKind::StorageLive(l) | StatementKind::StorageDead(l) => *l == place.local,
+                _ => false,
+            });
+            if let Some((i, st)) = def {
+                let StatementKind::Assign(a) = &st.kind else { continue };
+                if a.0 != place { continue; }
+                let loc = Location { block: at.block, statement_index: i };
+                match &a.1 {
+                    // rustc can reborrow the reference it just staged for an
+                    // explicit borrow. Follow only a dereference of that temp.
+                    Rvalue::Ref(_, _, p) if !self.is_user(*p) && p.projection.as_slice() == [ProjectionElem::Deref]
+                        && self.body.local_decls[p.local].ty.is_ref() => work.push((Place::from(p.local), loc)),
+                    Rvalue::Ref(..) => {
+                        if let Some(&id) = issued.get(&loc) {
+                            record(id, true, loc);
+                        }
+                    }
+                    Rvalue::Aggregate(_, ops) => work.extend(ops.iter().rev().filter_map(|o| o.place().map(|p| (p, loc)))),
+                    Rvalue::Use(o) | Rvalue::Repeat(o, _) | Rvalue::Cast(_, o, _) => work.extend(o.place().map(|p| (p, loc))),
+                    _ => {}
+                }
+            } else {
+                for &pred in self.body.basic_blocks.predecessors()[at.block].iter().rev() {
+                    let data = &self.body.basic_blocks[pred];
+                    let loc = Location { block: pred, statement_index: data.statements.len() };
+                    if !runs.contains(&pred) || data.is_cleanup || !self.r.real_succs(loc).iter().any(|s| s.block == at.block) { continue; }
+                    if matches!(data.terminator().kind, TerminatorKind::Call { destination, .. } if destination.local == place.local) {
+                        // The result may keep argument loans. They restrict
+                        // access, but do not identify what the result points to.
+                        for id in carried(place, Location { block: at.block, statement_index: 0 }) {
+                            record(id, false, loc);
+                        }
+                    } else {
+                        work.push((place, loc));
+                    }
+                }
+            }
+        }
+    }
+
     /// The macro (as written, `println!`) whose expansion a span is in,
     /// if it isn't a desugaring.
     fn macro_of(&self, sp: Span) -> Option<String> {
@@ -1577,6 +1654,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             push(&mut evs, cx.ev(*loc, Fact::Borrow { loan: idx, lender: lender.clone(), kind, holder }));
         }
         loans.push(LoanInfo {
+            issue: Some(*loc),
             loan: idx,
             line: cx.row_of(*loc),
             col: cx.rows.col.get(loc).copied().unwrap_or(0),
@@ -1646,6 +1724,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             _ => (0, 0),
         };
         loans.push(LoanInfo {
+            issue: u.at,
             loan: id,
             line,
             col,
@@ -2306,12 +2385,53 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
     }
+    let issued: BTreeMap<_, _> = loans.iter().filter_map(|l| Some((taken_at(l.loan)?, l.loan))).collect();
+    let doms = body.basic_blocks.dominators();
+    let mut issued_operand_loans = BTreeSet::new();
+    let mut returned_operand_loans = BTreeSet::new();
+    let mut aggregate_loans = std::collections::HashMap::new();
     // A literal stores what its fields' operands hold (`(a, a)` puts a's
     // loan in `h.0` and `h.1`; `R { r: s }` s's).
     if let Some(t) = table {
         for (&loc, _) in &cx.rows.row {
             let Some(st) = body.basic_blocks[loc.block].statements.get(loc.statement_index) else { continue };
             let StatementKind::Assign(asg) = &st.kind else { continue };
+            let (operands, array) = match &asg.1 {
+                Rvalue::Aggregate(k, ops) if matches!(&**k, AggregateKind::Adt(..) | AggregateKind::Tuple | AggregateKind::Array(_)) =>
+                    (ops.raw.as_slice(), matches!(&**k, AggregateKind::Array(_))),
+                Rvalue::Repeat(o, _) => (std::slice::from_ref(o), true),
+                _ => continue,
+            };
+            if runs.contains(&loc.block) {
+                let mut ids = Vec::new();
+                let carried = |p, at| {
+                    let held = held_by_place(p, t.start_index(at));
+                    let name = cx.name(p);
+                    // A whole operand can carry its fields' loans. Compare MIR
+                    // projections before resolving a holder to its published column.
+                    let in_operand = |h: &String| name.as_ref() == Some(h) || columns.iter().chain(&synth).any(|(_, field, label)|
+                        label == h && field.local == p.local && field.projection.starts_with(p.projection));
+                    loans.iter().filter(|l| l.runs && held.contains(&l.loan) && (name.is_none() || l.direct_holders.iter().chain(&l.via_call).any(in_operand))
+                        && !loans.iter().any(|child| held.contains(&child.loan) && child.made_through.contains(&l.loan)))
+                        .map(|l| l.loan).collect()
+                };
+                for operand in operands {
+                    cx.operand_loans(operand, loc, &issued, &runs, &carried, &mut ids);
+                }
+                let span = st.source_info.span;
+                let key = if array && cx.vec_results.contains_key(&span.ctxt().outer_expn()) {
+                    span.source_callsite()
+                } else { span }.with_parent(None);
+                let fresh = ids.iter().filter(|b| b.issued).map(|b| b.loan);
+                issued_operand_loans.extend(fresh.clone());
+                if asg.0.as_local() == Some(RETURN_PLACE) {
+                    returned_operand_loans.extend(fresh);
+                }
+                for operand in &mut ids {
+                    operand.conditional |= taken_at(operand.loan).is_some_and(|at| !doms.dominates(at.block, loc.block));
+                }
+                aggregate_loans.entry(key).or_insert_with(Vec::new).extend(ids);
+            }
             let Rvalue::Aggregate(k, ops) = &asg.1 else { continue };
             let Some(d) = user_place(&cx.dest_name(asg.0, loc, 0)) else { continue };
             for (f, o) in ops.iter_enumerated() {
@@ -2364,7 +2484,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // The stores whose loans can still be in the field at `loc`: those on
     // a way to it not overwritten by a later store on the same way
     // (dominance: a store dominated by another reaching one is the later).
-    let doms = body.basic_blocks.dominators();
     let reaches = |a: Location, b: Location| -> bool {
         if a.block == b.block && a.statement_index < b.statement_index {
             return true;
@@ -3834,7 +3953,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let pos = tcx.sess.source_map().lookup_char_pos(hir.value.span.lo());
         (pos.line, pos.col.0)
     });
+    let conditional_ends = out_rows.iter().flat_map(|r| &r.facts).filter_map(|e| match e.fact {
+        Fact::BorrowEnd { loan, .. } if taken_at(loan).is_some_and(|issue| !ldom(issue, e.location)) => Some(loan),
+        _ => None,
+    }).collect();
     BodyFacts {
+        conditional_ends,
+        aggregate_loans,
+        issued_operand_loans,
+        returned_operand_loans,
         evaluated_spans,
         constructed_vecs,
         take_calls: take_calls.into_iter().map(|loc| body.source_info(loc).span.with_parent(None)).collect(),
