@@ -1654,12 +1654,12 @@ pub fn overloaded_value_op<'tcx>(expr: &Expr<'tcx>, tcx: &TyCtxt<'tcx>) -> Optio
 pub fn overloaded_comparison<'tcx>(
   expr: &'tcx Expr<'tcx>,
   tcx: &TyCtxt<'tcx>,
-) -> Option<(&'static str, Vec<&'tcx Expr<'tcx>>)> {
+) -> Option<(&'static str, Vec<(usize, &'tcx Expr<'tcx>)>)> {
   let ExprKind::Binary(op, lhs, rhs) = expr.kind else { return None };
   if op.node.is_by_value() || !tcx.typeck(expr.hir_id.owner).is_method_call(expr) {
     return None;
   }
-  let operands = [lhs, rhs].into_iter().filter(|e| !e.span.from_expansion()).collect();
+  let operands = [lhs, rhs].into_iter().enumerate().collect();
   Some((op.node.as_str(), operands))
 }
 

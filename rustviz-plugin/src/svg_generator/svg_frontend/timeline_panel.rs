@@ -3212,7 +3212,7 @@ fn field_lenders_dot_title(event: &Event, name: &String, vd: &VisualizationData)
     };
     let f = vd.field_lenders.get(id).filter(|f| f.end == end)?;
     Some(if end {
-        hover_messages::event_dot_field_lenders_end(name, &f.lenders, mutable)
+        hover_messages::event_dot_field_lenders_end(name, &f.lenders)
     } else {
         hover_messages::event_dot_field_lenders_borrow(name, &f.lenders, mutable)
     })
@@ -7131,16 +7131,27 @@ fn render_generic_arrow(
     }
     let option_ref = matches!(external_event, ExternalEvent::StaticBorrow { via: Some(_), .. } | ExternalEvent::MutableBorrow { via: Some(_), .. })
         && to.extract_rap().is_some_and(|rap| option_ref_copy(visualization_data, rap.hash(), rap.name(), Some(*line_number)).is_some());
-    let mut title = match visualization_data.field_lenders.get(&external_event.get_id()) {
-        Some(f) => {
-            let previous = visualization_data.row_layout.field_generations.get(&external_event.get_id()).is_some_and(|g| g.replaced);
+    let id = external_event.get_id();
+    let layout = &visualization_data.row_layout;
+    let mut title = match (visualization_data.field_lenders.get(&id), external_event) {
+        (Some(f), _) => {
+            let previous = layout.field_generations.get(&id).is_some_and(|g| g.replaced);
             hover_messages::arrow_field_lenders_title(external_event, from, to, f, previous, option_ref)
         }
-        None => hover_messages::arrow_full_title(external_event, from, to, option_ref),
+        (None, ExternalEvent::StaticDie { static_lender, of_ref_var, .. } | ExternalEvent::MutableDie { static_lender, of_ref_var, .. }) => {
+            let table = &visualization_data.state_table;
+            let lookup = |id| table.loan(*visualization_data.fn_source_lines.get(from.hash())?, id);
+            let ids = table.end_loans.get(&id).map(Vec::as_slice).unwrap_or_default();
+            let loan = match ids { [id] => lookup(*id), _ => None };
+            // Several loans can share one end arrow. Their common permission
+            // is known even when no single loan describes the holder's path.
+            let kind_of = |id| lookup(id).and_then(hover_messages::loan_kind_word);
+            let kind = ids.first().and_then(|id| kind_of(*id)).filter(|k| ids.iter().all(|id| kind_of(*id) == Some(*k)));
+            hover_messages::arrow_end_title(from, to, static_lender.as_ref(), *of_ref_var, loan, kind, layout.pattern_payloads.get(&id))
+        }
+        _ => hover_messages::arrow_full_title(external_event, from, to, option_ref),
     };
 
-    let layout = &visualization_data.row_layout;
-    let id = external_event.get_id();
     let projected = layout.projected_loan_places.get(&id)
         .map(|(_, place)| hover_messages::projected_place_html(place));
     if let Some(operand) = layout.aggregate_titles.get(&id) {
@@ -7149,7 +7160,7 @@ fn render_generic_arrow(
         match external_event {
             ExternalEvent::StaticBorrow { via: Some(v), .. } | ExternalEvent::MutableBorrow { via: Some(v), .. } =>
                 title = hover_messages::stored_loan_message(detail, to, from, Some(&v.func), false, projected.as_deref()),
-            ExternalEvent::MutableDie { .. } =>
+            ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. } =>
                 title = hover_messages::stored_loan_message(detail, from, to, None, true, projected.as_deref()),
             _ => {}
         }
@@ -7162,8 +7173,10 @@ fn render_generic_arrow(
                 title = format!("{kind} borrow of {place} stored in {holder} by {method}. {holder} isn't a reference itself. Its value holds the reference");
             }
             ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. } => {
-                let kind = if matches!(external_event, ExternalEvent::MutableDie { .. }) { "mutable" } else { "shared" };
-                title = format!("{}'s {kind} borrow of {place} ends", styled_name_html(&from.name()));
+                let loan = layout.projected_loan_places.get(&id).and_then(|(loan, _)|
+                    visualization_data.state_table.loan(*visualization_data.fn_source_lines.get(from.hash())?, *loan));
+                let kind = loan.and_then(hover_messages::loan_kind_word).map_or(String::new(), |k| format!(" {k}"));
+                title = format!("{}'s{kind} borrow of {place} ends", styled_name_html(&from.name()));
             }
             _ => {}
         }
@@ -7292,7 +7305,7 @@ fn render_generic_arrow(
             let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
 
             let title = if visualization_data.row_layout.reassigned_receivers.contains(&external_event.get_id()) {
-                format!("{} reads and writes through the receiver reserved before {} was reassigned", styled_name_html(&function.name), styled_name_html(&from_variable.name()))
+                format!("{} may read or write through the receiver reserved before {} was reassigned", styled_name_html(&function.name), styled_name_html(&from_variable.name()))
             } else if let Some((_, place)) = visualization_data.row_layout.projected_loan_places.get(&external_event.get_id()) {
                 let shared = visualization_data.row_layout.shared_projected_calls.contains(&external_event.get_id());
                 let access = if !shared && matches!(external_event, ExternalEvent::PassByMutableReference { .. }) {

@@ -131,6 +131,23 @@ enum Referent<'tcx> {
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  pub(crate) fn include_outliving_regions(&self, def_id: DefId, regions: &mut Vec<ty::Region<'tcx>>) {
+    let outlives: Vec<(ty::Region<'tcx>, ty::Region<'tcx>)> = self.tcx.predicates_of(def_id).predicates.iter()
+        .filter_map(|(clause, _)| clause.as_region_outlives_clause())
+        .map(|pred| { let ty::OutlivesPredicate(a, b) = pred.skip_binder(); (a, b) })
+        .collect();
+    let mut grew = true;
+    while grew {
+      grew = false;
+      for (a, b) in outlives.iter() {
+        if regions.contains(b) && !a.is_static() && !regions.contains(a) {
+          regions.push(*a);
+          grew = true;
+        }
+      }
+    }
+  }
+
   /// The callee's signature with late-bound lifetimes made comparable,
   /// the call's generic arguments (if known), and the arguments in
   /// parameter order (the receiver first for a method call). `None`
@@ -348,20 +365,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // does to the borrow checker.
     let direct = regions.clone();
     if let Some(def_id) = def_id {
-      let outlives: Vec<(ty::Region<'tcx>, ty::Region<'tcx>)> = self.tcx.predicates_of(def_id).predicates.iter()
-        .filter_map(|(clause, _)| clause.as_region_outlives_clause())
-        .map(|pred| { let ty::OutlivesPredicate(a, b) = pred.skip_binder(); (a, b) })
-        .collect();
-      let mut grew = true;
-      while grew {
-        grew = false;
-        for (a, b) in outlives.iter() {
-          if regions.contains(b) && !a.is_static() && !regions.contains(a) {
-            regions.push(*a);
-            grew = true;
-          }
-        }
-      }
+      self.include_outliving_regions(def_id, &mut regions);
     }
     if regions.is_empty() && params.is_empty() {
       return Some(Vec::new());
@@ -827,10 +831,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ..ArgTie::default()
     };
     let mut holds_all_literal = false;
+    let mut multiple_lenders = false;
     for flow in self.call_arg_flows_into(call, target).unwrap_or_default() {
       holds_all_literal = matches!(flow.arg.kind,
         ExprKind::Array(..) | ExprKind::Struct(..) | ExprKind::Tup(..) | ExprKind::Repeat(..));
-      let named = self.arg_lenders(&flow).iter()
+      let lenders = self.arg_lenders(&flow);
+      multiple_lenders = lenders.len() > 1;
+      let named = lenders.iter()
         .any(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)));
       tie.tied.push(flow.index);
       tie.via_outlives |= flow.via_outlives;
@@ -849,6 +856,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     // A single aggregate argument holds all its borrows, not one of them.
     tie.holds_all = tie.tied.len() == 1 && holds_all_literal;
+    if tie.tied.len() >= 2 {
+      if let Some(id) = callee.and_then(|d| d.as_local()).filter(|id| self.tcx.hir_maybe_body_owned_by(*id).is_some()) {
+        let body = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(self.tcx, id).body;
+        if body.return_ty().is_ref() {
+          let origins = crate::facts::call_wording::return_origins(self.tcx, body, None);
+          tie.returns_alternatives = origins.is_some_and(|args| args.len() == tie.tied.len() &&
+            tie.tied.iter().all(|i| body.args_iter().nth(*i).is_some_and(|l| args.contains(&Some(l)))));
+        }
+      }
+    }
+    if multiple_lenders && tie.stored_in.is_empty() {
+      if let [index] = tie.tied.as_slice() {
+        tie.reference_source = crate::facts::reference_argument_source(self.tcx, self.mir_body, call.span, *index);
+      }
+    }
     tie
   }
 

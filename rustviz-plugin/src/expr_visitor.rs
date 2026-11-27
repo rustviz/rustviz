@@ -3083,7 +3083,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       Evt::MBorrow => ExternalEvent::MutableBorrow { of_ref_var: pattern_ref(&lhs, &rhs), from: rhs, to: lhs, id, is_partial, is_reborrow: false, break_alt: None, via: None },
       Evt::PassBySRef => ExternalEvent::PassByStaticReference { from: rhs, to: lhs, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None },
       Evt::PassByMRef => ExternalEvent::PassByMutableReference {
-        manually_takes: false, terminal: None, from: rhs, to: lhs, id, is_reborrow: false, result_has_lifetime: false, implicit: ImplicitRef::No,
+        manually_takes: false, terminal: None, from: rhs, to: lhs, id, is_reborrow: false, ends_at_call: false, implicit: ImplicitRef::No,
         result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var: false, deep: None,
       },
       Evt::SDie =>  ExternalEvent::StaticDie { slot: id, of_ref_var: pattern_ref(&rhs, &lhs), from: rhs, to: lhs, id, static_lender: None, still_borrowed_by: Vec::new(), exhaustion: Vec::new() },
@@ -3970,18 +3970,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// can carry that reborrow past the call, and whether Rust
   /// inserted the `&mut` (see `ImplicitRef`), and whether `arg` is a
   /// reference variable borrowed itself (`of_ref_var`, #938).
-  pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef, of_ref_var: bool) {
-    self.add_pass_by_mref_ev_deep(line_num, func, arg, is_reborrow, result_has_lifetime, implicit, of_ref_var, None);
+  pub fn add_pass_by_mref_ev(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, ends_at_call: bool, implicit: ImplicitRef, of_ref_var: bool) {
+    self.add_pass_by_mref_ev_deep(line_num, func, arg, is_reborrow, ends_at_call, implicit, of_ref_var, None);
   }
 
   /// `add_pass_by_mref_ev` for a receiver that is a reference to a
   /// reference, the call borrowing what's further away (`deep`, #952).
   #[allow(clippy::too_many_arguments)]
-  pub fn add_pass_by_mref_ev_deep(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, result_has_lifetime: bool, implicit: ImplicitRef, of_ref_var: bool, deep: Option<DeepPlace>) {
+  pub fn add_pass_by_mref_ev_deep(&mut self, line_num: usize, func: ResourceTy, arg: ResourceTy, is_reborrow: bool, ends_at_call: bool, implicit: ImplicitRef, of_ref_var: bool, deep: Option<DeepPlace>) {
     let id = *self.unique_id;
     let terminal = self.emitting_expr.and_then(|e| crate::facts::terminal_argument(self.tcx, self.mir_body, e.span));
+    let mut stored_in = StoredIn::default();
+    if is_reborrow && !ends_at_call && matches!(implicit, ImplicitRef::Receiver { .. }) {
+      if let Some(stores) = self.emitting_expr.and_then(|call| self.body_facts?.argument_stores.get(&(call.span.with_parent(None), 0))) {
+        if let [(holder, _)] = stores.as_slice() {
+          stored_in.0 = Some(holder.clone());
+        }
+      }
+    }
     self.add_external_event(line_num, ExternalEvent::PassByMutableReference {
-      manually_takes: false, terminal, from: arg, to: func, id, is_reborrow, result_has_lifetime, implicit, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, of_ref_var, deep,
+      manually_takes: false, terminal, from: arg, to: func, id, is_reborrow, ends_at_call, implicit, result_keeps_borrow: false, stored_in, break_alt: None, of_ref_var, deep,
     });
     *self.unique_id += 1;
   }
@@ -4005,6 +4013,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       from: arg, to: func, id, implicit, refcell_borrow_mut, pointee_interior_mut, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var, deep,
     });
     *self.unique_id += 1;
+  }
+
+  pub(crate) fn operand_label(&self, call: &Expr<'tcx>, index: usize, operand: &Expr<'tcx>) -> Option<String> {
+    crate::facts::call_wording::operand_label(self.tcx, self.mir_body, &self.raps.bindings,
+      call.span, index, operand.span, self.tcx.typeck(operand.hir_id.owner).expr_ty(operand))
   }
 
   /// A built-in dereference chain evaluated by this expression. Use the
@@ -4498,9 +4511,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let last_line = self.tcx.sess.source_map().lookup_char_pos(arg.span.hi()).line;
     let typeck = self.tcx.typeck(closure.def_id);
     let env = typing_env(self.tcx, arg.hir_id.owner);
-    let mut mir_b_data = None;
     let mut drew_any = false;
-    for capture in typeck.closure_min_captures_flattened(closure.def_id) {
+    for (index, capture) in typeck.closure_min_captures_flattened(closure.def_id).enumerate() {
       let upvar_hir_id = match capture.place.base {
         rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
         _ => continue,
@@ -4520,18 +4532,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           drew_any = true;
         }
         rustc_middle::ty::UpvarCapture::ByRef(kind) => {
-          // The capture's loan is issued within the closure literal's
-          // lines and borrows the root variable; region.1 is the
-          // last line it's live on.
-          let loans = mir_b_data.get_or_insert_with(|| self.gather_borrow_data(self.bwf));
-          let last_live = loans.iter()
-            .filter(|b| (line_num..=last_line).contains(&b.region.0)
-              && b.borrowed_place.as_deref() == Some(root.as_str()))
-            .map(|b| b.region.1)
-            .max();
-          if !matches!(last_live, Some(l) if l <= last_line) {
-            continue;
-          }
+          let Some(sites) = crate::facts::call_wording::capture_borrows(self.mir_body, closure.def_id, index) else { continue };
+          let Some(&(_, place)) = sites.first() else { continue };
+          // One source dot can describe several guard occurrences when the
+          // captured place and the displayed end row agree on every path.
+          if !sites.iter().all(|&(issue, p)| p == place && self.facts.and_then(|b| b.loans.iter().find(|l| l.issue == Some(issue)))
+            .is_some_and(|l| !l.end_lines.is_empty() && l.end_lines.iter().all(|row| *row <= last_line))) { continue; }
           let target_name = format!("the closure passed to {}", fn_name);
           if !self.raps.contains_key(&fn_key(&target_name)) {
             self.add_fn(target_name.clone());
@@ -4540,10 +4546,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           self.update_rap(&from_rap, line_num);
           // The reference variable itself, not what it points to (#1180).
           let of_ref_var = from_rap.is_ref() && capture.place.projections.is_empty();
+          let implicit = ImplicitRef::Capture {
+            place: crate::facts::call_wording::binding_place(self.mir_body, &self.raps.bindings, place)
+              .unwrap_or_else(|| capture.to_string(self.tcx)),
+            unique: matches!(kind, rustc_middle::ty::BorrowKind::UniqueImmutable),
+            interior_mut: self.ty_has_interior_mut(capture.place.ty(), arg.hir_id.owner) == InteriorMut::Yes,
+          };
           match kind {
             rustc_middle::ty::BorrowKind::Mutable =>
-              self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, ImplicitRef::No, of_ref_var),
-            _ => self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), ImplicitRef::No, false, of_ref_var),
+              self.add_pass_by_mref_ev(line_num, target, ResourceTy::Value(from_rap), false, false, implicit, of_ref_var),
+            _ => self.add_pass_by_sref_ev(line_num, target, ResourceTy::Value(from_rap), implicit, false, of_ref_var),
           }
           drew_any = true;
         }
@@ -5213,19 +5225,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  /// Draw a call's store only when the actual MIR source operand carries
-  /// the loan and the callee can write it through the destination operand.
-  fn argument_stored_borrows(&mut self, arg: &'tcx Expr<'tcx>, from: &ResourceTy, line: usize, issued: Option<usize>)
-      -> Vec<(ResourceTy, ResourceTy, usize, usize)> {
-    let Some(facts) = self.body_facts else { return Vec::new() };
-    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return Vec::new() };
+  fn call_argument_site(&self, arg: &Expr<'tcx>) -> Option<(rustc_span::Span, usize)> {
+    let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return None };
     let index = match call.kind {
       ExprKind::Call(_, args) => args.iter().position(|a| a.hir_id == arg.hir_id),
       ExprKind::MethodCall(_, receiver, args, _) =>
         std::iter::once(receiver).chain(args.iter()).position(|a| a.hir_id == arg.hir_id),
       _ => None,
     };
-    let Some(stores) = index.and_then(|i| facts.argument_stores.get(&(call.span.with_parent(None), i))) else { return Vec::new() };
+    Some((call.span.with_parent(None), index?))
+  }
+
+  /// Draw a call's store only when the actual MIR source operand carries
+  /// the loan and the callee can write it through the destination operand.
+  fn argument_stored_borrows(&mut self, arg: &'tcx Expr<'tcx>, from: &ResourceTy, line: usize, issued: Option<usize>)
+      -> Vec<(ResourceTy, ResourceTy, usize, usize)> {
+    let Some(facts) = self.body_facts else { return Vec::new() };
+    let Some(site) = self.call_argument_site(arg) else { return Vec::new() };
+    let Some(stores) = facts.argument_stores.get(&site) else { return Vec::new() };
     let from_call = match arg.kind {
       ExprKind::MethodCall(..) => true,
       ExprKind::Call(callee, _) => !crate::visitor::is_ctor_path(callee, self.tcx.typeck(arg.hir_id.owner)),
@@ -6512,7 +6529,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         let stored_in = StoredIn(Some(place.name().to_owned()), Vec::new(), Vec::new(), false, Vec::new(), false, Vec::new());
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
-            manually_takes: false, terminal: None, from: from_ro.clone(), to: to_ro.clone(), id, is_reborrow: false, result_has_lifetime: true,
+            manually_takes: false, terminal: None, from: from_ro.clone(), to: to_ro.clone(), id, is_reborrow: false, ends_at_call: false,
             implicit: ImplicitRef::No, result_keeps_borrow: false, stored_in, break_alt: None, of_ref_var, deep: None,
           }
         } else {
@@ -6615,13 +6632,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             self.add_ev(line_num, Evt::Move, to_ro, from_ro, false);
             return;
           }
-          // Unknown parent → assume the result may hold the borrow;
-          // that only selects the weaker (always-true) wording.
-          let result_has_lifetime = match self.tcx.parent_hir_node(arg.hir_id) {
-            rustc_hir::Node::Expr(call) => call_result_has_lifetime(call, tycheck_results),
-            _ => true,
-          };
-          self.add_pass_by_mref_ev_deep(line_num, to_ro, from_ro.clone(), is_reborrow, result_has_lifetime, ImplicitRef::No, of_ref_var, deep);
+          let ends_at_call = self.call_argument_site(arg).is_some_and(|key| self.facts.is_some_and(|b| b.short_call_borrows.contains(&key)));
+          self.add_pass_by_mref_ev_deep(line_num, to_ro, from_ro.clone(), is_reborrow, ends_at_call, ImplicitRef::No, of_ref_var, deep);
           // `grow(&mut r.name)` with `r = &mut p`: the call can modify
           // p.name, drawn on its column too (#1216).
           self.write_field_behind_ref(&from_ro, arg, line_num);
@@ -9899,15 +9911,16 @@ pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceT
         let id = *self.unique_id;
         *self.unique_id += 1;
         let (from, to) = (field.clone(), target);
+        let implicit = ImplicitRef::Capture { place: from.name(), unique: false, interior_mut: false };
         let ev = if is_mut {
           ExternalEvent::PassByMutableReference {
-            manually_takes: false, terminal: None, from, to, id, is_reborrow: false, result_has_lifetime: true, implicit: ImplicitRef::No,
+            manually_takes: false, terminal: None, from, to, id, is_reborrow: false, ends_at_call: false, implicit,
             result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None,
             of_ref_var: false, deep: None,
           }
         } else {
           ExternalEvent::PassByStaticReference {
-            from, to, id, implicit: ImplicitRef::No, refcell_borrow_mut: false, pointee_interior_mut: false,
+            from, to, id, implicit, refcell_borrow_mut: false, pointee_interior_mut: false,
             result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(),
             of_ref_var: false, deep: None,
           }
@@ -12167,7 +12180,7 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
   let mir_b_data = self.gather_borrow_data(self.bwf);
 
   let typeck = self.tcx.typeck(closure.def_id);
-  for capture in typeck.closure_min_captures_flattened(closure.def_id) {
+  for (index, capture) in typeck.closure_min_captures_flattened(closure.def_id).enumerate() {
     let upvar_hir_id = match capture.place.base {
       rustc_middle::hir::place::PlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
       _ => continue,
@@ -12249,19 +12262,11 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
       }
     }
     if let Some(die_evt) = die_evt {
-      let kill_line = mir_b_data.iter().find_map(|b| {
-        // Match on (assignment line, upvar name): the loan
-        // for this capture is issued at the closure literal's
-        // line and borrows the upvar by name. region.1 is the
-        // NLL-refined kill line.
-        if b.region.0 == line_num
-          && b.borrowed_place.as_deref() == Some(upvar_name.as_str())
-        {
-          Some(b.region.1)
-        } else {
-          None
-        }
+      let loan = crate::facts::call_wording::capture_borrows(self.mir_body, closure.def_id, index).and_then(|sites| {
+        let [(at, _)] = sites.as_slice() else { return None };
+        self.bwf.borrow_set.location_map().get_index_of(at)
       });
+      let kill_line = loan.and_then(|id| mir_b_data.iter().find(|b| b.borrow_idx == id)).map(|b| b.region.1);
       // A reference the closure reborrows through or borrows (`|| r.len()`,
       // `|| println!("{}", r)`) stays live, and its own borrow with it,
       // while the closure holds that loan: up to the closure's last use,
@@ -12290,6 +12295,7 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
         if let ExternalEvent::StaticDie { of_ref_var: o, .. } | ExternalEvent::MutableDie { of_ref_var: o, .. } = &mut die {
           *o = of_ref_var;
         }
+        if let Some(loan) = loan { self.end_loans.insert(*self.unique_id, vec![loan]); }
         self.add_external_event(die_line, die);
         *self.unique_id += 1;
       }

@@ -1339,6 +1339,7 @@ pub(crate) enum StoredLoan {
 #[derive(Default, Debug)]
 pub struct RowLayout {
     /// Both column dots and the connecting arrow describe the same aggregate operand.
+    pub(crate) pattern_payloads: BTreeMap<usize, (String, &'static str)>,
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
     pub(crate) closure_result_holders: BTreeSet<u64>,
     pub(crate) stored_lender_loans: BTreeMap<u64, BTreeSet<usize>>,
@@ -1372,6 +1373,7 @@ pub struct RowLayout {
 impl RowLayout {
     pub fn append(&mut self, other: &mut Self) {
         self.arm_points.append(&mut other.arm_points);
+        self.pattern_payloads.append(&mut other.pattern_payloads);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.closure_result_holders.append(&mut other.closure_result_holders);
         self.stored_lender_loans.append(&mut other.stored_lender_loans);

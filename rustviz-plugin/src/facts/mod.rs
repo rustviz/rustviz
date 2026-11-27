@@ -29,6 +29,7 @@ mod control;
 pub use control::SourceArm;
 pub(crate) use control::{enclosing_arms, location_arms};
 mod call_stores;
+pub(crate) mod call_wording;
 mod holder_path;
 mod places;
 mod rows;
@@ -40,7 +41,7 @@ use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
 pub use schema::*;
 pub(crate) use rows::real_successor_blocks;
-pub(crate) use body::{dropped_on_residual, loop_enters_pattern, terminal_argument};
+pub(crate) use body::{dropped_on_residual, loop_enters_pattern, reference_argument_source, terminal_argument};
 
 pub(crate) fn is_vec_expansion(tcx: TyCtxt<'_>, expansion: rustc_span::hygiene::ExpnId) -> bool {
     expansion.expn_data().macro_def_id.is_some_and(|id| tcx.is_diagnostic_item(rustc_span::Symbol::intern("vec_macro"), id))

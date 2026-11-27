@@ -271,7 +271,7 @@ fn project_ty<'tcx>(ty: Ty<'tcx>, e: &PlaceElem<'tcx>) -> Ty<'tcx> {
 }
 
 /// `root` followed by `proj`, written the way the source would.
-fn name_projections<'tcx>(root: String, ty: &mut Ty<'tcx>, proj: &[PlaceElem<'tcx>]) -> String {
+pub(super) fn name_projections<'tcx>(root: String, ty: &mut Ty<'tcx>, proj: &[PlaceElem<'tcx>]) -> String {
     let mut name = root;
     // A pending deref: written `*x` unless a field follows (`x.f`).
     let mut deref = 0usize;
