@@ -381,7 +381,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         .filter(|(o, ..)| o.hir_id != l.hir_id && l.span.contains(o.span))
         .map(|&(_, h, e)| (h, e))
         .collect();
-      self.approx_notes.push(ApproxNote::Loop { head, pass, head_cols, locals, nested, declares, at_most_once });
+      let constant_pruned_backedge = self.facts.and_then(|f| f.loops.get(&l.hir_id))
+        .is_some_and(|boundary| boundary.constant_pruned_backedge);
+      let text = hover_messages::approx_note_loop(declares, at_most_once, constant_pruned_backedge);
+      self.approx_notes.push(ApproxNote::Loop { head, pass, head_cols, locals, nested, text });
     }
   }
 }

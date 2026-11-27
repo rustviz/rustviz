@@ -264,6 +264,8 @@ pub struct LoopState {
     pub continuation: Option<State>,
     pub edges: Vec<LoopEdge>,
     #[serde(skip)]
+    pub constant_pruned_backedge: bool,
+    #[serde(skip)]
     pub changes: BTreeMap<String, LoopChange>,
 }
 
@@ -292,6 +294,8 @@ pub struct LoopEdge {
 #[derive(Default)]
 pub struct LoopChange {
     pub moved: bool,
+    pub moved_part: bool,
+    pub entry_empty_at_runtime: bool,
     pub wrote: bool,
     pub writes_on_all_exits: bool,
     pub carried: bool,

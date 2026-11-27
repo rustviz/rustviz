@@ -50,9 +50,7 @@ struct PendingDot {
 /// An approximation note on a dot, and whether it is a loop's.
 #[derive(Clone, PartialEq)]
 enum DotNote {
-    /// A loop's note; whether the loop declares variables, and whether
-    /// it runs at most once (`ApproxNote::Loop`).
-    Loop(bool, bool),
+    Loop(String),
     Other(String),
     UnreachedScopeExit,
 }
@@ -60,7 +58,7 @@ enum DotNote {
 impl DotNote {
     fn text(&self) -> String {
         match self {
-            DotNote::Loop(declares, at_most_once) => hover_messages::approx_note_loop(*declares, *at_most_once),
+            DotNote::Loop(t) => t.clone(),
             DotNote::Other(t) => t.clone(),
             DotNote::UnreachedScopeExit => "This dot describes normal scope exit. A preceding closure call never returns, so this exit never runs. If the call panics, values still owned at the call are dropped if unwinding reaches their cleanup.".to_owned(),
         }
@@ -227,7 +225,7 @@ impl DotLayer {
         // would sit inside a nested loop, where "this loop" reads as the
         // nested one, whose own note already says it.
         for note in notes {
-            let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, declares, at_most_once } = note else { continue };
+            let ApproxNote::Loop { head, pass: (lo, hi), head_cols, locals, nested, text } = note else { continue };
             let mut best: Option<(usize, i64, usize)> = None;
             for (hash, col) in &by_col {
                 if !locals.contains(hash) && !col.iter().any(|(l, _)| l < head) {
@@ -245,7 +243,7 @@ impl DotLayer {
                 }
             }
             if let Some((.., i)) = best {
-                add(&mut self.dots, vec![i], DotNote::Loop(*declares, *at_most_once));
+                add(&mut self.dots, vec![i], DotNote::Loop(text.clone()));
             }
         }
         for note in notes {
@@ -2065,7 +2063,11 @@ fn render_scope_end_dot(
                 hash: *hash as u64,
                 dot_x: cx,
                 dot_y: cy,
-                title: hover_messages::event_dot_go_out_of_scope_after_loop(&name, &ro.drop_note(), loop_maybe_init_before(history)),
+                title: if loop_maybe_init_prior_assignment(history) {
+                    hover_messages::event_dot_go_out_of_scope_maybe_kept(&name, &ro.drop_note())
+                } else {
+                    hover_messages::event_dot_go_out_of_scope_after_loop(&name, &ro.drop_note(), loop_maybe_init_before(history))
+                },
                 p1x: cx - 3, p1y: cy - 1,
                 p2x: cx + 3, p2y: cy - 1,
                 p3x: cx,     p3y: cy + 3,
@@ -2648,7 +2650,11 @@ fn render_dot(
                         // A loop above may have ended before assigning
                         // it (#786), maybe after a branch moved it
                         // before the loop (#1012).
-                        hover_messages::event_dot_owner_drop_at_reassign_after_loop(&name, &note, loop_maybe_init_before(&history[..i]))
+                        if loop_maybe_init_prior_assignment(&history[..i]) {
+                            hover_messages::event_dot_owner_drop_at_reassign_maybe_kept(&name, &note)
+                        } else {
+                            hover_messages::event_dot_owner_drop_at_reassign_after_loop(&name, &note, loop_maybe_init_before(&history[..i]))
+                        }
                     } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), maybe_moved: true, by_cond, .. } = event {
                         // The first thing a loop's body does to it,
                         // which only may hold a value as the loop
@@ -2799,7 +2805,7 @@ fn render_dot(
                     data.title = hover_messages::event_dot_loop_maybe_init_nested(
                         &name, rap.drops_nothing(), rap.is_mut());
                 }
-                Event::LoopMaybeInit { before_loop, .. } => {
+                Event::LoopMaybeInit { before_loop, prior_assignment, .. } => {
                     // A loop above may have ended before assigning it
                     // (#786): like a conditional's maybe-initialized
                     // join, say when its value, if any, is dropped.
@@ -2814,7 +2820,7 @@ fn render_dot(
                         None
                     };
                     data.title = hover_messages::event_dot_loop_maybe_init(
-                        &name, rap.drops_nothing(), rap.is_mut(), reassigned, *before_loop);
+                        &name, rap.drops_nothing(), rap.is_mut(), reassigned, *before_loop, *prior_assignment);
                 }
                 Event::LoopExitKept { reassigned } => {
                     let rap = &visualization_data.timelines[hash].resource_access_point;
@@ -3446,6 +3452,7 @@ fn maybe_moved_at_end(history: &[(usize, Event)]) -> bool {
             }
             // A loop left through a `break` after a move (or another
             // way): maybe-moved; through such `break`s only: moved.
+            Event::LoopExitMove { at: MaybeMovedAt::LoopPartial, .. } => {}
             Event::LoopExitMove { definite, .. } => maybe = !*definite,
             // Moved into a name an or-pattern binds, on the paths where
             // the alternative that binds from here matched (#533).
@@ -3551,6 +3558,13 @@ fn loop_maybe_init_before(history: &[(usize, Event)]) -> Option<bool> {
         Event::LoopMaybeInit { before_loop, .. } => Some(*before_loop),
         _ => None,
     }).flatten()
+}
+
+fn loop_maybe_init_prior_assignment(history: &[(usize, Event)]) -> bool {
+    history.iter().rev().find_map(|(_, e)| match e {
+        Event::LoopMaybeInit { prior_assignment, .. } => Some(*prior_assignment),
+        _ => None,
+    }).unwrap_or(false)
 }
 
 // A drop-flag assignment to a maybe-initialized `let x;` local (#244),

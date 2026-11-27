@@ -4241,7 +4241,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if first == Some("moved") && matches!(back, Some("own" | "maybe")) && change.wrote {
         given.push(ro.clone());
       }
-      if (first == Some("maybe") || entry.unnamed_maybe.contains(name))
+      if (entry.cause.get(name) == Some(&"moved") || entry.unnamed_maybe.contains(name))
         && (change.wrote || change.wrote_away || change.moved) {
         let nested = self.exit_frames.iter().filter_map(|frame| match frame {
           ExitFrame::Loop { id, .. } if *id != expr.hir_id => loops.get(id),
@@ -4369,6 +4369,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let Some(loop_state) = self.facts.and_then(|f| f.loops.get(&id)) else { return; };
     let Some(after) = &loop_state.continuation else { return; };
     let line = span_end_line(&expr.span, &self.tcx);
+    let only_breaks = loop_state.edges.iter().all(|e| !e.runs || e.kind != crate::facts::LoopEdgeKind::Exhaustion);
     for ro in self.loop_columns(&loop_state.entry) {
       let name = ro.name();
       if after.locals.get(name) != loop_state.entry.locals.get(name) { continue; }
@@ -4379,23 +4380,32 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let state = after.state.get(name).copied();
       let event = match state {
         Some("own") if !ro.is_ref() && (change.moved && matches!(back, Some("maybe" | "moved")) || change.moved_away)
-          && loop_state.edges.iter().all(|e| !e.runs || e.kind != crate::facts::LoopEdgeKind::Exhaustion) =>
+          && only_breaks =>
           ExternalEvent::LoopExitKept { ro, reassigned: change.writes_on_all_exits, id: *self.unique_id },
         Some("maybe" | "partly") if !ro.is_ref() && !loop_state.entry.mixed_init.contains_key(name) && (
           change.wrote && after.cause.get(name) == Some(&"unassigned") && first != Some("own")
           || (change.wrote || change.wrote_away) && !change.moved && (maybe_entry || first == Some("moved"))
              && (state == Some("maybe") || after.unnamed_maybe.contains(name))) =>
         {
-          let wording = entry_wording.iter().find(|m| m.ro == ro);
-          let before_loop = wording.map(|m| m.by_cond);
-          let nested = wording.is_some_and(|m| m.nested.is_some());
-          ExternalEvent::LoopMaybeInit { ro, before_loop, nested, id: *self.unique_id }
+          if after.always_assigned.contains(name) {
+            ExternalEvent::AssignmentJoin { ro, always_assigned: true, id: *self.unique_id }
+          } else {
+            let wording = entry_wording.iter().find(|m| m.ro == ro).filter(|_| !change.entry_empty_at_runtime);
+            let prior_assignment = loop_state.entry.cause.get(name) == Some(&"unassigned");
+            let before_loop = wording.map(|m| m.by_cond);
+            let nested = wording.is_some_and(|m| m.nested.is_some());
+            ExternalEvent::LoopMaybeInit { ro, before_loop, nested, prior_assignment, id: *self.unique_id }
+          }
+        }
+        Some("partly" | "own") if change.moved_part && after.unnamed_maybe.contains(name) => {
+          ExternalEvent::LoopExitMove { ro, definite: false, at: MaybeMovedAt::LoopPartial, id: *self.unique_id }
         }
         Some("moved" | "maybe") if change.moved => {
           let definite = state == Some("moved");
-          let kept = back == Some("maybe");
+          let kept = back == Some("maybe")
+            || first == Some("moved") && back == Some("own") && change.wrote;
           let at = if change.moved_at_break {
-            MaybeMovedAt::Loop { nothing_above: !change.branch_move, kept, carried: change.carried }
+            MaybeMovedAt::Loop { nothing_above: !change.branch_move, kept, carried: change.carried, only_breaks }
           } else if let Some(m) = condition_moves.iter().find(|m| m.rap == ro).filter(|_| change.moved_at_exhaustion) {
             MaybeMovedAt::WhileCondFail { to: m.to.clone(), dropped: m.dropped.clone(), how: m.how.clone() }
           } else if change.moved_at_exhaustion && !definite {
@@ -14909,7 +14919,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   ) {
     self.loop_entry_uninit.pop();
     let Some(facts) = self.facts else { return; };
-    let Some(after) = facts.loops.get(&target).and_then(|l| l.continuation.as_ref()) else { return; };
+    let Some(loop_state) = facts.loops.get(&target) else { return; };
+    let Some(after) = loop_state.continuation.as_ref() else { return; };
     #[expect(clippy::disallowed_methods, reason = "only collected into a set")]
     let before = uninit_before.keys().copied().chain(maybe_before.iter().copied()).collect::<HashSet<_>>();
     let mut uninit = uninit_before;
@@ -14923,9 +14934,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for id in before {
       let name = self.deferred_name(id);
       let matches = facts.bindings.declarations.get(&id).is_some_and(|local| after.locals.get(&name) == Some(&Some(*local)));
-      if matches && after.state.get(&name) == Some(&"maybe") {
+      if matches && after.state.get(&name) == Some(&"maybe") && !after.always_assigned.contains(&name) {
         self.maybe_init_locals.insert(id);
-        self.maybe_init_by_loop.insert(id);
+        if loop_state.changes.get(&name).is_some_and(|change| change.wrote) {
+          self.maybe_init_by_loop.insert(id);
+        }
+      } else {
+        self.maybe_init_by_loop.remove(&id);
       }
     }
     self.uninit_locals = uninit;

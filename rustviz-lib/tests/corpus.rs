@@ -18460,6 +18460,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // after the `if` never runs (#1004).
         name: "edition2024/irrefutable_iflet_inline_995",
         must_contain: &[
+            "(RustViz draws one pass through this loop, which may not run at all. The variables declared inside it are new on each pass.)",
             "Move from f to x",
             "x goes out of scope. Its resource is dropped.",
             "g goes out of scope. Its resource is dropped.",
@@ -18474,6 +18475,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &[
+            "which may run many times; the variables declared inside it are new on each pass",
             "f still owns its resource here",
             "p still owns its resource here",
             "s still owns its resource here",
@@ -18793,6 +18795,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // if there is one. Checked with a `Drop`-printing type, k = 0, 1
         // and 2.
         must_contain: &[
+            "q may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when q goes out of scope.",
             "On a later iteration of the loop, the resource an earlier iteration gave s is dropped here first, if s still holds it (Rust tracks this with a runtime drop flag).",
             "s may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when s goes out of scope.",
             "s goes out of scope. Its resource is dropped here only if the loop above assigned s (Rust tracks this with a runtime drop flag).",
@@ -18814,6 +18817,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.name goes out of scope. Its resource is dropped here only if the loop above assigned p.name (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            "q may have no value after the loop: it may have none where the loop starts",
+            "its resource is dropped when q is assigned again",
             "=s goes out of scope. Its resource is dropped.",
             "=t goes out of scope. Its resource is dropped.",
             "=u goes out of scope. Its resource is dropped.",
@@ -19471,6 +19476,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // and h are still drawn at their scope ends, which say so: #1020.)
         name: "inline_exit_nested_1013",
         must_contain: &[
+            "(RustViz draws one pass through this loop, which may not run at all. The variables declared inside it are new on each pass.)",
             "Move from f to x",
             "x goes out of scope. Its resource is dropped.",
             "g goes out of scope. Its resource is dropped.",
@@ -19487,6 +19493,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
+            "which may run many times; the variables declared inside it are new on each pass",
             "g's resource is immutably borrowed by len",
             "q's resource is immutably borrowed by len",
             "e's resource is immutably borrowed by len",
@@ -25344,10 +25351,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1392: the join a row below the arm's last dot (geometry in
         // `joins_sit_below_their_arms_dots`); the texts are unchanged.
         must_contain: &[
+            "Part of k2 may have been moved out, so k2 can't be used as a whole after the loop",
+            "k2's mutable borrow ends",
             "s isn't moved in any of the branches above",
             "s's resource is no longer mutably borrowed",
         ],
-        must_not_contain: &["s has no value yet"],
+        must_not_contain: &["s has no value yet", "k2 may have been moved: the loop can end"],
     },
     TooltipExpect {
         name: "nested_arm_lender_end_1418",
@@ -28747,6 +28756,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push reads from/writes to", "but its borrow lasts as long as the result",
             "the same lifetime as its argument, so it may point into either",
         ],
+    },
+    TooltipExpect {
+        // The outer test succeeds on the first pass. Its body enters an
+        // infinite inner loop, so it cannot start a second pass.
+        name: "basic_while",
+        must_contain: &["(RustViz draws one pass through this loop. Its body runs at most once.)"],
+        must_not_contain: &["which may not run at all"],
     },
 ];
 
@@ -44728,6 +44744,8 @@ fn p4_loop_boundaries_follow_the_compilers_normal_edges() {
         let rounds: Vec<_> = edges.iter().filter(|e| e["kind"] == "backedge").collect();
         let exits: Vec<_> = edges.iter().filter(|e| e["kind"] == "exhaustion").collect();
         assert_eq!((rounds.len(), exits.len()), (1, 1), "{name}: {edges:?}");
+        assert_eq!(rounds[0]["runs"], true);
+        assert_eq!(exits[0]["runs"], true);
         assert_eq!(rounds[0]["to"], boundary["at"]);
         assert_ne!(exits[0]["to"], boundary["at"]);
         assert_eq!(exits[0]["state"]["state"][place], "maybe");
@@ -44765,9 +44783,12 @@ fn p4_loop_boundaries_follow_the_compilers_normal_edges() {
 #[test]
 fn p4_loop_continuation_does_not_join_an_iteration_local() {
     let rv = run_with_local_backend("p4_loop_continuation");
-    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    let svg = rv.timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
     assert!(tips.iter().any(|t| t.contains("payload goes out of scope. No resource is dropped")));
-    assert!(!tips.iter().any(|t| t.contains("payload may have been moved: the loop can end")));
+    for element in common::svg::rv_elements(&svg).into_iter().filter(|e| e.id.starts_with("payload@L19:dot:")) {
+        assert_eq!(element.event.as_deref(), Some("owner_go_out_of_scope"), "{}", element.id);
+    }
     assert!(tips.iter().any(|t| t.contains("every break comes after value gets a new resource")));
     assert!(tips.iter().any(|t| t.contains("only if the loop above assigned last")
         && t.contains("runtime drop flag")));
@@ -44779,4 +44800,107 @@ fn p4_loop_retries_before_the_only_write() {
     let tips = timeline_tooltips(&rv.timeline_panel_string());
     assert!(tips.iter().any(|t| t == "once acquires ownership of a resource"));
     assert!(!tips.iter().any(|t| t.contains("earlier iteration gave once")), "{tips:?}");
+}
+
+#[test]
+fn loop_review_condition_failure_also_reaches_the_join() {
+    let svg = run_with_local_backend("p4_loop_review").timeline_panel_string();
+    check_review_tip(&svg, "x@L11:dot:loop_exit_move", &["x was moved on every path that reaches the code after the loop"],
+        &["the only way out of the loop is a break"]);
+}
+
+#[test]
+fn loop_review_unassigned_entry_has_no_move() {
+    let svg = run_with_local_backend("p4_loop_review").timeline_panel_string();
+    check_review_tip(&svg, "n@L21:dot:loop_maybe_init",
+        &["it may have been left unassigned before the loop", "the loop may end before assigning it"],
+        &["may have moved it"]);
+}
+
+#[test]
+fn loop_review_overwrite_keeps_the_branch_initialization_reason() {
+    let svg = run_with_local_backend("p4_loop_review").timeline_panel_string();
+    check_review_tip(&svg, "x@L30:dot:owner_drop_at_reassign",
+        &["only if x was assigned in the branch that ran", "runtime drop flag"], &["the loop above assigned x"]);
+}
+
+#[test]
+fn loop_review_assignment_on_every_runtime_exit() {
+    let svg = run_with_local_backend("p4_loop_review").timeline_panel_string();
+    check_review_tip(&svg, "x@L42:dot:", &["x is assigned on every path that runs", "an unreachable path that skips the assignment"],
+        &["the loop may end before assigning it"]);
+    check_review_tip(&svg, "x@L43:dot:owner_go_out_of_scope", &["x goes out of scope. Its resource is dropped."],
+        &["only if the loop above assigned x", "runtime drop flag"]);
+}
+
+#[test]
+fn loop_review_scope_drop_can_drop_a_replacement() {
+    let svg = run_with_local_backend("p4_loop_review").timeline_panel_string();
+    check_review_tip(&svg, "s@L55:dot:owner_go_out_of_scope", &["only if s still holds it", "runtime drop flag"],
+        &["only if nothing above moved it", "only if no branch above moved it"]);
+}
+
+fn review_loop<'a>(facts: &'a serde_json::Value, func: &str) -> &'a serde_json::Value {
+    let [boundary] = fact_body(facts, func)["loops"].as_array().unwrap().as_slice() else {
+        panic!("{func}: expected one loop");
+    };
+    boundary
+}
+
+#[test]
+fn loop_review_return_inside_operand_does_not_reach_the_join() {
+    let rv = run_with_local_backend("p4_loop_review");
+    let boundary = review_loop(rv.facts().unwrap(), "return_from_operand");
+    assert_eq!(boundary["edges"].as_array().unwrap().iter().filter(|e| e["kind"] == "break").count(), 1);
+    assert_eq!(boundary["continuation"]["state"]["x"], "own");
+    assert_eq!(boundary["continuation"]["state"]["n"], "own");
+}
+
+#[test]
+fn loop_review_calls_in_break_operands_consume_their_arguments() {
+    let svg = run_with_local_backend("p4_loop_review").timeline_panel_string();
+    for (name, row) in [("x", 67), ("s", 77)] {
+        check_review_tip(&svg, &format!("{name}@L{row}:dot:loop_exit_move"),
+            &[&format!("{name} was moved before the loop ended"), &format!("after {name} is moved")],
+            &[&format!("moves {name} itself")]);
+    }
+    assert!(timeline_tooltips(&svg).iter().any(|t| t.contains("or moves value itself")));
+}
+
+#[test]
+fn loop_review_checked_only_backedge_has_no_next_iteration() {
+    let rv = run_with_local_backend("p4_loop_review");
+    let boundary = review_loop(rv.facts().unwrap(), "imaginary_backedge");
+    let edges = boundary["edges"].as_array().unwrap();
+    assert!(edges.iter().any(|e| e["kind"] == "backedge" && e["runs"] == false));
+    assert!(edges.iter().any(|e| e["kind"] == "break" && e["runs"] == true));
+    assert!(boundary["next_iteration"].is_null());
+}
+
+#[test]
+fn loop_review_constant_switch_takes_only_its_matching_edge() {
+    let rv = run_with_local_backend("p4_loop_review");
+    let boundary = review_loop(rv.facts().unwrap(), "constant_condition");
+    let edges = boundary["edges"].as_array().unwrap();
+    assert!(edges.iter().any(|e| e["kind"] == "backedge" && e["runs"] == false));
+    assert!(edges.iter().any(|e| e["kind"] == "exhaustion" && e["runs"] == true));
+    assert!(boundary["next_iteration"].is_null());
+}
+
+#[test]
+fn loop_review_shared_continuation_reads_state_after_cleanup() {
+    let rv = run_with_local_backend("p4_loop_review");
+    let boundary = review_loop(rv.facts().unwrap(), "cleanup_before_continuation");
+    let edges = boundary["edges"].as_array().unwrap();
+    assert_eq!(edges.iter().filter(|e| e["kind"] == "break" && e["runs"] == true).count(), 3);
+    assert!(edges.iter().any(|e| e["state"]["parts"]["pair"]["moved"] == serde_json::json!(["pair.0"])
+        && e["state"]["lent"]["text"].is_array() && e["state"]["holds"]["guard"].is_array()));
+    let after = &boundary["continuation"];
+    assert_eq!(after["state"]["text"], "own");
+    assert!(after["lent"]["text"].is_null(), "{after:#}");
+    for field in ["state", "parts", "cause", "lent", "holds"] {
+        let values = after[field].as_object().unwrap();
+        assert!(values.keys().all(|key| !["pair", "guard"].iter().any(|name| key == name || key.starts_with(&format!("{name}.")))),
+            "{field}: {values:#?}");
+    }
 }

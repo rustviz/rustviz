@@ -5115,7 +5115,7 @@ pub fn event_dot_init_drops_earlier_iteration(my_name: &String) -> String {
 // branch above moved it on some paths, #1012), `Some(by_cond)` (see
 // `moved_above`): after the loop s holds one if the loop assigned it or
 // if nothing moved it before.
-pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>, before_loop: Option<bool>) -> String {
+pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, reassigned: Option<bool>, before_loop: Option<bool>, prior_assignment: bool) -> String {
     let my_name_fmt = styled_name_html(my_name);
     let mut out = format!(
         "{0} may have no value after the loop: {2}the loop may end before assigning it, so it can't be \
@@ -5124,15 +5124,17 @@ pub fn event_dot_loop_maybe_init(my_name: &String, value: bool, mutable: bool, r
         if mutable { " (until it's assigned again)" } else { "" },
         match before_loop {
             Some(by_cond) => format!("{} may have moved it, and ", moved_above_maybe(by_cond)),
+            None if prior_assignment => "it may have been left unassigned before the loop, and ".to_owned(),
             None => String::new(),
         }
     );
     if !value {
-        out.push_str(&format!(
-            " If the loop assigned it{1}, its resource is dropped {0}.",
-            drop_time(&my_name_fmt, reassigned),
-            or_not_moved_above(before_loop)
-        ));
+        let condition = if prior_assignment {
+            "it holds a resource after the loop".to_owned()
+        } else {
+            format!("the loop assigned it{}", or_not_moved_above(before_loop))
+        };
+        out.push_str(&format!(" If {condition}, its resource is dropped {}.", drop_time(&my_name_fmt, reassigned)));
     }
     out
 }
@@ -5670,11 +5672,18 @@ pub fn event_dot_branch_merge_maybe_init_unchanged(my_name: &String, temp: bool)
 // `labeled_block`: the same at the end of a labeled block (`'a: { …
 // break 'a; … }`). `carried`: a `break` before the move moves it itself
 // (`break s`, #1504).
-pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block: bool, carried: bool) -> String {
+pub fn event_dot_loop_partial_move(my_name: &str) -> String {
+    let name = styled_name_html(my_name);
+    format!("Part of {name} may have been moved out, so {name} can't be used as a whole after the loop")
+}
+
+pub fn event_dot_loop_exit_move(my_name: &String, definite: bool, labeled_block: bool, carried: bool, only_breaks: bool) -> String {
     let name = styled_name_html(my_name);
     let brk = styled_name_html(&"break".to_owned());
     let what = if labeled_block { "block" } else { "loop" };
-    if definite && carried {
+    if definite && !labeled_block && !only_breaks {
+        format!("{name} was moved on every path that reaches the code after the loop, so {name} can't be used there")
+    } else if definite && carried {
         let end = if labeled_block { format!(", and its end comes after {} is moved", name) } else { String::new() };
         format!(
             "{0} is moved by the time the {2} ends: each {1} out of it either comes after {0} is moved or moves {0} itself{3}, \
@@ -7352,8 +7361,13 @@ pub const UNREACHED_TRANSFER: &str = "Rust checks this transfer assuming the pre
 // body, a `while let` binding), which every pass that gets there
 // makes anew. `at_most_once`: every pass leaves the loop (#1467), so it
 // never runs more than once, but a `while` / `for` may not run at all.
-pub fn approx_note_loop(declares: bool, at_most_once: bool) -> String {
-    if at_most_once {
+pub fn approx_note_loop(declares: bool, at_most_once: bool, constant_pruned_backedge: bool) -> String {
+    if at_most_once && constant_pruned_backedge {
+        let fresh = if declares { " The variables declared inside it are new on each pass." } else { "" };
+        format!("(RustViz draws one pass through this loop. Its body runs at most once.{fresh})")
+    } else if at_most_once && declares {
+        "(RustViz draws one pass through this loop, which may not run at all. The variables declared inside it are new on each pass.)".to_owned()
+    } else if at_most_once {
         "(RustViz draws one pass through this loop, which may not run at all.)".to_owned()
     } else if declares {
         "(RustViz draws one pass through this loop, which may run many times; the variables declared inside it are new on each pass.)".to_owned()

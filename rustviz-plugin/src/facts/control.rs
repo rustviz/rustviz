@@ -608,9 +608,14 @@ pub(super) struct LoopBoundary {
 pub(super) struct LoopExit {
     pub jump: HirId,
     pub exhaustion: bool,
+    /// Incoming edge, before any shared drop chain.
     pub from: Location,
     pub to: Location,
+    /// The edge into the continuation, after loop-scope cleanup.
+    pub last: Location,
     pub continuation: Location,
+    /// The final store or call supplying this break's result.
+    pub result: Option<Location>,
 }
 
 pub(super) fn loop_boundaries(tcx: TyCtxt<'_>, body: &Body<'_>, checked: &BTreeSet<BasicBlock>) -> Vec<LoopBoundary> {
@@ -622,6 +627,9 @@ pub(super) fn loop_boundaries(tcx: TyCtxt<'_>, body: &Body<'_>, checked: &BTreeS
         loops: BTreeMap<Span, Option<HirId>>,
         jumps: FxIndexMap<HirId, (HirId, bool)>,
         anchors: BTreeMap<Span, Option<HirId>>,
+        // Compiler spans of control transfers that can interrupt a break
+        // operand. The MIR lint root can be outside the operand.
+        transfers: Vec<(Span, HirId)>,
     }
 
     impl<'hir> Visitor<'hir> for Constructs {
@@ -631,6 +639,7 @@ pub(super) fn loop_boundaries(tcx: TyCtxt<'_>, body: &Body<'_>, checked: &BTreeS
                     self.loops.entry(expr.span).and_modify(|id| *id = None).or_insert(Some(expr.hir_id));
                 }
                 ExprKind::Break(dest, value) => {
+                    self.transfers.push((expr.span, expr.hir_id));
                     if let Ok(target) = dest.target_id {
                         let exhaustion = matches!(expr.span.desugaring_kind(),
                             Some(DesugaringKind::ForLoop | DesugaringKind::WhileLoop));
@@ -642,6 +651,9 @@ pub(super) fn loop_boundaries(tcx: TyCtxt<'_>, body: &Body<'_>, checked: &BTreeS
                         }
                     }
                 }
+                ExprKind::Ret(_) | ExprKind::Continue(_) | ExprKind::Become(_) => {
+                    self.transfers.push((expr.span, expr.hir_id));
+                }
                 _ => {}
             }
             intravisit::walk_expr(self, expr);
@@ -652,6 +664,11 @@ pub(super) fn loop_boundaries(tcx: TyCtxt<'_>, body: &Body<'_>, checked: &BTreeS
     constructs.visit_body(tcx.hir_body_owned_by(body.source.def_id().expect_local()));
     if constructs.loops.is_empty() { return Vec::new(); }
 
+    let interrupted = |jump, span| {
+        let outer = tcx.hir_span(jump);
+        constructs.transfers.iter().any(|&(inner, other)| other != jump
+            && outer.contains(inner) && inner.contains(span))
+    };
     let mut anchors = FxIndexMap::<HirId, BTreeSet<Location>>::default();
     for (bb, data) in body.basic_blocks.iter_enumerated().filter(|(_, data)| !data.is_cleanup) {
         for (index, info) in data.statements.iter().enumerate().filter_map(|(i, s)|
@@ -666,7 +683,7 @@ pub(super) fn loop_boundaries(tcx: TyCtxt<'_>, body: &Body<'_>, checked: &BTreeS
             let jump = constructs.anchors.get(&info.span).copied().flatten()
                 .or_else(|| std::iter::once(id).chain(tcx.hir_parent_id_iter(id))
                     .find(|id| constructs.jumps.contains_key(id)));
-            if let Some(jump) = jump {
+            if let Some(jump) = jump.filter(|&jump| !interrupted(jump, info.span)) {
                 anchors.entry(jump).or_default().insert(at);
             }
         }
@@ -686,12 +703,12 @@ pub(super) fn loop_boundaries(tcx: TyCtxt<'_>, body: &Body<'_>, checked: &BTreeS
             let Some(sites) = anchors.get(&jump) else { continue; };
             for &site in sites {
                 if !checked.contains(&site.block) || !doms.dominates(head, site.block) { continue; }
-                if let Some((from, to, continuation)) = loop_exit(body, head, site, sites, span) {
-                    exits.push(LoopExit { jump, exhaustion, from, to, continuation });
+                if let Some(exit) = loop_exit(body, head, site, sites, span, jump, exhaustion, |span| interrupted(jump, span)) {
+                    exits.push(exit);
                 }
             }
         }
-        exits.sort_unstable_by_key(|e| (e.from, e.to, e.jump.local_id, e.continuation));
+        exits.sort_unstable_by_key(|e| (e.from, e.to, e.jump.local_id, e.last, e.continuation, e.result));
         exits.dedup();
         Some(LoopBoundary { id, head: body.terminator_loc(head), entries, backedges, exits })
     }).collect()
@@ -699,19 +716,26 @@ pub(super) fn loop_boundaries(tcx: TyCtxt<'_>, body: &Body<'_>, checked: &BTreeS
 
 /// Walk the normal jump and its scope cleanup to the first instruction
 /// after this exit. SimplifyCfg can fold the continuation into the last
-/// cleanup block. Stop at a shared target to preserve the incoming edge.
+/// cleanup block. Keep the incoming edge and the last location after
+/// loop-scope cleanup for their respective snapshots.
 fn loop_exit(
     body: &Body<'_>, head: BasicBlock, anchor: Location, anchors: &BTreeSet<Location>, span: rustc_span::Span,
-) -> Option<(Location, Location, Location)> {
+    jump: HirId, exhaustion: bool, interrupted: impl Fn(rustc_span::Span) -> bool,
+) -> Option<LoopExit> {
     let mut from = anchor;
     let mut incoming = None;
+    let mut result = None;
     let mut seen = BTreeSet::new();
     while seen.insert(from) {
+        if interrupted(body.source_info(from).span) { return None; }
         let data = &body[from.block];
         let next = if let Some(stmt) = data.statements.get(from.statement_index) {
             let cleanup = matches!(stmt.kind, StatementKind::StorageDead(_))
                 && span.contains(stmt.source_info.span);
-            if !cleanup && !anchors.contains(&from) { return None; }
+            if !cleanup {
+                if !anchors.contains(&from) { return None; }
+                result = Some(from);
+            }
             from.successor_within_block()
         } else {
             let term = data.terminator();
@@ -719,7 +743,10 @@ fn loop_exit(
                 TerminatorKind::Goto { target } if anchors.contains(&from)
                     || term.source_info.span.is_dummy() || span.contains(term.source_info.span) => target,
                 TerminatorKind::Drop { target, .. } if span.contains(term.source_info.span) => target,
-                TerminatorKind::Call { target: Some(target), .. } if anchors.contains(&from) => target,
+                TerminatorKind::Call { target: Some(target), .. } if anchors.contains(&from) => {
+                    result = Some(from);
+                    target
+                }
                 _ => return None,
             };
             if target == head { return None; }
@@ -730,8 +757,8 @@ fn loop_exit(
         };
         let info = body.source_info(next);
         if !info.span.is_dummy() && !span.contains(info.span) && !anchors.contains(&next) {
-            let (from, to) = incoming.unwrap_or((from, next));
-            return Some((from, to, next));
+            let (edge_from, to) = incoming.unwrap_or((from, next));
+            return Some(LoopExit { jump, exhaustion, from: edge_from, to, last: from, continuation: next, result });
         }
         from = next;
     }
