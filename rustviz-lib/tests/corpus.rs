@@ -13914,9 +13914,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b is no longer immutably borrowed",
             "Return immutably borrowed value from a to x",
             "Return immutably borrowed value from b to a",
-            "the value c points to is immutably borrowed by println!",
+            "the value *c points to is immutably borrowed by println!",
         ],
         must_not_contain: &[
+            "the value c points to is immutably borrowed by println!",
             "the value a points to is immutably borrowed by b",
             "the value b points to is immutably borrowed by c",
             "b no longer borrows the value a points to",
@@ -14041,9 +14042,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Return immutably borrowed value from a to x",
             "Return immutably borrowed value from b to a",
             "the value a points to is immutably borrowed by println!",
-            "the value b points to is immutably borrowed by println!",
+            "the value *b points to is immutably borrowed by println!",
         ],
         must_not_contain: &[
+            "the value b points to is immutably borrowed by println!",
             "the value a points to is immutably borrowed by b",
             "the value b points to is immutably borrowed by c",
             "b no longer borrows the value a points to",
@@ -41050,11 +41052,11 @@ fn one_line_else_finishes_the_loan_after_it_begins_1572() {
 #[test]
 fn same_line_repoint_reads_each_loan_in_turn_1668() {
     assert_drawn_sequence("rv3_issues/1668_repoint_read_oneline", "r", "6",
-        &["len reads from r", "r's immutable borrow ends", "r immutably borrows a resource", "is_empty reads from r", "r's immutable borrow ends"]);
+        &["len reads from r", "r's immutable borrow of a ends", "r immutably borrows a resource", "is_empty reads from r", "r's immutable borrow of b ends"]);
     // Both calls have the same receiver and callee. rustc emits a different
     // receiver reborrow for each side of the assignment.
     assert_drawn_sequence("repoint_between_identical_calls_1668", "r", "5",
-        &["len reads from r", "r's immutable borrow ends", "r immutably borrows a resource", "len reads from r", "r's immutable borrow ends"]);
+        &["len reads from r", "r's immutable borrow of a ends", "r immutably borrows a resource", "len reads from r", "r's immutable borrow of b ends"]);
 }
 
 #[test]
@@ -41413,4 +41415,254 @@ fn join_review_scope_end_uses_current_binding() {
     let svg = run_with_local_backend("or_pattern_join_review").timeline_panel_string();
     check_review_tip(&svg, "t@L26:dot:", &["t.1 and t.2 were moved out earlier"], &["only t.1 is dropped"]);
     check_review_tip(&svg, "t@L31:dot:", &["only t.1 is dropped"], &["t.1 and t.2 were moved out earlier"]);
+}
+
+/// Both assignments replace the same old reference. The borrow checker
+/// permits a mutable borrow of its lender before either assignment runs.
+fn assert_end_before_repoint_arms(name: &str, lender: &str, last_use: &str, next: &str) {
+    let rv = render_cell(name).unwrap();
+    let tl = rv.timeline_panel_string();
+    let y = code_row_y(&rv.code_panel_string(), last_use);
+    let x = first_dot(&tl, &format!("{lender}'s resource is immutably borrowed by r")).0;
+    let dots = dots_listing_tooltip(&tl, &format!("{lender}'s resource is no longer immutably borrowed"));
+    let [(end_x, end_y)] = dots.as_slice() else { panic!("{name}: expected one give-back, got {dots:?}") };
+    assert_eq!(*end_x, x, "{name}: the old loan ends on the parent column");
+    // A borrow and its give-back can occupy distinct stacked rows of
+    // the same source line. Both precede the following source line.
+    assert!((y..code_row_y(&rv.code_panel_string(), next)).contains(end_y), "{name}: end at {end_y}");
+}
+
+#[test]
+fn unused_loan_ends_before_either_repoint_1658() {
+    assert_end_before_repoint_arms("rv3_issues/1658_repoint_both_arms_dead_old", "a", "let mut r = &a;", "if c {");
+}
+
+/// On the later return, rustc stops counting both possible loans of b
+/// held by r. The continuing arm still reads r on the next statement.
+#[test]
+fn replacement_loan_ends_on_the_early_return_path_1658() {
+    let svg = render_cell("rv3_issues/1658_repoint_both_arms_dead_old").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let x = |id: &str| {
+        let dot = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))
+            .unwrap_or_else(|| panic!("missing {id}"));
+        dot.attribute("cx").unwrap().parse::<f64>().unwrap()
+    };
+    assert!(x("r@L11:dot:static_die") < x("r@L11:dot:branch"));
+}
+
+#[test]
+fn condition_loan_ends_before_either_push_1741() {
+    let name = "rv3_issues/1741_cond_last_use_then_repoint_all_paths";
+    assert_end_before_repoint_arms(name, "s", "if r.is_empty() {", "s.push('y');");
+    let svg = render_cell(name).unwrap().timeline_panel_string();
+    for rows in ["4-5", "5-6"] {
+        let id = format!("s@L{rows}:branch_line:full_privilege");
+        let title = tooltip_of_id(&svg, &format!("{id}\"")).unwrap_or_else(|| panic!("missing {id}"));
+        assert!(title.contains("is the owner of the resource"), "{id}: {title}");
+    }
+}
+
+#[test]
+fn inline_match_lends_the_reference_on_the_scrutinee_row_1638() {
+    let rv = render_cell("known_bugs/1638_borrow_ref_scrutinee").unwrap();
+    let tl = rv.timeline_panel_string();
+    for (source, lend) in [
+        ("match &mut r {", "r is mutably borrowed by s;"),
+        ("match &r {", "r is immutably borrowed by shared;"),
+        ("match &mut h.r {", "h.r is mutably borrowed by field;"),
+    ] {
+        let y = code_row_y(&rv.code_panel_string(), source);
+        let dots = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(lend)));
+        assert_eq!(dots.iter().map(|p| p.1).collect::<Vec<_>>(), [y], "{source}");
+    }
+    let tips = timeline_tooltips(&tl);
+    for (want, wrong) in [
+        ("the value at **s is modified", "the value s points to is modified through *s"),
+        ("**shared's value is copied", "*shared's value is copied"),
+        ("the value at **field is modified", "the value field points to is modified through *field"),
+    ] {
+        assert!(tips.iter().any(|t| t == want), "missing {want}");
+        assert!(!tips.iter().any(|t| t.starts_with(wrong)), "unexpected {wrong}");
+    }
+    assert!(!timeline_tooltips(&tl).iter().any(|l| l == "Move from r to s"));
+}
+
+/// The successful pattern moves its mutable reference into x. On the
+/// failed path k2 releases the loan. The holder is already moved on the
+/// successful path, so the join cannot give back its borrow on both.
+#[test]
+fn nested_pattern_returns_from_its_live_holder_1392() {
+    let svg = render_cell("one_line_join_below_1392").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let x = |id: &str| {
+        let dot = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))
+            .unwrap_or_else(|| panic!("missing {id}"));
+        dot.attribute("cx").unwrap().parse::<f64>().unwrap()
+    };
+    let join_x = x("k2@L34:dot:branch_join");
+    assert!(x("k2@L34:dot:mutable_die") > join_x);
+    // Follow the failed arm's diagonal towards the join. No move
+    // executes on this edge, even though the joined state is partial.
+    let right = doc.descendants().filter(|n| n.attribute("data-rv-id").is_some_and(|id|
+        id.starts_with("k2@L34:branch_line:")) && n.attribute("x1").and_then(|v| v.parse::<f64>().ok()).is_some_and(|x| x > join_x + 5.0)
+        && n.attribute("x2").and_then(|v| v.parse::<f64>().ok()).is_some_and(|x| (x - join_x).abs() < 3.0))
+        .map(|n| tooltip_of_id(&svg, n.attribute("data-rv-id").unwrap()).unwrap()).collect::<Vec<_>>();
+    assert!(!right.is_empty());
+    assert!(right.iter().all(|t| t.contains("k2 owns a value that can hold references")
+        && !t.contains("Part of k2 was moved out")), "{right:?}");
+    assert!(tooltip_of_id(&svg, "k2@L34:dot:branch_join").unwrap().contains("moved in at least one branch"));
+}
+
+#[test]
+fn review_stored_loans_at_arm_entry() {
+    let svg = render_cell("stored_borrow_end_in_arms_997").unwrap().timeline_panel_string();
+    for (lender, interval) in [("t", "52-53"), ("a", "83-84")] {
+        let prefix = format!("{lender}@L{interval}:branch_line:");
+        let title = tooltip_of_id(&svg, &prefix).unwrap();
+        assert!(!title.contains("being shared by one or more variables"), "{prefix}: {title}");
+        assert!(title.contains("is the owner of the resource"), "{prefix}: {title}");
+    }
+}
+
+#[test]
+fn review_match_reference_slot_access() {
+    for (fixture, want, wrong) in [
+        ("1638_match_mut_ref_of_ref_var", "the value at **s is modified", "the value s points to is modified through *s"),
+        ("1638_match_mut_ref_of_ref_var_b", "the value *s points to is immutably borrowed by println!", "the value s points to is immutably borrowed by println!"),
+    ] {
+        let svg = render_cell(&format!("rv3_issues/{fixture}")).unwrap().timeline_panel_string();
+        let tip = tooltip_of_id(&svg, "s@L5:dot:").unwrap();
+        assert!(!tip.contains(wrong) && tip.contains(want), "{fixture}: {tip}");
+    }
+}
+
+#[test]
+fn review_reference_slot_still_holds_a_mutable_reference() {
+    for (fixture, col, rows) in [("shared_borrow_of_ref_var_925", "m", "17-18"),
+        ("rv3_issues/1810_deref_deref_mut_ref", "r", "6-7")] {
+        let svg = render_cell(fixture).unwrap().timeline_panel_string();
+        let title = tooltip_of_id(&svg, &format!("{col}@L{rows}:line:")).unwrap();
+        assert_ne!(title, format!("{col} is immutably borrowed and is read-only while the borrow is live"));
+        assert!(title.contains("holds a mutable reference") && title.contains("read-only while the borrow is live"), "{title}");
+    }
+}
+
+#[test]
+fn review_named_sequential_field_ends() {
+    let svg = render_cell("rv3_issues/1718_field_two_writes_one_line").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let dots = doc.descendants().filter_map(|n| n.attribute("data-rv-id")).filter(|id| id.starts_with("h.r@L6:dot:"))
+        .map(|id| tooltip_of_id(&svg, &format!("{id}\"")).unwrap()).collect::<Vec<_>>().join(" ");
+    assert!(!dots.contains("borrow of u or t ends") && !dots.contains("borrow of t or u ends"), "{dots}");
+    let y = |title: &str| {
+        let xy = dots_listing_tooltip(&svg, title);
+        assert_eq!(xy.len(), 1, "{title}: {xy:?}");
+        xy[0].1
+    };
+    let borrows = dots_listing_tooltip(&svg, "h.r immutably borrows a resource");
+    let t = y("h.r's immutable borrow of t ends");
+    let u = y("h.r's immutable borrow of u ends");
+    assert!(borrows.iter().any(|&(_, row)| t < row && row < u), "{dots}");
+}
+
+#[test]
+fn review_named_repoint_ends_in_one_arm() {
+    let svg = render_cell("rv3_issues/1722_repoint_arm_read_other_then_reassign").unwrap().timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    for lender in ["s", "t"] {
+        assert!(dots_listing_tooltip(&svg, &format!("r's immutable borrow of {lender} ends")).len() >= 1, "{lender}: {tips:?}");
+    }
+    for id in ["r@L4:dot:static_die+static_borrow", "r@L4:dot:static_die"] {
+        let tip = tooltip_of_id(&svg, &format!("{id}\"")).unwrap();
+        assert!(!tip.contains("r's immutable borrow ends"), "{id}: {tip}");
+    }
+}
+
+#[test]
+fn review_skipped_constructor_does_not_return_a_loan() {
+    let svg = render_cell("rv3_issues/1750_if_arms_mixed_kinds").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let split = doc.descendants().find(|n| n.attribute("data-rv-id") == Some("b@L6:dot:branch")).unwrap();
+    let x = split.attribute("cx").unwrap().parse::<f64>().unwrap();
+    let dots = dots_listing_tooltip(&svg, "b's value is no longer mutably borrowed");
+    assert_eq!(dots.iter().filter(|p| p.0 < x).count(), 1, "{dots:?}");
+    assert!(dots.iter().all(|p| p.0 < x), "failed arm returned a loan: {dots:?}");
+    assert!(doc.descendants().any(|n| n.attribute("data-rv-id").is_some_and(|id| id.starts_with("b@L6:branch_line:"))
+        && n.attribute("x1").and_then(|v| v.parse::<f64>().ok()).is_some_and(|a| a < x)
+        && n.attribute("data-tooltip-text").is_some_and(|t| t.contains("holds a copyable value"))
+        && n.attribute("y1").and_then(|v| v.parse::<f64>().ok()).is_some_and(|y| y >= dots[0].1)), "lost b's outgoing copyable state");
+}
+
+#[test]
+fn review_nested_chain_keeps_owner_at_join() {
+    let svg = render_cell("known_bugs/1686_nested_chain").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let join = doc.descendants().find(|n| n.attribute("data-rv-id") == Some("v@L10:dot:branch_join")).unwrap();
+    let x = join.attribute("cx").unwrap().parse::<f64>().unwrap();
+    let titles = doc.descendants().filter(|n| n.attribute("data-rv-id").is_some_and(|id| id.starts_with("v@L10:branch_line:"))
+        && n.attribute("x1").and_then(|a| a.parse::<f64>().ok()).is_some_and(|a| a > x + 5.)
+        && n.attribute("x2").and_then(|a| a.parse::<f64>().ok()).is_some_and(|a| (a - x).abs() < 3.))
+        .map(|n| tooltip_of_id(&svg, n.attribute("data-rv-id").unwrap()).unwrap()).collect::<Vec<_>>();
+    assert!(!titles.is_empty() && titles.iter().all(|t| t.contains("v is the owner of the resource")), "{titles:?}");
+}
+
+/// The call writes directly to r on its normal return. Only one successor
+/// overwrites it before the join, so both definitions reach the last write.
+#[test]
+fn review_call_return_reaches_a_joined_overwrite() {
+    let rv = run_with_local_backend("rv3_reaching_call");
+    let body = fact_body(rv.facts().expect("missing borrowck facts"), "example");
+    let loans = [fact_loan(body, 4, "a")["loan"].clone(), fact_loan(body, 6, "b")["loan"].clone()];
+    let write = row_facts(body, 9).into_iter().find(|e| e["ev"] == "Repoint" && e["holder"] == "r").unwrap();
+    assert_eq!(write["reaching"], serde_json::json!(loans));
+}
+
+#[test]
+fn review_end_before_a_fork_on_the_same_row() {
+    let svg = render_cell("rv3_issues/1586_repoint_after_if_cond_read").unwrap().timeline_panel_string();
+    let title = tooltip_of_id(&svg, "s@L3:dot:").unwrap();
+    let end = title.find("s's resource is no longer immutably borrowed").unwrap();
+    let fork = title.find("s is live in a conditional expression").unwrap();
+    assert!(end < fork, "{title}");
+}
+
+#[test]
+fn review_let_else_distinguishes_two_loans_of_the_same_lender() {
+    let svg = render_cell("rv3_issues/1686_c_let_else_unused_index_borrow").unwrap().timeline_panel_string();
+    let title = tooltip_of_id(&svg, "v@L4:dot:").unwrap();
+    let ends = title.match_indices("v's resource is no longer immutably borrowed").map(|(i, _)| i).collect::<Vec<_>>();
+    let borrow = title.find("v's resource is immutably borrowed by r").unwrap();
+    assert!(matches!(ends.as_slice(), [scrutinee, indexed] if *scrutinee < borrow && borrow < *indexed), "{title}");
+}
+
+#[test]
+fn review_let_else_returns_from_both_nested_arms() {
+    let svg = render_cell("rv3_let_else_nested_ends").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let x = |id| doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))
+        .and_then(|n| n.attribute("cx")).and_then(|c| c.parse::<f64>().ok()).unwrap();
+    let fork = x("v@L4:dot:branch");
+    assert!(x("v@L5:dot:static_reacquire") < fork);
+    assert!(x("v@L9:dot:static_reacquire") > fork);
+    assert!(doc.descendants().all(|n| !n.attribute("data-rv-id").is_some_and(|id| id.starts_with("p>v@L10:arrow:"))));
+}
+
+#[test]
+fn review_replaced_value_does_not_return_from_its_old_slot() {
+    let svg = render_cell("rv3_issues/1742_copy_chain_over_four_c").unwrap().timeline_panel_string();
+    // The slot was overwritten before the print. rustc nevertheless
+    // rejects a write to b before that print with E0502.
+    assert!(tooltip_of_id(&svg, "x>b@L6:arrow:").is_none());
+    assert!(tooltip_of_id(&svg, "b@L6:dot:").is_some_and(|t| t.contains("no longer immutably borrowed")));
+    assert!(tooltip_of_id(&svg, "b@L5-6:line:").is_some_and(|t| t.contains("being shared")));
+}
+
+
+#[test]
+fn review_replacing_a_literal_ends_its_slot_value_at_the_store() {
+    let svg = render_cell("field_two_lenders_siblings_1354").unwrap().timeline_panel_string();
+    let tip = "o.a's borrow of the string literal ends";
+    assert!(tooltip_of_id(&svg, "o.a>o.a@L41:arrow:static_die").is_some_and(|t| t.contains(tip)));
+    assert!(tooltip_of_id(&svg, "o.a>o.a@L42:arrow:static_die").is_none());
 }

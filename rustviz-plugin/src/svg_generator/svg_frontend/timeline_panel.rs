@@ -2735,7 +2735,7 @@ fn render_dot(
                         data.title = title;
                     } else if let Some(title) = field_lenders_dot_title(event, &name, visualization_data) {
                         data.title = title;
-                    } else if let Some(title) = ends_several_loans_title(event, history, *line_number, &mut name, &visualization_data.row_layout) {
+                    } else if let Some(title) = ends_several_loans_title(event, history, *line_number, &mut name, visualization_data, rap) {
                         data.title = title;
                     } else if let Some(title) = part_lend_title(event, visualization_data) {
                         data.title = title;
@@ -2976,9 +2976,32 @@ fn field_lenders_dot_title(event: &Event, name: &String, vd: &VisualizationData)
 // text between, so it names each lender. Ends listed together (a
 // reference that borrows from two lenders, `longest(&a, &b)`) already
 // read as one sentence, and a lone end keeps its plain wording.
-fn ends_several_loans_title(event: &Event, history: &[(usize, Event)], line: usize, name: &mut String, layout: &crate::event_order::RowLayout) -> Option<String> {
+fn ends_several_loans_title(event: &Event, history: &[(usize, Event)], line: usize, name: &mut String, vd: &VisualizationData, rap: &ResourceAccessPoint) -> Option<String> {
     let mine = event.borrow_end_lender_name()?;
     let is_mut = matches!(event, Event::MutableDie { .. });
+    let table = &vd.state_table;
+    let identified = |e: &Event| {
+        let lender = e.borrow_end_lender_name()?;
+        let ids = table.end_loans.get(&e.get_id())?;
+        let fn_line = *vd.fn_source_lines.get(rap.hash())?;
+        let mut matching = ids.iter().filter(|id| table.loan(fn_line, rap.name(), **id).is_some_and(|l| l.lender == lender));
+        let id = *matching.next()?;
+        matching.next().is_none().then_some(id)
+    };
+    if let Some(id) = identified(event) {
+        let src = rv_attrs::line_of(line, &vd.row_lines);
+        let on_row = |l| src.is_some() && rv_attrs::line_of(l, &vd.row_lines) == src;
+        // A field returned by a call may represent alternative lenders.
+        // Only separate its names when the stores themselves are ordered.
+        let alternatives = history.iter().any(|(l, e)| on_row(*l) && vd.field_lenders.contains_key(&e.get_id()));
+        if (!alternatives || table.store_order.contains_key(&event.get_id()))
+            && history.iter().any(|(l,e)| on_row(*l) && matches!(e, Event::StaticBorrow { .. } | Event::MutableBorrow { .. }))
+            && history.iter().any(|(l,e)| on_row(*l) && identified(e).is_some_and(|other| other != id)
+                && e.borrow_end_lender_name().as_ref() != Some(&mine))
+        {
+            return event.borrow_end_naming_lender(name);
+        }
+    }
     let row: Vec<&Event> = history.iter().filter(|(l, _)| *l == line).map(|(_, e)| e).collect();
     let mut ends = row.iter().enumerate().filter(|(_, e)| e.borrow_end_lender_name().is_some());
     let me = row.iter().position(|e| std::ptr::eq(*e, event))?;
@@ -2987,7 +3010,7 @@ fn ends_several_loans_title(event: &Event, history: &[(usize, Event)], line: usi
             && matches!(e, Event::MutableDie { .. }) == is_mut
             && e.borrow_end_lender_name().is_some_and(|other| other != mine)
             // Something else on the dot between the two ends.
-            && (layout.name_lender(event.get_id()) || row[j.min(me)..=j.max(me)].iter().any(|x| x.borrow_end_lender_name().is_none()))
+            && (vd.row_layout.name_lender(event.get_id()) || row[j.min(me)..=j.max(me)].iter().any(|x| x.borrow_end_lender_name().is_none()))
     });
     if repeated { event.borrow_end_naming_lender(name) } else { None }
 }
@@ -5520,6 +5543,7 @@ fn render_hopping_arrow(
     rv: &str,
     dot_positions: &DotPositions,
     head_offset: f64,
+    legs: &[Piece],
 ) -> Option<(String, Vec<Piece>, Vec<(f64, f64)>, Vec<(f64, f64)>)> {
     let (lo_x, hi_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
 
@@ -5592,18 +5616,37 @@ fn render_hopping_arrow(
         }));
         at = far;
     }
-    d.push_str(&format!(" L {} {}", end_x_pulled, y_f));
-    pieces.push(((at, y_f), (end_x_pulled, y_f)));
-
-    // Inline arrow head triangle, same geometry the polyline path
-    // computes after its `head_offset` pullback. Direction at the
-    // endpoint is purely horizontal (head_dir = ±1), so the
-    // perpendicular base sits ±6 vertically and the tip extends
-    // 12.75 horizontally in the head direction.
-    let tip_x = end_x_pulled + 12.75 * head_dir;
-    let v1 = (end_x_pulled, y_f - 6.0);
-    let v2 = (tip_x, y_f);
-    let v3 = (end_x_pulled, y_f + 6.0);
+    let mut base = (end_x_pulled, y_f);
+    let mut triangle = vec![(base.0, y_f - 6.0), (base.0 + 12.75 * head_dir, y_f), (base.0, y_f + 6.0)];
+    let on_leg = |triangle: &[(f64, f64)]| legs.iter().any(|&leg| {
+        let (a, b) = leg;
+        if triangle.iter().all(|p| p.0 < a.0.min(b.0) - 1.0)
+            || triangle.iter().all(|p| p.0 > a.0.max(b.0) + 1.0)
+            || triangle.iter().all(|p| p.1 < a.1.min(b.1) - 1.0)
+            || triangle.iter().all(|p| p.1 > a.1.max(b.1) + 1.0) { return false; }
+        samples(&[leg]).into_iter().filter(|&point| inside_tri(triangle, point) > -1.0).nth(6).is_some()
+    });
+    // When a borrow ends on a nested fork, a level head can hide the
+    // incoming leg. Keep the hops on their row and turn just the final
+    // part of the approach, past the last intervening dot.
+    let mut tail = (at, y_f);
+    if head_offset == 18.0 && (at - x1 as f64).abs() > 5.0 * head_offset && on_leg(&triangle) {
+        let corner = (x1 as f64 - 4.0 * head_dir * head_offset, y_f);
+        for dy in [-15.0, 15.0] {
+            let bend = (x1 as f64 - head_dir * head_offset, y_f + dy);
+            let (head, mid) = head_triangle(bend, (x1 as f64, y_f));
+            if on_leg(&head) || legs.iter().any(|&leg| shaft_on_leg((corner, bend), leg) || shaft_on_leg((bend, mid), leg)) { continue; }
+            d.push_str(&format!(" L {} {} L {} {}", corner.0, corner.1, bend.0, bend.1));
+            pieces.extend([(tail, corner), (corner, bend)]);
+            tail = bend;
+            triangle = head;
+            base = mid;
+            break;
+        }
+    }
+    d.push_str(&format!(" L {} {}", base.0, base.1));
+    pieces.push((tail, base));
+    let (v1, v2, v3) = (triangle[0], triangle[1], triangle[2]);
 
     Some((format!(
         "        <g class=\"tooltip-trigger\" data-tooltip-text=\"{title}\"{rv}>\n\
@@ -6678,7 +6721,7 @@ fn arrow_left_out(vd: &VisualizationData, ev: &ExternalEvent) -> bool {
 
 /// How many rows below its line an arrow is stacked: its place among the
 /// arrows its line map lists for `row`. An arrow the map doesn't list (a
-/// borrow's end moved into an arm, see `nest_borrow_ends_in_arms`) is drawn
+/// borrow's end placed in its arm) is drawn
 /// first on its line, and so is a return from a reference to itself.
 fn arrow_order_of(vd: &VisualizationData, row: usize, ev: &ExternalEvent) -> i64 {
     let line_map = fetch_line_map(vd, ev.get_id());
@@ -7517,6 +7560,7 @@ fn plan_variable_arrow(line_number: &usize, external_event: &ExternalEvent, from
                 &data.rv,
                 &dots.positions,
                 if x2 > x1 && head_lands_on_call_icon(&(x1 as f64, y1 as f64), dots) { head_offset + CALL_ICON_CLEARANCE } else { head_offset },
+                if matches!(external_event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) { &dots.legs } else { &[] },
             )).flatten() {
                 dots.lanes.capture(Drawn {
                     key, tip: data.title.clone(), var: data.names.0.clone(), to: data.names.1.clone(),
@@ -9015,6 +9059,26 @@ fn render_branches(
                             (branch_x, leg_top_y), (parent_x, merge_y),
                             end_state, visualization_data, &arm_label, Leg::Join, *merge_point, *merge_point, &arm_path,
                         ),
+                    }
+                    // A scrutinee temporary can give its borrow back on the
+                    // failed edge of a let-chain. Keep the dashed connector's
+                    // explanation and the owner's state once the loan ends.
+                    if let Some(seg) = segs.get_mut(n) {
+                        if matches!(seg.state, State::FullPrivilege { s: LineState::Gray })
+                            && !rap.is_ref() && !rap.holds_borrow()
+                            && branch.e_data.iter().any(|(l, e)| Some(*l) == last_dot
+                                && matches!(e, Event::StaticReacquire { from: ResourceTy::Anonymous, .. }
+                                    | Event::MutableReacquire { from: ResourceTy::Anonymous, .. })
+                                && visualization_data.state_table.end_loans.contains_key(&e.get_id()))
+                            && rv_attrs::line_of(*merge_point, &visualization_data.row_lines)
+                                .zip(visualization_data.fn_source_lines.get(rap.hash()))
+                                .and_then(|(row, f)| visualization_data.state_table.cell(*f, rap.name(), row, row))
+                                .is_some_and(|c| c.init == crate::facts::table::Init::Own && !c.may && c.lent.is_empty())
+                        {
+                            let full = State::FullPrivilege { s: LineState::Full };
+                            seg.title.push(' ');
+                            seg.title.push_str(&timeline_segment_title(&full, rap, visualization_data, None));
+                        }
                     }
                     if segs.len() > n { ended_title(&mut segs, *merge_point); }
                 }
@@ -10918,6 +10982,9 @@ fn table_lent_state_of(
     let binding_shared = own_loans.iter().any(|l| l.kind == "shared"
         && table.loan(fn_line, col, l.loan).is_some_and(|info| info.whole.contains(col)));
     if rap.is_ref() && !own_loans.is_empty() {
+        if own_loans.iter().any(|l| table.loan_arm(fn_line, col, l.loan).is_some()) {
+            return None;
+        }
         // A drawn shared lend of the reference binding itself (match &r).
         // The partial-privilege style alone can't distinguish it from &*r.
         if let [loan] = own_loans.as_slice() {
@@ -10935,14 +11002,24 @@ fn table_lent_state_of(
                 return Some((State::PartialPrivilege { s }, Some(title)));
             }
         }
+        // A shared loan of a reference slot restricts the binding itself.
+        // With a direct holder, the borrowed reference survived as a
+        // reference to the slot. A coercion through a temporary can
+        // reborrow the pointee; keep its reborrow explanation.
+        if !cell.may_lend && rap.is_mutref() && matches!(state, State::PartialPrivilege { .. })
+            && own_loans.iter().all(|l| l.kind == "shared" && of_itself(l.loan)
+                && table.loan(fn_line, col, l.loan).is_some_and(|loan| loan.holds_ref_slot))
+        {
+            let msg = format!("{0} holds a mutable reference. {0} is immutably borrowed and is read-only while the borrow is live", hover_messages::styled_name_html(rap.name()));
+            return Some((State::PartialPrivilege { s }, Some(msg)));
+        }
         // Where the table can't say it per path or 2.x's words don't fit,
         // 2.x's style stands: a loan taken in one arm of a branch on one
         // row; a shared loan of the binding or its struct (`&r`, `match &r`:
         // not "shared through it"); a unique capture of an enclosing struct;
         // or a loan through it taken before it was given another reference
         // on some path (it may point elsewhere now).
-        if own_loans.iter().any(|l| table.loan_arm(fn_line, col, l.loan).is_some())
-            || (binding_shared && reserved.is_none())
+        if (binding_shared && reserved.is_none())
             || own_loans.iter().any(|l| l.kind == "unique" && of_parent(l.loan))
         {
             return None;

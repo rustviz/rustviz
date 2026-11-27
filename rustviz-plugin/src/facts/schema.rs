@@ -36,6 +36,8 @@ pub struct BodyFacts {
     /// Standard vec! constructions that can complete on the body's normal CFG.
     #[serde(skip)]
     pub constructed_vecs: std::collections::HashMap<rustc_span::hygiene::ExpnId, usize>,
+    #[serde(skip)]
+    pub def_id: rustc_hir::def_id::DefId,
     /// `main`, `Foo::bar`, `main::{closure#0}`.
     pub func: String,
     /// "fn" or "closure".
@@ -53,6 +55,11 @@ pub struct BodyFacts {
     #[serde(skip)]
     pub uniform_option_refs: BTreeMap<String, bool>,
     pub loans: Vec<LoanInfo>,
+    /// Borrowck loans at MIR assignments to pattern bindings.
+    #[serde(skip)]
+    pub binding_loans: BTreeMap<rustc_middle::mir::Location, Vec<usize>>,
+    #[serde(skip)]
+    pub inline_holder_ends: Vec<(usize, Ev)>,
     pub rows: Vec<Row>,
     /// Temporaries that hold a value needing drop.
     pub temps: Vec<TempInfo>,
@@ -202,6 +209,9 @@ pub struct LoanInfo {
     pub whole: BTreeSet<String>,
     #[serde(skip)]
     pub direct_holder: Option<String>,
+    /// The direct destination keeps a reference to the borrowed reference slot.
+    #[serde(skip)]
+    pub holds_ref_slot: bool,
     #[serde(skip)]
     pub runs: bool,
     /// Conflicting columns for which the borrowed MIR place selects a field
@@ -418,7 +428,8 @@ pub enum DropRoute {
 /// A fact with its position on the row.
 #[derive(Serialize, Clone, PartialEq, Eq)]
 pub struct Ev {
-    /// Original MIR location, before the row model places the event.
+    /// MIR site used when placing this event in the drawing. On an early
+    /// exit this is the exit itself, even if its drop runs in a shared block.
     #[serde(skip)]
     pub location: rustc_middle::mir::Location,
     /// Reachability of a scope drop without traversing its early exits.
@@ -503,7 +514,15 @@ pub enum Fact {
     /// reference at its last use while the copy goes on.
     HoldEnd { loan: usize, holder: String, to_line: usize, to_col: usize },
     /// `holder` (a reference) gets a new loan while it held `old`.
-    Repoint { holder: String, old: Vec<usize>, new: Vec<usize> },
+    Repoint {
+        holder: String,
+        old: Vec<usize>,
+        new: Vec<usize>,
+        /// Loans carried by the definitions that reach this overwrite,
+        /// including a definition whose loan has already gone out of scope.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reaching: Option<Vec<usize>>,
+    },
     /// A `Drop` of `path`. `how` (what runs, as drop elaboration decides:
     /// borrowck's imaginary `else` of an irrefutable `if let` doesn't
     /// count): "drops" (it holds a value on every path), "drops_if_init"

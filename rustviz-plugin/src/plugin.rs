@@ -185,10 +185,10 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // it (`emit_borrow_ends`); it also feeds the state table and, if
   // `RV3_FACTS` asks for them, the JSON dump.
   let crate_facts = crate::facts::collect_crate(tcx, &in_target);
-  // (By the body's own path, `Foo::bar`: two fns can start on one line.)
+  let mut state_table = crate::facts::table::StateTable::from_facts(&crate_facts);
+  // MIR locations and loan ids are local to the exact body.
   let body_facts = |def_id: rustc_hir::def_id::LocalDefId| {
-    let func = tcx.def_path_str(def_id.to_def_id());
-    crate_facts.bodies.iter().find(|b| b.kind == "fn" && b.func == func)
+    crate_facts.bodies.iter().find(|b| b.def_id == def_id.to_def_id())
   };
 
   
@@ -294,13 +294,15 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             );
             visitor.facts = body_facts(local_def_id);
             visitor.visit_body(hir_body);
-            visitor.emit_borrow_ends(visitor.facts);
+            visitor.emit_borrow_ends();
             row_layout.append(&mut visitor.row_layout);
             visitor.print_out_of_scope();
             visitor.mark_temp_emptying_moves(0);
             visitor.collect_approx_notes(hir_body);
             approx_notes.append(&mut visitor.approx_notes);
             rap_hash_num = visitor.rap_hashes;
+            visitor.record_store_order(&mut state_table.store_order);
+            state_table.end_loans.append(&mut visitor.end_loans);
             binding_columns.append(&mut visitor.binding_columns);
             moves_out_first.append(&mut visitor.moves_out_first);
             temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
@@ -366,13 +368,15 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         );
         visitor.facts = body_facts(def_id);
         visitor.visit_body(hir_body);
-        visitor.emit_borrow_ends(visitor.facts);
+        visitor.emit_borrow_ends();
         row_layout.append(&mut visitor.row_layout);
         visitor.print_out_of_scope();
         visitor.mark_temp_emptying_moves(0);
         visitor.collect_approx_notes(hir_body);
         approx_notes.append(&mut visitor.approx_notes);
         rap_hash_num = visitor.rap_hashes;
+        visitor.record_store_order(&mut state_table.store_order);
+        state_table.end_loans.append(&mut visitor.end_loans);
         binding_columns.append(&mut visitor.binding_columns);
         moves_out_first.append(&mut visitor.moves_out_first);
         temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
@@ -454,7 +458,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   note_pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
   let shadow_notes: HashMap<u64, ShadowNote> = note_pairs.into_iter().map(|(h, _, n)| (h, n)).collect();
 
-  let state_table = crate::facts::table::StateTable::from_facts(&crate_facts);
   let facts = crate::facts::dump(&crate_facts);
 
   // Pass information to svg-generator

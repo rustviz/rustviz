@@ -45,9 +45,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// the ones in those directories. One entry covers every violation of
 /// that invariant in that snippet.
 pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
-    // A guard whose call stores a borrow and turns out false: the later
-    // arm's legs start where the columns have no dot.
-    ("guard_stores_borrow_1769", "line-starts-nowhere", 1786),
     // Geometric (`geometry.rs`), from here on.
     // Tuple column goes on after its fields were moved out.
     // A borrow arrow leaving an arm's dot along the fork leg, its track
@@ -76,9 +73,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
     // Programs kept from the closed 2.x fix PRs (known_bugs/README.md); each is tracked by the issue named.
     ("known_bugs/1578_match_scrutinee_ref_repointed", "invalid-state", 1578),
-    ("known_bugs/1580_repoint_later_use", "event-on-dead-column", 1580),
-    ("known_bugs/1580_repoint_later_use", "fork-without-dot", 1580),
-    ("known_bugs/1580_repoint_nested_arm_dead_loan", "arrow-along-leg", 1580),
     // The arm's own ends of r2 and r3 (rustc's: both loans end as the arm
     // starts), whose arrows the 2.x router lays along s2's leg.
     ("known_bugs/1580_repoint_nested_arm_live_loan", "arrow-along-leg", 1580),
@@ -96,7 +90,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1732_stored_loan_kinds", "arrow-along-leg", 1732),
     ("known_bugs/1732_stored_loan_kinds", "invalid-state", 1732),
     ("known_bugs/1750_mixed_arm_holder", "invalid-state", 1750),
-    ("known_bugs/1752_dead_loan_one_line", "arrow-along-leg", 1752),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "arrow-along-leg", 1823),
     ("known_bugs/1823_shared_ref_of_mut_hedge", "invalid-state", 1823),
     ("known_bugs/1823_shared_ref_of_mut_kinds", "invalid-state", 1823),

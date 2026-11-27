@@ -243,7 +243,7 @@ impl Order<'_, '_> {
                 // generations even when there is no BorrowEnd here.
                 let mut stores = row.facts.iter().filter(|f| {
                     matches!(&f.fact, Fact::Repoint {
-                    holder: path, old, new } if *path == holder && old.iter().any(|id|
+                    holder: path, old, new, .. } if *path == holder && old.iter().any(|id|
                         !new.contains(id) && self.ends.get(&ev.get_id()).is_none_or(|ids| ids.contains(id)) && self.loan(*id).is_some_and(|l| names_lender(lender,l))))
                 });
                 if let Some(store) = stores.next().filter(|_| stores.next().is_none()) {
@@ -832,7 +832,7 @@ impl Order<'_, '_> {
             .facts
             .iter()
             .filter_map(|f| match &f.fact {
-                Fact::Repoint { holder, old, new } if holder == field.name() => Some((f, old, new)),
+                Fact::Repoint { holder, old, new, .. } if holder == field.name() => Some((f, old, new)),
                 _ => None,
             })
             .filter(|(f, _, _)| {
@@ -902,7 +902,7 @@ impl Order<'_, '_> {
             .collect();
         if ended.len() > 1
             && self.facts.rows.iter().flat_map(|r| &r.facts).any(|e| {
-                matches!(&e.fact,Fact::Repoint {holder,old,new} if holder == field.name()
+                matches!(&e.fact,Fact::Repoint {holder,old,new,..} if holder == field.name()
                 && old.iter().any(|id| ended.contains(id) && !new.contains(id))
                 && new.iter().any(|id| ended.contains(id) && !old.contains(id)))
             })

@@ -2439,6 +2439,9 @@ pub fn event_dot_copy_deref_to_caller(ref_name: &String, place: &String) -> Stri
 // "value" when p points to a Copy type (#312).
 pub fn event_dot_copy_through_deref_field(ref_name: &String, place: &String, target_name: &String, pointee_copy: bool) -> String {
     let place = &displayed_place(place);
+    if place.starts_with("**") {
+        return format!("{}'s value is copied to {}", styled_name_html(place), styled_name_html(target_name));
+    }
     format!(
         "the {3} {0} points to is read through {1} (copied to {2})",
         styled_name_html(ref_name),

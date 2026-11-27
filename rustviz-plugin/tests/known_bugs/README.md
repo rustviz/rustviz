@@ -55,7 +55,7 @@ over all of these.
 | `1632_extend_field_loan.rs` | #1632 | `v.extend([&p.0])` then `p.1 = 3`: p.1 drawn "read-only while the borrow is live" while its write is drawn on the same stretch | rustc oracle, false tooltip text |
 | `1636_self_struct_update.rs` | #1636 | Struct update into the same variable (`p = Pair { a: new, ..p }`): p.a's old value isn't dropped | tooltip pins |
 | `1637_drop_holder_return.rs` | #1637 | Value with a `Drop` impl holding `&mut n`, `return` in an `if` arm: n's borrow drawn ending at the arm's first line, before the destructor uses it | rustc oracle, invariant checks, tooltip pins |
-| `1638_borrow_ref_scrutinee.rs` | #1638 | `match &mut r { s => **s += 1 }` with `r: &mut i32`: drawn "Move from r to s" and r unusable after | rustc oracle, invariant checks, false tooltip text |
+| `1638_borrow_ref_scrutinee.rs` | #1638 | The single-arm `match &mut r` lends the slot on the scrutinee row. The `if let` and `while let` rows still mishandle the slot borrow. | rustc oracle, invariant checks, false tooltip text |
 | `1638_chain_ref_scrutinee.rs` | #1638 | `match &mut r { s => **s += 1 }` with `r: &mut i32`: drawn "Move from r to s" and r unusable after | rustc oracle, invariant checks, false tooltip text |
 | `1642_projected_branch_write_chain.rs` | #1642 | Writing through a Box in both arms (`if c { *b = 1 } else { *b = 2 }`): the join says "b acquired ownership of a resource (in all branches above)" | false tooltip text |
 | `1642_projected_branch_writes.rs` | #1642 | Writing through a Box in both arms (`if c { *b = 1 } else { *b = 2 }`): the join says "b acquired ownership of a resource (in all branches above)" | rustc oracle, false tooltip text |

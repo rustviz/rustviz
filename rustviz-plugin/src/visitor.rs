@@ -1769,15 +1769,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.update_rap(rap, line_num);
     }
     let to = ResourceTy::Value(self.raps.get(&fn_key(&name)).unwrap().rap.to_owned());
+    let deep = from.extract_rap().and_then(|r| {
+      let place = self.projected_access(arg.span, r, |f| match f {
+        crate::facts::Fact::Borrow { lender, .. } => Some(lender), _ => None,
+      })?;
+      let ty = self.tcx.typeck(arg.hir_id.owner).expr_ty(arg);
+      Some(DeepPlace { derefs: place.len() - r.name().len() - 1,
+        holds_value: self.ty_is_copy(ty, arg.hir_id.owner) || self.ty_is_plain(ty, arg.hir_id.owner),
+        held_mut: None, elem: None })
+    });
     let already = self.preprocessed_events.iter().any(|(l, e)| {
       *l == line_num
-        && matches!(e, ExternalEvent::PassByStaticReference { from: f, to: t, .. }
-          if *f == from && *t == to)
+        && matches!(e, ExternalEvent::PassByStaticReference { from: f, to: t, deep: d, .. }
+          if *f == from && *t == to && d == &deep)
     });
     if !already {
       // format_args! takes `&arg`; the user didn't write the `&`.
       let id = *self.unique_id;
-      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep: None });
+      self.add_external_event(line_num, ExternalEvent::PassByStaticReference { from, to, id, implicit: ImplicitRef::MacroArg, refcell_borrow_mut: false, pointee_interior_mut: false, result_keeps_borrow: false, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(), of_ref_var: false, deep });
       *self.unique_id += 1;
     }
   }
@@ -4116,13 +4125,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// (Without, an exit in the arm still emits a scope end for the
   /// scrutinee, whose dot says from the column's state that nothing is
   /// dropped.)
-  fn owns_value_here(&self, hash: u64, binds: bool) -> bool {
-    self.ownership_here(hash, binds) == OwnHere::Yes
-  }
-
-  /// `owns_value_here`, telling a variable that holds no value on any
-  /// path (`No`) from one that holds one on some paths only (`Maybe`:
-  /// its drop flag decides whether an exit here drops it, #1194).
+  ///
+  /// Tells a variable that holds no value on any path (`No`) from one
+  /// that holds one on every path (`Yes`) and from one that holds one on
+  /// some paths only (`Maybe`: its drop flag decides whether an exit here
+  /// drops it, #1194).
   fn ownership_here(&self, hash: u64, binds: bool) -> OwnHere {
     use OwnHere as Own;
     fn step(events: &[(usize, ExternalEvent)], hash: u64, hide: &[std::ops::Range<usize>], mut own: Own) -> Own {
@@ -4703,7 +4710,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// before it (`emit_loop_exit_moves`). The path is the events since
   /// the body started, minus the other branches of the conditionals the
   /// `break` is in, plus their match arms' pattern bindings (as
-  /// `owns_value_here`). The branch that breaks also records its own
+  /// `ownership_here`). The branch that breaks also records its own
   /// moves (`branch_divergence`); this sees those made before it too
   /// (`loop { drop(s); if c { break; } s = …; }`, #980), and a value
   /// given back before the `break` (`drop(s); s = …; if c { break; }`).
@@ -4845,7 +4852,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// a `for`'s head) to here, in the order they happened (each match
   /// arm's pattern bindings where its body starts), and the ranges of
   /// event ids among them that aren't on the path (the other branches
-  /// of the conditionals this point is in). See `owns_value_here`.
+  /// of the conditionals this point is in). See `ownership_here`.
   fn loop_path_events(&self, loop_at: usize) -> (Vec<(usize, ExternalEvent)>, Vec<std::ops::Range<usize>>) {
     let ExitFrame::Loop { events_at, .. } = self.exit_frames[loop_at] else { return (Vec::new(), Vec::new()) };
     self.path_events_since(events_at, loop_at + 1)
@@ -5727,6 +5734,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // goes on the receiver's, as an in-place update.
         match self.resource_of_lhs(lhs_expr) {
           Some(lhs_rty @ (ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))) => {
+            let lhs_rty = match lhs_rty {
+              ResourceTy::Deref(r) => match self.projected_access(expr.span, &r, |f| match f {
+                crate::facts::Fact::Init { path, .. } => Some(path), _ => None,
+              }) {
+                Some(place) => {
+                  let ty = self.tcx.typeck(expr.hir_id.owner).expr_ty(lhs_expr);
+                  ResourceTy::DerefField(r, place, PlaceWrite::Update, self.field_holds(ty, expr.hir_id.owner))
+                }
+                None => ResourceTy::Deref(r),
+              },
+              other => other,
+            };
             self.write_field_behind_ref(&lhs_rty, lhs_expr, line_num);
             self.add_ev(line_num, Evt::Bind, lhs_rty.clone(), ResourceTy::Anonymous, false);
             self.write_part_behind_ref_update(&lhs_rty, lhs_expr, line_num);
@@ -7411,18 +7430,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
           }
 
-          // An old loan that ends before the `if` / `match` this write is
-          // in, or in its condition (`if r.is_empty() { r = &s2; }`), ends
-          // there on every path, before any arm runs:
-          // `hoist_ends_before_split` takes its ends out of the arm (#1524).
-          // (Not when r is still read in another arm: then that end isn't
-          // where the old loan ends on every path.)
-          let read_in_other_arms = |this: &Self, split: usize, merge: usize, lo: usize, hi: usize|
-            [(split + 1, lo.saturating_sub(1)), (hi + 1, merge.saturating_sub(1))]
-              .iter().any(|&(a, b)| a <= b && this.last_live_line(&me, (a, b)).is_some());
-          if self.arm_frames.last().is_some_and(|&(split, merge, lo, hi)| old_end.or(dead_before_arms).is_some_and(|e| e <= split && e < line_num)
-            && !read_in_other_arms(self, split, merge, lo, hi)) {
-            self.pre_split_end_ids.push(ends_lo..*self.unique_id);
+          // Use the defining stores of the value this assignment replaces.
+          // Its old copy can already be dead here, even though a different
+          // holder keeps the loan alive in a sibling arm.
+          let mut old = self.body_facts.into_iter().flat_map(|f| f.rows.iter().flat_map(|r| &r.facts)
+            .filter_map(|ev| {
+              let crate::facts::Fact::Repoint { holder, reaching, .. } = &ev.fact else { return None };
+              let span = self.bwf.body.source_info(ev.location).span.with_parent(None);
+              (holder == &me && (span == lhs_expr.span.with_parent(None) || span == expr.span.with_parent(None)))
+                .then_some(reaching.as_ref()).flatten()
+            })).flatten().copied().collect::<std::collections::BTreeSet<_>>();
+          if old.is_empty() {
+            if let Some(l) = ref_data.borrow_span.and_then(|s| self.loan_at_span(s)) { old.insert(l.loan); }
+          }
+          if write_span.is_some() && !old.is_empty() {
+            for id in ends_lo..*self.unique_id { self.end_loans.insert(id, old.iter().copied().collect()); }
           }
           // Add event for possible lender if necessary
           // set possible lender to None
@@ -7979,6 +8001,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.add_ev(span_to_line(&rhs_expr.span, &self.tcx), e.clone(), lhs_rty.clone(), ResourceTy::Value(part), false);
           }
           None => self.match_rhs(lhs_rty.clone(), pair_rhs, e),
+        }
+        if let Some(loan) = self.loan_at_span(rhs_expr.span) {
+          for (_, ev) in &self.preprocessed_events[n_events..] {
+            if matches!(ev, ExternalEvent::StaticBorrow { to, .. } | ExternalEvent::MutableBorrow { to, .. } if to == &lhs_rty) {
+              self.repoint_borrows.insert(ev.get_id(), loan.loan);
+            }
+          }
         }
         self.arms_paired_in_branch.clear();
         // Only for a value that holds borrows (or has parts that do): their
@@ -8926,6 +8955,20 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       .filter(|b| !b.diverges).map(|b| b.e_data.as_slice()).collect();
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &self.deferred_cols(&maybe_init_before), |name| self.rap_ownership_now(name));
     self.event_spans.insert(*self.unique_id, guard_expr.span);
+    fn patterns(cond:&Expr<'_>, out: &mut Vec<(usize,rustc_span::Span)>) {
+      match cond.kind {
+        ExprKind::Let(binding) => out.push((0,binding.pat.span)),
+        ExprKind::DropTemps(inner) => patterns(inner,out),
+        ExprKind::Binary(op,left,right) if op.node==rustc_hir::BinOpKind::And => {
+          patterns(left,out); patterns(right,out);
+        }
+        _=>{}
+      }
+    }
+    let mut arms=Vec::new();
+    patterns(guard_expr,&mut arms);
+    if !arms.is_empty(){self.arm_patterns.insert(*self.unique_id,arms);}
+    self.branch_conditions.insert(*self.unique_id, guard_expr.span);
     self.add_external_event(line_num,
       ExternalEvent::Branch {
         join_span: Some(expr.span),
@@ -9520,6 +9563,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let mut pending_borrows: Vec<ExternalEvent> = Vec::new();
     for i in 0..parents.len() {
       let mut associated_ro = Vec::new();
+      let mut slot_borrows = BTreeMap::new();
       // `P { a, b } => …` on a struct variable: `a` / `b`
       // come from `p.a` / `p.b` (#326).
       self.get_dec_of_pat_parts(arm_pat, &typeck_res, &parents[i], parents_ty[i], end, & mut associated_ro);
@@ -9534,7 +9578,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // t, as in `let s = &t;` (#1235).
       if parents.len() == 1 {
         for (r, e, from, _) in associated_ro.iter_mut() {
-          if let Some(b) = self.addr_of_scrutinee_borrow(guard_expr, arm_pat, r, e, from) {
+          // A single-arm match can bind the reference produced by its
+          // scrutinee directly. MIR borrows the slot before the arm begins.
+          let loan = inline.then(|| self.loan_at_span(guard_expr.span)).flatten()
+            .filter(|l| from.is_ref() && l.through.is_none() && l.lender == from.real_name()
+              && l.direct_holders.iter().any(|h| h == r.name()));
+          if let Some(l) = loan {
+            if let Some(rd) = self.borrow_map.get_mut(r.name()) {
+              rd.borrow_span = Some(guard_expr.span);
+              rd.lender = from.clone();
+              rd.ref_mutability = l.kind == "mut";
+              slot_borrows.insert(*r.hash(), l.line);
+              self.ref_var_borrows.insert(guard_expr.span);
+              *e = if rd.ref_mutability { Evt::MBorrow } else { Evt::SBorrow };
+              // As `addr_of_scrutinee_borrow` records for a `match &r { s => .. }`.
+              self.pattern_loans.insert(*r.hash(), l);
+              self.approx_notes.push(ApproxNote::PatternReference { holder: *r.hash() });
+            }
+          } else if let Some(b) = self.addr_of_scrutinee_borrow(guard_expr, arm_pat, r, e, from) {
             *e = b;
           }
         }
@@ -9574,7 +9635,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         };
         let pat_line = self.pattern_loans.get(to_ro.hash()).map_or(pat_line, |l| l.line);
         if inline {
-          self.add_external_event(pat_line, ext_ev);
+          let row = match (&mut ext_ev, slot_borrows.get(to_ro.hash())) {
+            (ExternalEvent::MutableBorrow { of_ref_var, .. } | ExternalEvent::StaticBorrow { of_ref_var, .. }, Some(&line)) => {
+              *of_ref_var = true;
+              line
+            }
+            _ => pat_line,
+          };
+          self.add_external_event(row, ext_ev);
         } else {
           branch_e_data.push((pat_line, ext_ev));
         }
@@ -9716,6 +9784,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if (value_uses_binding || pattern_loan.is_some()) && region_end.is_none_or(|l| l > end) {
         continue;
       }
+      let slot_loan = self.borrow_map.get(&name).and_then(|rd| rd.borrow_span)
+        .filter(|span| self.ref_var_borrows.contains(span)).and_then(|span| self.loan_at_span(span));
       self.borrow_map.remove(&name);
       // A binding the arm never uses (`Some(x) => drop(o)` on `match
       // &o`) is live nowhere: rustc's borrow through it ends where the
@@ -9724,7 +9794,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // a one-line arm. (A name MIR doesn't know keeps the arm's end, as
       // does a value holding the borrow, `z => {}` binding a tuple with a
       // `&mut` in it: its column goes on to its drop.)
-      let live_end = region_end.or_else(|| self.last_live_line(&name, (pat_line, end)));
+      let live_end = slot_loan.and_then(|l| match l.end_lines.as_slice() { [line] => Some(*line), _ => None }).or(region_end)
+        .or_else(|| self.last_live_line(&name, (pat_line, end)));
       let unused = live_end.is_none() && from.extract_rap().is_some_and(|r| r.is_ref()) && self.is_body_local(&name);
       let ends_at = live_end
         .filter(|l| (pat_line..=end).contains(l))
@@ -9739,7 +9810,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for to in lenders {
         let id = *self.unique_id;
         *self.unique_id += 1;
-        let ext_ev = self.ext_ev_of_evt(e.clone(), to, from.clone(), id, false);
+        let mut ext_ev = self.ext_ev_of_evt(e.clone(), to, from.clone(), id, false);
+        if slot_loan.is_some() {
+          if let ExternalEvent::MutableDie { of_ref_var, .. } | ExternalEvent::StaticDie { of_ref_var, .. } = &mut ext_ev {
+            *of_ref_var = true;
+          }
+        }
         // An unused binding's end follows the pattern's (and guard's)
         // events, before the body's on the same line.
         let placed = |i: usize| pat_ids.contains(&i) || early.contains(&i);
@@ -9791,6 +9867,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let maybe_held = self.maybe_held_after(&liveness, &reaching, &maybe_init, &held_before, |name| self.rap_ownership_now(name));
     if let ExprKind::Match(scrutinee, ..) = expr.kind {
       self.event_spans.insert(*self.unique_id, scrutinee.span);
+    }
+    if let ExprKind::Match(scrutinee, arms, _) = expr.kind {
+      self.arm_patterns.insert(*self.unique_id, arms.iter().enumerate().map(|(i,arm)|(i,arm.pat.span)).collect());
+      self.branch_conditions.insert(*self.unique_id, scrutinee.span);
     }
     self.add_external_event(split, ExternalEvent::Branch {
       join_span: Some(expr.span),
@@ -13039,18 +13119,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let labels = vec!["Else".to_owned(), pat_text];
     self.note_exit_scope(init);
     let loop_assigned = self.loop_assigned_now(&liveness);
-    // What the pattern takes its borrows out of, for the `else` path's
-    // end of them (`end_let_else_scrutinee_borrows`, #1458).
-    let holder = match init.kind {
-      ExprKind::Path(QPath::Resolved(..)) => expr_to_rap_name(init, &self.tcx)
-        .and_then(|n| self.raps.get(&n))
-        .map(|rd| rd.rap.to_owned())
-        .filter(|r| !r.is_ref() && r.holds_borrow()),
-      _ => None,
-    };
-    let mut bound = Vec::new();
-    pat.each_binding(|_, hid, _, _| bound.push(binding_name(&self.tcx, hid)));
-    self.let_else_scrutinees.insert(*self.unique_id, (holder, bound));
+    self.let_else_branches.insert(*self.unique_id);
+    self.branch_conditions.insert(*self.unique_id, pat.span);
     self.add_external_event(split, ExternalEvent::Branch {
       join_span: None,
       live_vars: liveness,
