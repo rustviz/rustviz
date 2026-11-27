@@ -29,6 +29,13 @@ pub struct CrateFacts {
     pub errors: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Extraction {
+    pub inner: String,
+    /// A real path also reaches this boundary without extracted contents.
+    pub maybe: bool,
+}
+
 #[derive(Serialize)]
 pub struct BodyFacts {
     #[serde(skip)]
@@ -38,6 +45,9 @@ pub struct BodyFacts {
     pub constructed_vecs: std::collections::HashMap<rustc_span::hygiene::ExpnId, usize>,
     #[serde(skip)]
     pub def_id: rustc_hir::def_id::DefId,
+    /// Source spans of real MIR calls to the standard ManuallyDrop::take.
+    #[serde(skip)]
+    pub take_calls: BTreeSet<rustc_span::Span>,
     /// `main`, `Foo::bar`, `main::{closure#0}`.
     pub func: String,
     /// "fn" or "closure".
@@ -46,6 +56,9 @@ pub struct BodyFacts {
     pub parent: Option<String>,
     pub first_line: usize,
     pub last_line: usize,
+    /// Source position of a function body's opening brace (line, zero-based column).
+    #[serde(skip)]
+    pub function_body_start: Option<(usize, usize)>,
     pub vars: Vec<VarInfo>,
     /// The places that get a state of their own: variables, their field
     /// paths (`p.a`, `t.0`) and Box payloads (`*b`, `b.a`).
@@ -340,6 +353,10 @@ pub struct State {
     /// share their display columns.
     #[serde(skip)]
     pub holder_types: BTreeMap<String, HolderType>,
+    /// Initialized ManuallyDrop wrappers whose contents a resolved unsafe
+    /// call took out on at least one real path to this boundary.
+    #[serde(skip)]
+    pub manually_taken: BTreeMap<String, Extraction>,
     /// Loans live through an Option field or a reference to the whole Option.
     #[serde(skip)]
     pub option_holds: BTreeMap<String, Vec<usize>>,

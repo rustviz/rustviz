@@ -28,7 +28,7 @@
 mod common;
 
 use common::svg::{attr, is_arrow_shaft};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -2878,18 +2878,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "md goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
             "h.a goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
             "h.b goes out of scope. Its resource is dropped.",
-            // `take` moves the value out into the result.
-            "Move from m2 to ManuallyDrop::take",
+            // MIR passes a mutable reference and the result owns the String.
+            "m2's resource is mutably borrowed by ManuallyDrop::take; m2 can't be used while the borrow is live",
             "Move from ManuallyDrop::take to s",
-            "m2 goes out of scope. No resource is dropped.",
+            "ManuallyDrop::take takes an exclusive borrow of the ManuallyDrop wrapper and reads out the inner value, leaving the wrapper's storage unchanged",
+            "m2 goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
             "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "md goes out of scope. Its resource is dropped.",
-            // `take` is a move out of m2, not a borrow.
-            "m2's resource is mutably borrowed by ManuallyDrop::take",
+            "Move from m2 to ManuallyDrop::take",
             "ManuallyDrop::take reads from/writes to m2",
-            "m2 goes out of scope. Nothing is dropped: a ManuallyDrop never drops the value inside it automatically.",
+            "m2's resource is moved",
+            "m2 goes out of scope. Its resource is dropped.",
         ],
     },
     // ─── Interior mutability: call dots (#203) ──────────────────────
@@ -28700,6 +28701,181 @@ fn column_line_at(svg: &str, column: &str, row: usize) -> (String, Vec<String>) 
         .collect();
     assert_eq!(lines.len(), 1, "{column} below row {row}: {lines:?}");
     (lines[0].attribute("data-rv-state").unwrap().to_owned(), timeline_tooltips(&svg[lines[0].range()]))
+}
+
+#[test]
+fn inline_exits_end_the_runtime_path() {
+    // The irrefutable arm returns on real MIR edges. Borrowck still
+    // accepts a borrow on its imaginary fallthrough. Return rows, the
+    // sibling else arm, and the loop's exhaustion path can all execute.
+    for (fixture, dead, live) in [
+        ("edition2024/irrefutable_iflet_inline_995", &["11:40:14"][..], &["11:40:13", "21:40:24"][..]),
+        ("inline_exit_1004", &["8:40:11"][..], &["8:40:10"][..]),
+        ("inline_exit_nested_1013", &["9:50:13", "61:47:65", "61:47:66"][..], &["9:50:16", "61:47:68"][..]),
+    ] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        let unreachable: BTreeSet<_> = doc.root_element().attribute("data-rv-unreachable-rows")
+            .unwrap_or("").split_whitespace().collect();
+        for row in dead {
+            assert!(unreachable.contains(row), "{fixture}: missing dead row {row}");
+        }
+        for row in live {
+            assert!(!unreachable.contains(row), "{fixture}: runtime-reachable row {row} marked dead");
+        }
+    }
+}
+
+#[test]
+fn nested_function_dead_row_does_not_hide_outer_move() {
+    let name = "inline_exit_nested_body";
+    let rv = run_with_local_backend(name);
+    let svg = rv.timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    // L9 is the inner function's imaginary tail and the outer function's
+    // real drop(s). A rustc borrow probe in outer after L9 gets E0382.
+    assert_eq!(doc.root_element().attribute("data-rv-unreachable-rows"), Some("4:33:8 4:33:9"));
+    let src = read_corpus(name);
+    let code = rv.code_panel_string();
+    let (violations, _, stats) = common::oracle::check(&src, &svg, &code);
+    assert!(violations.is_empty(), "{violations:?}");
+
+    // Tag the same row in outer as well to simulate the old cross-body
+    // suppression. Only then may the oracle skip its missing segment.
+    let wrong_body = svg.replacen("4:33:8 4:33:9", "4:33:8 4:33:9 3:32:9", 1);
+    let (_, _, wrong) = common::oracle::check(&src, &wrong_body, &code);
+    let count = |stats: &common::oracle::Stats, reason| stats.skips.get(reason).copied().unwrap_or(0);
+    let no_segment = "no segment on a runtime-unreachable row";
+    assert!(count(&wrong, no_segment) > count(&stats, no_segment), "{stats:?} -> {wrong:?}");
+    // A rejected probe is inconclusive about whether the column moved
+    // on every path. Only the unscoped marker prevents probing s at all.
+    let inconclusive = "rustc's verdict doesn't decide the drawn state";
+    assert_eq!(count(&stats, inconclusive), count(&wrong, inconclusive) + 1);
+}
+
+#[test]
+fn drawing_oracle_probes_an_explicit_segment_on_a_tagged_row() {
+    let name = "inline_exit_1004";
+    let rv = run_with_local_backend(name);
+    let src = read_corpus(name);
+    let timeline = rv.timeline_panel_string();
+    let code = rv.code_panel_string();
+    let (violations, _, stats) = common::oracle::check(&src, &timeline, &code);
+    assert!(violations.is_empty(), "{violations:?}");
+    assert_eq!(stats.skips.get("no segment on a runtime-unreachable row"), Some(&1));
+
+    // Add a visible, false move claim at the same gap. Borrowck accepts
+    // &f on its imaginary path, so the oracle must report this marker.
+    let doc = roxmltree::Document::parse(&timeline).unwrap();
+    let header = doc.descendants().find(|n| n.attribute("data-rv-kind") == Some("header")
+        && n.attribute("data-rv-var") == Some("f")).unwrap();
+    let hash = header.attribute("data-hash").unwrap();
+    let x = header.attribute("x").unwrap();
+    let doc = roxmltree::Document::parse(&code).unwrap();
+    let y = |row| doc.descendants().find(|n| n.attribute("data-rv-kind") == Some("code_line")
+        && n.attribute("data-rv-line") == Some(row)).unwrap().attribute("y").unwrap().parse::<f64>().unwrap();
+    let (top, bottom) = (y("11") - 10.0, y("12"));
+    let segment = format!(r#"<line data-rv-id="test-move" data-rv-kind="line" data-rv-var="f" data-rv-state="resource_moved" data-hash="{hash}" x1="{x}" x2="{x}" y1="{top}" y2="{bottom}"/>"#);
+    let false_claim = timeline.replacen("</svg>", &format!("{segment}</svg>"), 1);
+    let (violations, _, _) = common::oracle::check(&src, &false_claim, &code);
+    assert!(violations.iter().any(|v| (v.line, v.var.as_str(), v.check) == (11, "f", "oracle-moved")), "{violations:?}");
+}
+
+#[test]
+fn manually_drop_take_keeps_the_wrapper_initialized() {
+    let svg = run_with_local_backend("manually_drop_by_hand").timeline_panel_string();
+    // The call's argument in MIR is &mut m2. The unsafe contract removes
+    // the String logically while leaving the ManuallyDrop initialized.
+    for row in 14..=18 {
+        let (state, tips) = column_line_at(&svg, "m2", row);
+        assert_eq!(state, "manually_taken", "m2 below row {row}");
+        assert_review_title(&tips[0], &[
+            "m2 still holds its ManuallyDrop",
+            "The String was taken out by the unsafe ManuallyDrop::take call",
+            "must not be used or dropped again through the wrapper",
+            "compiler does not track",
+        ], &["resource is moved", "is the owner of the resource"]);
+    }
+    // The return value is destroyed by drop(old) on row 24. Only the
+    // fresh assignment on row 25 changes the wrapper.
+    for row in [23, 24] {
+        let (state, tips) = column_line_at(&svg, "slot", row);
+        assert_eq!(state, "manually_taken", "slot below row {row}");
+        assert_review_title(&tips[0], &["The String was taken out"], &["is the owner of the resource"]);
+    }
+    let (state, after) = column_line_at(&svg, "slot", 25);
+    assert_eq!(state, "full_privilege");
+    assert_review_title(&after[0], &[], &["was taken out"]);
+}
+
+#[test]
+fn manually_drop_take_survives_unrelated_join_and_raw_addresses() {
+    let svg = run_with_local_backend("manually_drop_take_paths").timeline_panel_string();
+    // The conditional and address formation leave the storage unchanged.
+    for row in [11, 12] {
+        let (_, tips) = column_line_at(&svg, "slot", row);
+        assert_review_title(&tips[0], &["The String was taken out"], &["slot is the owner of the resource"]);
+    }
+    let (_, tips) = column_line_at(&svg, "raw_slot", 33);
+    assert_review_title(&tips[0], &["The String was taken out"], &["raw_slot is the owner of the resource"]);
+    // ptr::write installs fresh contents. into_inner consumes them safely.
+    let (state, tips) = column_line_at(&svg, "raw_slot", 34);
+    assert_eq!(state, "full_privilege");
+    assert_review_title(&tips[0], &[], &["was taken out"]);
+}
+
+#[test]
+fn manually_drop_take_tracks_replacement_on_one_path() {
+    let svg = run_with_local_backend("manually_drop_take_paths").timeline_panel_string();
+    // Only flag=true executes the first replacement. Dropping old cannot
+    // restore the old slot on the flag=false path.
+    for row in [24, 25] {
+        let (state, tips) = column_line_at(&svg, "maybe_slot", row);
+        assert_review_title(&tips[0], &["The String may already have been taken out"],
+            &["is the owner of the resource", "The String was taken out"]);
+        assert_eq!(state, "manually_taken");
+    }
+    let (state, tips) = column_line_at(&svg, "maybe_slot", 26);
+    assert_eq!(state, "full_privilege");
+    assert_review_title(&tips[0], &[], &["taken out"]);
+}
+
+#[test]
+fn manually_drop_take_survives_a_live_shared_borrow() {
+    let svg = run_with_local_backend("manually_drop_take_paths").timeline_panel_string();
+    // black_box(r) keeps the borrow of the wrapper live below row 13.
+    let (state, tips) = column_line_at(&svg, "slot", 13);
+    assert_review_title(&tips[0], &["The String was taken out", "r holds a shared borrow of the wrapper"],
+        &["slot's resource is being shared"]);
+    assert_eq!(state, "manually_taken_shared");
+}
+
+#[test]
+fn manually_drop_take_resolves_function_items() {
+    let svg = run_with_local_backend("manually_drop_take_paths").timeline_panel_string();
+    // In NLL MIR the callee local has the item's FnDef type, so the
+    // unsafe contract applies to this call through the binding.
+    let (_, tips) = column_line_at(&svg, "alias_slot", 42);
+    assert_review_title(&tips[0], &["The String was taken out"], &["alias_slot is the owner of the resource"]);
+    let tips = timeline_tooltips(&svg).join("\n");
+    assert_review_title(&tips, &["take takes an exclusive borrow of the ManuallyDrop wrapper"],
+        &["take reads from/writes to alias_slot"]);
+}
+
+#[test]
+fn manually_drop_take_keeps_the_copy_clause() {
+    let svg = run_with_local_backend("manually_drop_take_paths").timeline_panel_string();
+    // ManuallyDrop<u32> implements Copy independently of the unsafe call.
+    let (_, tips) = column_line_at(&svg, "number", 48);
+    assert_review_title(&tips[0], &["number holds a copyable value", "u32 is Copy, so the unsafe ManuallyDrop::take call only copied it out"],
+        &["number is the owner of the resource", "number's resource is moved", "was taken out", "must not be used or dropped again"]);
+}
+
+#[test]
+fn manually_drop_take_names_a_closure_without_compiler_coordinates() {
+    let svg = run_with_local_backend("manually_drop_take_paths").timeline_panel_string();
+    let (_, tips) = column_line_at(&svg, "closure_slot", 55);
+    assert_review_title(&tips[0], &["The closure was taken out"], &["{closure@", "src/lib.rs:"]);
 }
 
 fn assert_review_title(title: &str, must_contain: &[&str], must_not_contain: &[&str]) {

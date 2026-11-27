@@ -329,6 +329,27 @@ pub fn event_dot_manually_drop_by_hand(my_name: &String) -> String {
     )
 }
 
+pub fn state_manually_taken(name: &String, inner: &str, maybe: bool, copyable: bool) -> String {
+    let name_html = styled_name_html(name);
+    let wrapper = if copyable {
+        format!("{} of type ManuallyDrop", state_full_privilege_copyable(name))
+    } else {
+        format!("{name_html} still holds its ManuallyDrop wrapper")
+    };
+    if copyable {
+        // A Copy inner value is copied, not moved out: the wrapper's own copy stays usable.
+        return format!(
+            "{wrapper}. {} is Copy, so the unsafe ManuallyDrop::take call only copied it out; the wrapper still holds a usable copy.",
+            styled_name_html(inner),
+        );
+    }
+    let taken = if maybe { "may already have been taken out" } else { "was taken out" };
+    format!(
+        "{wrapper}. The {} {taken} by the unsafe ManuallyDrop::take call. The old contents must not be used or dropped again through the wrapper. The compiler does not track that the value was taken.",
+        styled_name_html(inner),
+    )
+}
+
 // State of a `ManuallyDrop` after `ManuallyDrop::drop`: it holds no
 // resource, and using it again is undefined behaviour.
 pub fn state_dropped_by_hand(my_name: &String) -> String {
@@ -6734,7 +6755,12 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
                 matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
             alt.map_or(msg.clone(), |a| with_break_alt_lend(&msg, a)) + &stored_suffix
         } else {
-            format!("{}{}{}{}{}{}{}", styled_fn_name, title_fn, styled_via, alt_suffix, implicit_suffix, reborrow_suffix, stored_suffix)
+            let call = if matches!(external_event, ExternalEvent::PassByMutableReference { manually_takes: true, .. }) {
+                format!("{styled_fn_name} takes an exclusive borrow of the ManuallyDrop wrapper and reads out the inner value, leaving the wrapper's storage unchanged")
+            } else {
+                format!("{styled_fn_name}{title_fn}{styled_via}")
+            };
+            format!("{call}{alt_suffix}{implicit_suffix}{reborrow_suffix}{stored_suffix}")
         }
 }
 
