@@ -5276,7 +5276,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // temporary passed to a call is borrowed by that call
         // (`match_arg`'s constructor case). Moves and copies into the
         // constructor are still drawn (#768).
-        if !expr.span.from_expansion() && self.mir_constructor(expr) {
+        if !expr.span.from_expansion() && self.mir_argument_constructor(expr) {
           if let Some(name) = hirid_to_var_name(fn_expr.hir_id, &self.tcx) {
             self.add_fn(name.clone());
             let typeck = self.tcx.typeck(expr.hir_id.owner);

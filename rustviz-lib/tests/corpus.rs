@@ -28887,6 +28887,19 @@ fn direct_transfers_keep_mir_occurrences_on_the_same_row() {
 }
 
 #[test]
+fn arithmetic_reference_copies_explain_each_referent_read() {
+    // Forwarding Add loads its shared operand through one reference.
+    // Forwarding Mul loads both operands, even when they come from x.
+    for (fixture, operator, row, count) in [("anonymous_fnparam", "+", 15, 1), ("testBorrow", "*", 2, 2)] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let copies = rv_elements(&svg, &format!("x>{operator}@L{row}:arrow:copy"));
+        let text = format!("Copy from x to {operator}. The operator reads the value x points to through the copied reference");
+        assert_eq!(copies.iter().map(|(_, tip, ..)| tip.as_str()).collect::<Vec<_>>(),
+            vec![text.as_str(); count], "{fixture}");
+    }
+}
+
+#[test]
 fn same_row_call_result_arrives_before_its_use() {
     let svg = run_with_local_backend("rv3_direct_value_flow").timeline_panel_string();
     let row = read_corpus("rv3_direct_value_flow").lines()
@@ -42823,6 +42836,39 @@ fn imaginary_unassigned_join_explains_the_runtime_drop() {
     assert!(rv_elements(&svg, "s@L5:dot:").iter().any(|(_, t, ..)| t.contains("assigned on every path that runs")
         && t.contains("can't be used")));
     assert!(timeline_tooltips(&svg).iter().any(|t| t == "s goes out of scope. Its resource is dropped."));
+}
+
+#[test]
+fn shadowed_match_arm_keeps_its_drawn_move_1804() {
+    // Borrowck MIR moves s into drop on the wildcard's imaginary
+    // successor. The executable successor still drops s at scope exit.
+    let name = "rv3_issues/1804_arm_shadowed_by_wildcard";
+    let rv = run_with_local_backend(name);
+    let svg = rv.timeline_panel_string();
+    let arrow = tooltip_of_id(&svg, "s>drop@L6:arrow:move");
+    let segment = tooltip_of_id(&svg, "s@L5-6:branch_line:full_privilege");
+    assert_eq!(
+        (arrow.as_deref(), segment.as_deref()),
+        (Some("Move from s to drop"), Some("s's value was moved out, so it can't be used here")),
+    );
+    check_review_tip(&svg, "s@L10:dot:owner_go_out_of_scope",
+        &["s goes out of scope. Its resource is dropped."], &["runtime drop flag"]);
+    let (violations, _, _) = common::oracle::check(&read_corpus(name), &svg, &rv.code_panel_string());
+    assert!(violations.is_empty(), "{name}: {violations:?}");
+}
+
+#[test]
+fn shadowed_call_keeps_the_moves_and_copies_into_its_argument() {
+    // In borrowck MIR the shadowed arm builds Some from the moved String
+    // or from both copies of count, then passes that aggregate to take.
+    let svg = run_with_local_backend("rv3_shadowed_call_arguments").timeline_panel_string();
+    assert_eq!(tooltip_of_id(&svg, "owned>take@L9:arrow:move").as_deref(),
+        Some("Move from owned to take"));
+    let copies = rv_elements(&svg, "count>take@L10:arrow:copy");
+    assert_eq!(copies.len(), 2);
+    assert!(copies.iter().all(|(_, tip, ..)| tip == "Copy from count to take"));
+    assert!(rv_elements(&svg, "owned>Some@L9:arrow:").is_empty());
+    assert!(rv_elements(&svg, "count>Some@L10:arrow:").is_empty());
 }
 
 #[test]

@@ -1491,6 +1491,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.body_facts.is_some_and(|b| b.value_flow.constructor(expr.span))
   }
 
+  pub(crate) fn mir_argument_constructor(&self, expr: &Expr<'_>) -> bool {
+    self.body_facts.is_some_and(|b| b.value_flow.argument_constructor(expr.span))
+  }
+
   /// Resolve the column from the MIR place. When the source spells an
   /// index explicitly, retain that spelling as a label on the proved
   /// column, since MIR's dynamic index is only a temporary local.
@@ -6453,7 +6457,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       span: Some(parent.span),
       callee,
       index,
-      constructor: self.mir_constructor(parent),
+      constructor: self.mir_argument_constructor(parent),
       projected_literal: None,
       callable,
     }
@@ -6580,10 +6584,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // other arguments were moved or copied into the constructor.
     if let ExprKind::Call(_, ctor_args) = arg.kind {
       let typeck = self.tcx.typeck(arg.hir_id.owner);
-      if !arg.span.from_expansion() && self.mir_constructor(arg) {
+      if !arg.span.from_expansion() && self.mir_argument_constructor(arg) {
         let mut borrowed = false;
         for a in ctor_args.iter() {
-          let nested = self.mir_constructor(a);
+          let nested = self.mir_argument_constructor(a);
           // `take(Some((x, 1)))` / `take(Some(Part { text: &s }))`: the
           // references in the literal are passed to the call with it
           // (the constructor skipped them, #1340).
@@ -6700,8 +6704,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           if moving && matches!(from, ResourceTy::Index(..)) {
             return;
           }
-          if moving && src.needs_drop && slots.span.and_then(|span|
-            value_flow.and_then(|flow| flow.call(span, slots.callee))).is_some_and(|call| call.drops_arg)
+          if moving && src.needs_drop && value_flow.is_some_and(|flow| flow.drops_argument(&read, slots))
           {
             if let ResourceTy::Value(r) = &to_ro {
               to_ro = ResourceTy::Value(r.with_drops_arg());
@@ -6721,7 +6724,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
               }
             }
           }
-          if !moving && src.is_ref && value_flow.is_some_and(|flow| flow.reads_argument_referent(slots)) {
+          if !moving && src.is_ref && value_flow.is_some_and(|flow| flow.reads_argument_referent(&read, slots)) {
             let title = crate::svg_generator::hover_messages::copied_operator_reference(&from.name(), &fn_name);
             self.row_layout.aggregate_titles.insert(*self.unique_id, title);
           }

@@ -76,6 +76,7 @@ pub(crate) struct Read {
     pub site: Site,
     pub exact: bool,
     pub effect: OperandEffect,
+    runs: bool,
     destinations: BTreeSet<Destination>,
     staging: Option<Local>,
 }
@@ -105,25 +106,13 @@ pub(crate) struct Call {
 }
 
 #[derive(Default)]
-pub(crate) struct ValueFlow {
+struct Operands {
     reads: HashMap<Span, Vec<Read>>,
     calls: HashMap<Span, Vec<Call>>,
     constructors: HashMap<Span, Vec<Site>>,
-    try_inputs: HashMap<Span, Vec<(Read, TryMove)>>,
-    owned_parameter_borrows: BTreeMap<Local, (Local, bool)>,
-    results: BTreeMap<Location, BTreeSet<Destination>>,
-    try_returns: HashMap<Span, Vec<Option<Vec<ReturnPart>>>>,
 }
 
-impl ValueFlow {
-    pub fn read(&self, span: Span) -> Option<Read> {
-        self.read_matching(span, |_| true)
-    }
-
-    pub fn returned_read(&self, span: Span) -> Option<Read> {
-        self.read_matching(span, |read| returned_part(&read.destinations).is_some())
-    }
-
+impl Operands {
     fn slot_matches(&self, slots: CallSlots, dest: &Destination) -> bool {
         let Some(span) = slots.span.map(|span| span.with_parent(None)) else { return false };
         match *dest {
@@ -137,12 +126,12 @@ impl ValueFlow {
         }
     }
 
-    pub fn argument_read(&self, span: Span, slots: CallSlots) -> Option<Read> {
-        self.read_matching(span, |read| read.destinations.iter().any(|dest| self.slot_matches(slots, dest)))
+    fn argument_reads(&self, span: Span, slots: CallSlots) -> impl Iterator<Item = &Read> {
+        self.reads.get(&span.with_parent(None)).into_iter().flatten()
+            .filter(move |read| read.destinations.iter().any(|dest| self.slot_matches(slots, dest)))
     }
 
-    fn read_matching(&self, span: Span, matches: impl Fn(&Read) -> bool) -> Option<Read> {
-        let mut reads = self.reads.get(&span.with_parent(None))?.iter().filter(|read| matches(read));
+    fn common_read<'a>(mut reads: impl Iterator<Item = &'a Read>) -> Option<Read> {
         let mut first = reads.next()?.clone();
         for other in reads {
             // Separate MIR blocks can evaluate the same guard on different
@@ -157,35 +146,7 @@ impl ValueFlow {
         Some(first)
     }
 
-    pub fn reads_argument_referent(&self, slots: CallSlots) -> bool {
-        slots.span.and_then(|span| self.call(span, slots.callee)).is_some_and(|call| call.reads_referent.get(slots.index) == Some(&true))
-    }
-
-    pub fn result_passes_to(&self, call: Call, slots: CallSlots) -> bool {
-        call.site.and_then(|site| self.results.get(&site.at))
-            .is_some_and(|destinations| destinations.iter().any(|d| self.slot_matches(slots, d)))
-    }
-
-    pub fn returned_result(&self, call: Call) -> Option<&[ReturnPart]> {
-        returned_part(self.results.get(&call.site?.at)?)
-    }
-
-    pub fn returned_try(&self, span: Span) -> Option<&[ReturnPart]> {
-        let parts = self.try_returns.get(&span.source_callsite().with_parent(None))?;
-        let first = parts.first()?;
-        parts.iter().all(|path| path == first).then_some(first.as_deref()).flatten()
-    }
-
-    pub fn unique_argument(&self, read: &Read, slots: CallSlots) -> Option<(Location, usize)> {
-        unique(read.destinations.iter().filter(|dest| self.slot_matches(slots, dest)).filter_map(|dest| {
-            match dest {
-                Destination::Argument(at, index, _) => Some((*at, *index)),
-                _ => None,
-            }
-        }))
-    }
-
-    pub fn call(&self, span: Span, callee: Option<DefId>) -> Option<Call> {
+    fn call(&self, span: Span, callee: Option<DefId>) -> Option<Call> {
         let mut calls = self.calls.get(&span.with_parent(None))?.iter().filter(|call| call.callee == callee);
         let mut first = *calls.next()?;
         for other in calls {
@@ -200,9 +161,85 @@ impl ValueFlow {
         }
         Some(first)
     }
+}
+
+#[derive(Default)]
+pub(crate) struct ValueFlow {
+    operands: Operands,
+    // Only argument drawing can use operands on borrowck-only paths.
+    imaginary: Operands,
+    try_inputs: HashMap<Span, Vec<(Read, TryMove)>>,
+    owned_parameter_borrows: BTreeMap<Local, (Local, bool)>,
+    results: BTreeMap<Location, BTreeSet<Destination>>,
+    try_returns: HashMap<Span, Vec<Option<Vec<ReturnPart>>>>,
+}
+
+impl ValueFlow {
+    pub fn read(&self, span: Span) -> Option<Read> {
+        Operands::common_read(self.operands.reads.get(&span.with_parent(None))?.iter())
+    }
+
+    pub fn returned_read(&self, span: Span) -> Option<Read> {
+        let reads = self.operands.reads.get(&span.with_parent(None))?.iter();
+        Operands::common_read(reads.filter(|read| returned_part(&read.destinations).is_some()))
+    }
+
+    pub fn argument_read(&self, span: Span, slots: CallSlots) -> Option<Read> {
+        let mut executable = self.operands.argument_reads(span, slots).peekable();
+        if executable.peek().is_some() {
+            Operands::common_read(executable)
+        } else {
+            Operands::common_read(self.imaginary.argument_reads(span, slots))
+        }
+    }
+
+    pub fn drops_argument(&self, read: &Read, slots: CallSlots) -> bool {
+        let operands = if read.runs { &self.operands } else { &self.imaginary };
+        slots.span.and_then(|span| operands.call(span, slots.callee)).is_some_and(|call| call.drops_arg)
+    }
+
+    pub fn reads_argument_referent(&self, read: &Read, slots: CallSlots) -> bool {
+        read.runs && slots.span.and_then(|span| self.call(span, slots.callee))
+            .is_some_and(|call| call.reads_referent.get(slots.index) == Some(&true))
+    }
+
+    pub fn result_passes_to(&self, call: Call, slots: CallSlots) -> bool {
+        call.site.and_then(|site| self.results.get(&site.at))
+            .is_some_and(|destinations| destinations.iter().any(|d| self.operands.slot_matches(slots, d)))
+    }
+
+    pub fn returned_result(&self, call: Call) -> Option<&[ReturnPart]> {
+        returned_part(self.results.get(&call.site?.at)?)
+    }
+
+    pub fn returned_try(&self, span: Span) -> Option<&[ReturnPart]> {
+        let parts = self.try_returns.get(&span.source_callsite().with_parent(None))?;
+        let first = parts.first()?;
+        parts.iter().all(|path| path == first).then_some(first.as_deref()).flatten()
+    }
+
+    pub fn unique_argument(&self, read: &Read, slots: CallSlots) -> Option<(Location, usize)> {
+        if !read.runs {
+            return None;
+        }
+        unique(read.destinations.iter().filter(|dest| self.operands.slot_matches(slots, dest)).filter_map(|dest| {
+            match dest {
+                Destination::Argument(at, index, _) => Some((*at, *index)),
+                _ => None,
+            }
+        }))
+    }
+
+    pub fn call(&self, span: Span, callee: Option<DefId>) -> Option<Call> {
+        self.operands.call(span, callee)
+    }
 
     pub fn constructor(&self, span: Span) -> bool {
-        self.constructors.contains_key(&span.with_parent(None))
+        self.operands.constructors.contains_key(&span.with_parent(None))
+    }
+
+    pub fn argument_constructor(&self, span: Span) -> bool {
+        self.constructor(span) || self.imaginary.constructors.contains_key(&span.with_parent(None))
     }
 
     pub fn try_input(&self, span: Span) -> Option<&(Read, TryMove)> {
@@ -326,7 +363,27 @@ pub(super) fn collect<'tcx>(
     body: &Body<'tcx>,
     names: &Names<'tcx>,
     runs: &BTreeSet<BasicBlock>,
+    checked: &BTreeSet<BasicBlock>,
     rows: &BTreeMap<Location, usize>,
+) -> ValueFlow {
+    let mut flow = collect_blocks(tcx, body, names, runs, rows, true);
+    // Preserve the older drawing of calls reached only by borrowck. A
+    // separate view of the same MIR keeps their writes and staged reads
+    // out of the executable graph. No imaginary sites reach event ordering.
+    let imaginary: BTreeSet<_> = checked.difference(runs).copied().collect();
+    if !imaginary.is_empty() {
+        flow.imaginary = collect_blocks(tcx, body, names, &imaginary, rows, false).operands;
+    }
+    flow
+}
+
+fn collect_blocks<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    names: &Names<'tcx>,
+    blocks: &BTreeSet<BasicBlock>,
+    rows: &BTreeMap<Location, usize>,
+    runs: bool,
 ) -> ValueFlow {
     let mut out = ValueFlow::default();
     let env = body.typing_env(tcx);
@@ -353,7 +410,7 @@ pub(super) fn collect<'tcx>(
             doms.dominates(source.block, use_at.block)
         }
     };
-    for &bb in runs {
+    for &bb in blocks {
         let data = &body[bb];
         if data.is_cleanup {
             continue;
@@ -543,10 +600,10 @@ pub(super) fn collect<'tcx>(
             Operand::Move(_) => OperandEffect::Move(src),
             _ => return None,
         };
-        Some(Read { site: site(at, operand), exact: true, effect, destinations: BTreeSet::new(), staging: None })
+        Some(Read { site: site(at, operand), exact: runs, effect, runs, destinations: BTreeSet::new(), staging: None })
     };
 
-    for &bb in runs {
+    for &bb in blocks {
         let data = &body[bb];
         if data.is_cleanup {
             continue;
@@ -586,13 +643,13 @@ pub(super) fn collect<'tcx>(
                         let of_ref_slot = source.is_ref && source.through.is_none();
                         let mutable = matches!(kind, BorrowKind::Mut { .. });
                         let effect = OperandEffect::Borrow { source, mutable, of_ref_slot };
-                        staged.push((span, Read { site: site(at, 0), exact: true, effect, destinations: BTreeSet::new(), staging: a.0.as_local() }, vec![target]));
+                        staged.push((span, Read { site: site(at, 0), exact: runs, effect, runs, destinations: BTreeSet::new(), staging: a.0.as_local() }, vec![target]));
                     }
                 }
                 Rvalue::Aggregate(kind, ops) => {
                     let ctor = matches!(&**kind, AggregateKind::Adt(..));
                     if ctor {
-                        out.constructors.entry(span).or_default().push(site(at, 0));
+                        out.operands.constructors.entry(span).or_default().push(site(at, 0));
                     }
                     for (index, op) in ops.iter().enumerate() {
                         let mut targets = Vec::new();
@@ -679,7 +736,7 @@ pub(super) fn collect<'tcx>(
             reads_referent,
             std_ref_adapter: adapter && instance.is_some_and(|i| Some(i.def_id()) == def),
         };
-        out.calls.entry(span_at(at)).or_default().push(call);
+        out.operands.calls.entry(span_at(at)).or_default().push(call);
         if let Some(next) = target {
             results.push((at, *next, *destination));
             // Rust's deref/index coercions can introduce a new temporary
@@ -754,7 +811,8 @@ pub(super) fn collect<'tcx>(
                 return true;
             }
             if kill.is_none() {
-                work.extend(super::rows::real_successor_blocks(body, block).into_iter().map(|bb| (bb, 0)));
+                work.extend(super::rows::real_successor_blocks(body, block).into_iter()
+                    .filter(|bb| runs || blocks.contains(bb)).map(|bb| (bb, 0)));
             }
         }
         false
@@ -808,7 +866,7 @@ pub(super) fn collect<'tcx>(
     };
     for (span, mut read, targets) in staged {
         read.destinations = trace(read.site.at, None, targets, matches!(read.effect, OperandEffect::Borrow { .. }));
-        out.reads.entry(span).or_default().push(read);
+        out.operands.reads.entry(span).or_default().push(read);
     }
     for (at, next, place) in results {
         out.results.insert(at, trace(at, Some(next), vec![Target::Store(place)], false));
@@ -826,7 +884,7 @@ pub(super) fn collect<'tcx>(
         clippy::iter_over_hash_type,
         reason = "each span's operand list is independent"
     )]
-    for reads in out.reads.values_mut() {
+    for reads in out.operands.reads.values_mut() {
         let intermediate: BTreeSet<_> = reads
             .iter()
             .filter_map(|read| match &read.effect {
