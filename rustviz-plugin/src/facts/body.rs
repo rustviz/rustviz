@@ -17,7 +17,8 @@ use rustc_middle::mir::{
 };
 use rustc_middle::ty::{TyCtxt, TyKind};
 use rustc_mir_dataflow::impls::{
-    always_storage_live_locals, EverInitializedPlaces, MaybeInitializedPlaces, MaybeStorageLive, MaybeUninitializedPlaces,
+    always_storage_live_locals, EverInitializedPlaces, MaybeBorrowedLocals, MaybeInitializedPlaces, MaybeStorageLive,
+    MaybeUninitializedPlaces,
 };
 use rustc_mir_dataflow::move_paths::{LookupResult, MoveData, MovePathIndex};
 use rustc_mir_dataflow::{Analysis, ResultsCursor};
@@ -966,6 +967,62 @@ fn cleanup_drops<'tcx>(body: &Body<'tcx>, start: BasicBlock) -> Vec<(Location, P
     }).collect()
 }
 
+/// Trace the moves supplying a break result through MIR stores and
+/// aggregates. A call's destination is a new value: its moved inputs
+/// do not establish what it returns.
+fn break_result_moves<'tcx>(
+    body: &Body<'tcx>, result: Location, operand_span: Span, region: &BTreeMap<Location, Vec<Location>>,
+    mut may_alias: impl FnMut(Place<'tcx>, Location) -> bool,
+) -> Vec<(Location, Place<'tcx>)> {
+    let mut moves = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut work = vec![(result, None)];
+    while let Some((loc, need)) = work.pop() {
+        if !region.contains_key(&loc) || !operand_span.contains(body.source_info(loc).span)
+            || !seen.insert((loc, need)) { continue; }
+        let data = &body[loc.block];
+        let stmt = data.statements.get(loc.statement_index);
+        if let Some(StatementKind::Assign(assign)) = stmt.map(|s| &s.kind) {
+            if need.is_none_or(|place| place_under(place, assign.0) || place_under(assign.0, place)) {
+                // Follow whole stores. A projected use of a whole
+                // aggregate needs field-sensitive provenance.
+                if need.is_some_and(|place| place != assign.0) { continue; }
+                let operands: &[Operand<'tcx>] = match &assign.1 {
+                    Rvalue::Use(operand) => std::slice::from_ref(operand),
+                    Rvalue::Aggregate(_, operands) => operands.raw.as_slice(),
+                    _ => &[],
+                };
+                for operand in operands {
+                    let Operand::Move(place) = *operand else { continue; };
+                    moves.push((loc, place));
+                    work.extend(region[&loc].iter().map(|&prev| (prev, Some(place))));
+                }
+                continue;
+            }
+        }
+        let Some(place) = need else { continue; };
+        let overlaps = |other| place_under(place, other) || place_under(other, place);
+        let invalidates = match stmt.map(|s| &s.kind) {
+            Some(StatementKind::StorageLive(local) | StatementKind::StorageDead(local)) => *local == place.local,
+            Some(StatementKind::Assign(assign)) => assign.0.is_indirect(),
+            // A call or destructor can replace an intermediate value
+            // through a reference to its slot.
+            None => match data.terminator().kind {
+                TerminatorKind::Call { destination, .. } => overlaps(destination) || may_alias(place, loc),
+                TerminatorKind::Drop { place: dropped, .. } => overlaps(dropped) || may_alias(place, loc),
+                TerminatorKind::InlineAsm { .. } => true,
+                _ => false,
+            },
+            _ => false,
+        };
+        if invalidates {
+            continue;
+        }
+        work.extend(region[&loc].iter().map(|&prev| (prev, Some(place))));
+    }
+    moves
+}
+
 /// On entry to this while-let, real MIR edges lead straight to a pattern
 /// binding before any test can skip the body. Unknown for branched entries.
 pub(crate) fn loop_enters_pattern<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, facts: &BodyFacts, head: Span, pattern: Span) -> bool {
@@ -1049,6 +1106,75 @@ fn simplify_repeated_argument_tests(body: &mut Body<'_>) -> bool {
         body.basic_blocks_mut()[bb].terminator_mut().kind = TerminatorKind::Goto { target };
     }
     changed
+}
+
+/// A comparison on the only edge into a repeated test determines that
+/// test when neither input changes between the two evaluations.
+fn simplify_adjacent_comparisons(body: &mut Body<'_>) -> bool {
+    use rustc_middle::mir::{BasicBlockData, BinOp};
+    use rustc_middle::mir::visit::{PlaceContext, Visitor};
+
+    #[derive(Default)]
+    struct Inputs {
+        addressed: BTreeSet<Local>,
+        writes: BTreeSet<(BasicBlock, Local)>,
+    }
+    impl<'tcx> Visitor<'tcx> for Inputs {
+        fn visit_local(&mut self, local: Local, context: PlaceContext, loc: Location) {
+            if context.may_observe_address() { self.addressed.insert(local); }
+            if matches!(context, PlaceContext::MutatingUse(_)) {
+                self.writes.insert((loc.block, local));
+            }
+        }
+    }
+
+    let comparison = |data: &BasicBlockData<'_>| {
+        let TerminatorKind::SwitchInt { discr, targets } = &data.terminator().kind else { return None; };
+        let StatementKind::Assign(assign) = &data.statements.last()?.kind else { return None; };
+        if discr.place()?.as_local()? != assign.0.as_local()? { return None; }
+        let Rvalue::BinaryOp(op @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), operands) = &assign.1 else {
+            return None;
+        };
+        let source = |operand: &Operand<'_>| {
+            let local = operand.place()?.as_local()?;
+            for st in data.statements[..data.statements.len() - 1].iter().rev() {
+                match &st.kind {
+                    StatementKind::Assign(assign) if assign.0.as_local() == Some(local) => {
+                        let Rvalue::Use(Operand::Copy(place)) = &assign.1 else { return None; };
+                        return place.as_local();
+                    }
+                    StatementKind::Assign(assign) if assign.0.as_local().is_some() => {}
+                    StatementKind::StorageLive(other) | StatementKind::StorageDead(other) if *other != local => {}
+                    _ => return None,
+                }
+            }
+            None
+        };
+        Some(((*op, [source(&operands.0)?, source(&operands.1)?]), targets.target_for_value(0), targets.target_for_value(1)))
+    };
+    let mut inputs = None;
+    let mut replacements = Vec::new();
+    let preds = body.basic_blocks.predecessors();
+    for (bb, data) in body.basic_blocks.iter_enumerated() {
+        let &[prior] = preds[bb].as_slice() else { continue; };
+        if bb == prior { continue; }
+        let Some((key, no, yes)) = comparison(data) else { continue; };
+        let Some((prior_key, prior_no, prior_yes)) = comparison(&body[prior]) else { continue; };
+        if key != prior_key || prior_no == prior_yes { continue; }
+        let inputs = inputs.get_or_insert_with(|| {
+            let mut inputs = Inputs::default();
+            inputs.visit_body(body);
+            inputs
+        });
+        if key.1.iter().any(|&local| inputs.addressed.contains(&local) || inputs.writes.contains(&(bb, local)) || inputs.writes.contains(&(prior, local))) {
+            continue;
+        }
+        replacements.push((bb, if bb == prior_no { no } else { yes }));
+    }
+    for &(bb, target) in &replacements {
+        body.basic_blocks_mut()[bb].terminator_mut().kind = TerminatorKind::Goto { target };
+    }
+    !replacements.is_empty()
 }
 
 impl<'a, 'tcx> Cx<'a, 'tcx> {
@@ -2025,9 +2151,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // Keep the row and loan model's executable edges. Repeated Boolean
     // tests refine only the move and next-write explanations.
     let mut wording_body = rt_body.clone();
-    let wording_moves = simplify_repeated_argument_tests(&mut wording_body)
-        .then(|| maybe_moved_entry(&wording_body, &rt_md));
+    let repeated_arguments = simplify_repeated_argument_tests(&mut wording_body);
+    let repeated_comparisons = simplify_adjacent_comparisons(&mut wording_body);
+    let wording_moves = (repeated_arguments || repeated_comparisons).then(|| maybe_moved_entry(&wording_body, &rt_md));
     let wording_body = if wording_moves.is_some() { &wording_body } else { &rt_body };
+    let mut wording_init = repeated_comparisons.then(|| {
+        MaybeInitializedPlaces::new(tcx, wording_body, &rt_md).iterate_to_fixpoint(tcx, wording_body, None)
+            .into_results_cursor(wording_body)
+    });
     let rt_unassigned_entry = maybe_unassigned_entry(&rt_body, &rt_md);
     let mut rt = Flow {
         unwind_from: None,
@@ -5383,7 +5514,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let drop_holders_at_reassign: Vec<_> = reassign_drop_holders.iter().filter_map(|(local, loans)|
         Some((*local, cx.names.locals.get(local)?, drop_origins.get(local)?, loans))
     ).collect();
-    let mut state_at = |exits: &[Location], after: bool, imaginary: bool, runtime: Option<&[Location]>| -> State {
+    let mut state_at = |exits: &[Location], after: bool, imaginary: bool, runtime: Option<&[Location]>, adjacent: Option<&BTreeMap<Location, Location>>| -> State {
         let mut st = State::default();
         let mut active = BTreeMap::new();
         let mut declared = |local| *active.entry(local).or_insert_with(|| {
@@ -5719,7 +5850,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 continue;
             }
             let line = cx.row_of(*e);
-            let succs = cx.r.real_succs(*e);
+            let succs = adjacent.map_or_else(|| cx.r.real_succs(*e), |next| vec![next[e]]);
             let later: Vec<Location> = succs.iter().copied().filter(|s| cx.row_of(*s) > line).collect();
             let at = if later.is_empty() { succs } else { later };
             inscope.seek_after_primary_effect(*e);
@@ -5879,7 +6010,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 let mut after_join: BTreeSet<usize> = BTreeSet::new();
                 let mut seen: BTreeSet<Location> = BTreeSet::new();
                 let mut work: Vec<(Location, Option<Point>)> = Vec::new();
-                if after {
+                if let Some(next) = adjacent {
+                    legs.push((t.mid_index(*e), false, Some((t.start_index(next[e]), cx.row_of(next[e])))));
+                } else if after {
                     work.push((*e, None));
                 } else {
                     // The snapshot is at entry, before this row can issue
@@ -6063,7 +6196,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         // A guard or a short circuit can lower to more than one test. Only
         // use a test every other test of this conditional passes through.
         let first = tests.iter().copied().find(|&test| tests.iter().all(|&other| ldom(test, other)))?;
-        Some((branch, state_at(&[first], false, false, None)))
+        Some((branch, state_at(&[first], false, false, None, None)))
     }).collect();
     let mut arm_boundaries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, ArmBoundaries>>::default();
     let arm_edges: Vec<_> = switches.iter().filter_map(|exit| {
@@ -6087,7 +6220,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     == Some(super::SourceArm { branch, index: arm })
             }) {
                 let entries: Vec<_> = entries.into_iter().collect();
-                boundaries.entry = Some(state_at(&entries, false, false, None));
+                boundaries.entry = Some(state_at(&entries, false, false, None, None));
             }
         }
     }
@@ -6176,7 +6309,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
         let entry: Vec<_> = entry.into_iter().collect();
-        let mut entry_state = state_at(&entry, false, true, None);
+        let mut entry_state = state_at(&entry, false, true, None, None);
         // Storage can be live during a let initializer even though the
         // binding's lexical scope starts after it.
         let scopes: Vec<_> = entry.iter().flat_map(|&loc| {
@@ -6273,13 +6406,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let after = cx.rows.exits.range(cx.r.line_lo(arm)..=cx.r.line_hi(arm)).filter_map(|(&row, exits)| {
             let exits: Vec<_> = exits.iter().copied()
                 .filter(|loc| arm_locations.contains(loc) && contains(arm, *loc)).collect();
-            (!exits.is_empty()).then(|| (row, state_at(&exits, true, true, None)))
+            (!exits.is_empty()).then(|| (row, state_at(&exits, true, true, None, None)))
         }).collect();
         imaginary_edges.push(ImaginaryEdge {
             id: ImaginaryEdgeId(arm),
             entry: entry_state,
             after,
-            join: if rejoin.is_empty() { State::default() } else { state_at(&rejoin.into_iter().collect::<Vec<_>>(), false, false, None) },
+            join: if rejoin.is_empty() { State::default() } else { state_at(&rejoin.into_iter().collect::<Vec<_>>(), false, false, None, None) },
             changes,
             scrutinee_moves,
             initializer_bindings,
@@ -6328,7 +6461,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     for line in lines.into_iter().filter(|l| *l >= first_line && *l <= last_line) {
         let mut row = Row { line, partial_drops: scope_partials.remove(&line).unwrap_or_default(), ..Default::default() };
         if let Some(exits) = cx.rows.exits.get(&line) {
-            row.after = state_at(exits, true, false, None);
+            row.after = state_at(exits, true, false, None, None);
             if let [exit] = exits.as_slice() {
                 if let [next] = cx.r.real_succs(*exit).as_slice() {
                     let next_line = cx.row_of(*next);
@@ -6352,7 +6485,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             });
         }
         row.runtime_entry = entries.get(&line).map(|locs| locs.iter().any(|l| executes_at(l.block)));
-        row.before = entries.get(&line).map(|locs| state_at(&locs.iter().copied().collect::<Vec<_>>(), false, false, None));
+        row.before = entries.get(&line).map(|locs| state_at(&locs.iter().copied().collect::<Vec<_>>(), false, false, None, None));
         if let Some(specs) = cx.rows.arms.get(&line) {
             let nested: BTreeSet<_> = specs.iter().filter_map(|s| s.parent).collect();
             for (i, s) in specs.iter().enumerate() {
@@ -6367,8 +6500,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     has_exit: s.exits.iter().any(|exit| runs.contains(&exit.block)),
                     edge: s.edge,
                     continuing: (nested.contains(&i) && s.continuing.iter().any(|exit| runs.contains(&exit.block)))
-                        .then(|| state_at(&s.continuing, true, false, None)),
-                    after: state_at(&s.exits, true, false, None),
+                        .then(|| state_at(&s.continuing, true, false, None, None)),
+                    after: state_at(&s.exits, true, false, None, None),
                 });
             }
         }
@@ -6424,6 +6557,221 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             add(term.source_info.span);
         }
     }
+    let mut loops = rustc_data_structures::fx::FxIndexMap::default();
+    let boundaries = super::control::loop_boundaries(tcx, body, &checked);
+    let mut borrowed_slots = None;
+    let mut may_alias = |place: Place<'tcx>, loc| {
+        if place.is_indirect() { return true; }
+        let borrowed = borrowed_slots.get_or_insert_with(|| {
+            MaybeBorrowedLocals.iterate_to_fixpoint(tcx, body, None).into_results_cursor(body)
+        });
+        borrowed.seek_before_primary_effect(loc);
+        borrowed.get().contains(place.local)
+    };
+    // An edge runs when the runtime CFG executes its source and takes it.
+    // The runtime CFG already follows constant switches.
+    let running = |from: Location, to: Location| executes_at(from.block)
+        && (from.successor_within_block() == to
+            || runtime_blocks(from.block).any(|b| real_successor_blocks(&rt_body, b).into_iter().any(|t|
+                executes.contains(&t) && original_blocks.get(&t).copied().unwrap_or(t) == to.block)));
+    for bounds in boundaries {
+        let super::control::LoopBoundary { id, head: at, entries, backedges, exits } = bounds;
+        if !executes_at(at.block) { continue; }
+        let mut edge = |from, to, kind, jump| {
+            let runs = running(from, to);
+            let state = state_at(&[from], true, !runs, (!runs).then_some(&[]), None);
+            LoopEdge { from, to, kind, runs, jump, state }
+        };
+        let head_entry = at.block.start_location();
+        let mut edges = Vec::new();
+        edges.extend(entries.iter().map(|&from| edge(from, head_entry, LoopEdgeKind::Entry, None)));
+        edges.extend(backedges.iter().map(|&from| edge(from, head_entry, LoopEdgeKind::Backedge, None)));
+        edges.extend(exits.iter().map(|exit| {
+            let kind = if exit.exhaustion { LoopEdgeKind::Exhaustion } else { LoopEdgeKind::Break };
+            edge(exit.from, exit.to, kind, Some(exit.jump))
+        }));
+        edges.dedup_by_key(|e| (e.from, e.to, e.jump));
+        let head = state_at(&[at], false, false, None, None);
+        let entry = if at.statement_index > 0 || at == Location::START {
+            // SimplifyCfg can absorb pre-loop effects into the head block.
+            // The head is the FalseUnwind, after these effects.
+            head.clone()
+        } else {
+            state_at(&entries, true, false, None, None)
+        };
+        let executable_backedges: Vec<_> = edges.iter().filter(|e| e.runs && e.kind == LoopEdgeKind::Backedge)
+            .map(|e| e.from).collect();
+        // The checked CFG has the backedge but a constant condition
+        // keeps the runtime from taking it.
+        let constant_pruned_backedge = edges.iter().any(|e|
+            e.kind == LoopEdgeKind::Backedge && !e.runs && runs.contains(&e.from.block)
+                && real_successor_blocks(&drop_body, e.from.block).contains(&e.to.block));
+        let next_iteration = (!executable_backedges.is_empty())
+            .then(|| state_at(&executable_backedges, true, false, None, None));
+        let runtime_exits: Vec<_> = exits.iter().filter(|e| running(e.from, e.to)).map(|e| e.from).collect();
+        let continuation = (!runtime_exits.is_empty()).then(|| {
+            let first = exits[0];
+            let adjacent: BTreeMap<_, _> = exits.iter().map(|e| (e.last, e.continuation)).collect();
+            let exact = exits.iter().all(|exit| exit.continuation == first.continuation)
+                && (first.continuation.statement_index > 0
+                    || body.basic_blocks.predecessors()[first.continuation.block].iter()
+                        .all(|bb| adjacent.contains_key(&body.terminator_loc(*bb))));
+            if exact {
+                state_at(&[first.continuation], false, false, None, None)
+            } else {
+                // The shared continuation can also be reached from
+                // outside the loop. Read only the edges after their cleanup.
+                let last: Vec<_> = adjacent.keys().copied().collect();
+                let runtime_last: Vec<_> = exits.iter().filter(|e| running(e.from, e.to))
+                    .map(|e| e.last).collect::<BTreeSet<_>>().into_iter().flat_map(runtime_locations).collect();
+                state_at(&last, true, false, Some(&runtime_last), Some(&adjacent))
+            }
+        });
+
+        // Follow the edges backwards within an iteration. A write is
+        // guaranteed before an exit only when no path from the head to
+        // that exit bypasses it. Earlier iterations may still change the
+        // state reported at the head and on every exit.
+        let mut region = BTreeMap::new();
+        let mut work = runtime_exits.clone();
+        work.extend(&executable_backedges);
+        while let Some(loc) = work.pop() {
+            if region.contains_key(&loc) { continue; }
+            let previous = if loc == at {
+                Vec::new()
+            } else if loc.statement_index > 0 {
+                vec![Location { statement_index: loc.statement_index - 1, ..loc }]
+            } else {
+                // A runtime copy of a block stands for its original.
+                super::rows::real_predecessors(&rt_body, loc.block).into_iter()
+                    .map(|p| original_blocks.get(&p).copied().unwrap_or(p))
+                    .collect::<BTreeSet<_>>().into_iter()
+                    .filter(|&p| body.basic_blocks.dominators().dominates(at.block, p))
+                    .map(|p| body.terminator_loc(p)).filter(|&from| running(from, loc)).collect()
+            };
+            work.extend(&previous);
+            region.insert(loc, previous);
+        }
+        let mut round_region = BTreeSet::new();
+        let mut work = executable_backedges;
+        while let Some(loc) = work.pop() {
+            if round_region.insert(loc) {
+                work.extend(region.get(&loc).into_iter().flatten());
+            }
+        }
+        let loop_span = tcx.hir_span(id);
+        let inside = |loc: Location| executes_at(loc.block) && !body[loc.block].is_cleanup
+            && body.basic_blocks.dominators().dominates(at.block, loc.block)
+            && loop_span.contains(body.source_info(loc).span);
+        let is_operand = |loc: Location| match body[loc.block].statements.get(loc.statement_index) {
+            Some(s) => !matches!(s.kind, StatementKind::StorageLive(_) | StatementKind::StorageDead(_)),
+            None => !matches!(body[loc.block].terminator().kind, TerminatorKind::Drop { .. }),
+        };
+        let outside_region: Vec<_> = cx.rows.row.keys().copied()
+            .filter(|loc| !region.contains_key(loc) && inside(*loc)).collect();
+        let wording_entries: Vec<_> = entries.iter().copied().filter(|from|
+            wording_body.basic_blocks.dominators().is_reachable(from.block)
+            && real_successor_blocks(wording_body, from.block).contains(&head_entry.block)).collect();
+        let mut result_moves = BTreeMap::<_, Vec<_>>::new();
+        for exit in exits.iter().filter(|e| !e.exhaustion && running(e.from, e.to)) {
+            let Some(result) = exit.result else { continue; };
+            let rustc_hir::Node::Expr(expr) = tcx.hir_node(exit.jump) else { continue; };
+            let ExprKind::Break(_, Some(value)) = expr.kind else { continue; };
+            result_moves.entry((exit.jump.local_id, exit.from, exit.to)).or_default()
+                .extend(break_result_moves(body, result, value.span, &region, &mut may_alias));
+        }
+        let mut changes = BTreeMap::<_, LoopChange>::new();
+        for (_, place, name) in columns.iter().chain(&synth) {
+            if head.locals.get(name) != Some(&Some(place.local)) { continue; }
+            let affects = |path: MovePathIndex| place_under(*place, move_data.move_paths[path].place);
+            let mut writes = BTreeSet::new();
+            let mut moves = BTreeSet::new();
+            let mut moved_part = false;
+            for &loc in region.keys() {
+                if move_data.init_loc_map[loc].iter().any(|i| affects(move_data.inits[*i].path)) {
+                    writes.insert(loc);
+                }
+                if is_operand(loc) {
+                    for &m in move_data.loc_map[loc].iter() {
+                        let path = move_data.moves[m].path;
+                        if affects(path) {
+                            moves.insert(loc);
+                        } else if place_under(move_data.move_paths[path].place, *place) {
+                            moved_part = true;
+                        }
+                    }
+                }
+            }
+            let moved_away = outside_region.iter().any(|&loc| is_operand(loc)
+                && move_data.loc_map[loc].iter().any(|m| affects(move_data.moves[*m].path)));
+            let wrote_away = outside_region.iter().any(|&loc|
+                move_data.init_loc_map[loc].iter().any(|i| affects(move_data.inits[*i].path)));
+            if moves.is_empty() && !moved_part && writes.is_empty() && !moved_away && !wrote_away { continue; }
+            let mut work = runtime_exits.clone();
+            let mut seen = BTreeSet::new();
+            let mut writes_on_all_exits = !work.is_empty();
+            while let Some(loc) = work.pop() {
+                if writes.contains(&loc) || !seen.insert(loc) { continue; }
+                if region[&loc].is_empty() {
+                    writes_on_all_exits = false;
+                    break;
+                }
+                work.extend(&region[&loc]);
+            }
+            let mut change = LoopChange {
+                moved: !moves.is_empty(), moved_part, moved_away, wrote: !writes.is_empty(), wrote_away, writes_on_all_exits,
+                changes_next_iteration: writes.iter().chain(&moves).any(|loc| round_region.contains(loc)),
+                ..Default::default()
+            };
+            if at.statement_index == 0 && !wording_entries.is_empty()
+                && entry.cause.get(name) == Some(&"moved")
+            {
+                // In particular, a repeated comparison can rule out a
+                // re-entry that would carry a previous run's value.
+                if let (Some(init), LookupResult::Exact(path)) = (&mut wording_init, rt_md.rev_lookup.find(place.as_ref())) {
+                    change.entry_empty_at_runtime = wording_entries.iter().all(|&from| {
+                        init.seek_after_primary_effect(from);
+                        !init.get().contains(path)
+                    });
+                }
+            }
+            for edge in edges.iter().filter(|e| e.runs && e.jump.is_some()) {
+                let Some(jump) = edge.jump else { continue; };
+                let carrying = result_moves.get(&(jump.local_id, edge.from, edge.to)).is_some_and(|operands|
+                    operands.iter().any(|&(loc, moved)| moves.contains(&loc) && place_under(*place, moved)));
+                change.carried |= carrying;
+                if !matches!(edge.state.state.get(name), Some(&"moved" | &"maybe")) { continue; }
+                match edge.kind {
+                    LoopEdgeKind::Break if !carrying => {
+                        change.moved_at_break = true;
+                        let mut arms = super::control::enclosing_arms(tcx, jump, false);
+                        arms.retain(|arm| match tcx.hir_node(arm.branch) {
+                            rustc_hir::Node::Expr(e) => match e.kind {
+                                rustc_hir::ExprKind::If(..) => !tcx.hir_parent_iter(arm.branch).take(2)
+                                    .any(|(_, node)| matches!(node, rustc_hir::Node::Expr(parent)
+                                        if matches!(parent.kind, rustc_hir::ExprKind::Loop(_, _, rustc_hir::LoopSource::While, _)))),
+                                rustc_hir::ExprKind::Match(_, _, source) => matches!(source, rustc_hir::MatchSource::Normal),
+                                _ => true,
+                            },
+                            _ => true,
+                        });
+                        change.branch_move |= !arms.is_empty() && moves.iter().any(|&loc| {
+                            super::control::enclosing_arms(tcx, body.location_to_hir_id(loc), false)
+                                .iter().any(|arm| arms.contains(arm))
+                        });
+                    }
+                    LoopEdgeKind::Exhaustion => change.moved_at_exhaustion = true,
+                    _ => {}
+                }
+            }
+            changes.insert(name.clone(), change);
+        }
+        loops.insert(id, LoopState {
+            at, row: cx.r.line_lo(tcx.hir_span(id)), entry, head, next_iteration, continuation, edges,
+            constant_pruned_backedge, changes,
+        });
+    }
+
     // Read the MIR continuation before its first store or drop.
     let mut joins = rustc_data_structures::fx::FxIndexMap::default();
     let boundaries = super::control::conditional_joins(tcx, body, &cx.rows, &branch_spans.conditionals,
@@ -6477,7 +6825,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     }
                 }
             }
-            let mut completed = state_at(&exits, false, false, None);
+            let mut completed = state_at(&exits, false, false, None, None);
             completed.state.retain(|name, _| completed.locals.get(name) == Some(&Some(local)));
             if let Some(row) = out_rows.iter_mut().find(|r| r.line == line).filter(|_| !completed.state.is_empty()) {
                 row.completed_bindings.push(completed);
@@ -6497,16 +6845,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
                 for (arm, entries) in by_arm {
                     if let Some(bounds) = boundaries.get_mut(&arm).filter(|bounds| bounds.entry.is_some()) {
-                        bounds.join = Some(state_at(&entries, false, false, None));
+                        bounds.join = Some(state_at(&entries, false, false, None, None));
                     }
                 }
             }
         }
         let unshared = preds.len() == block_pred_count;
         let mut state = if unshared {
-            state_at(&[at], false, false, None)
+            state_at(&[at], false, false, None, None)
         } else {
-            state_at(&preds, true, false, Some(&runtime_incoming))
+            state_at(&preds, true, false, Some(&runtime_incoming), None)
         };
 
         let tests: Vec<_> = match tcx.hir_node(id) {
@@ -6543,7 +6891,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let entries: Vec<_> = region.iter().filter(|(loc, previous)| {
             in_region(**loc) && (previous.is_empty() || previous.iter().any(|&prev| !in_region(prev)))
         }).map(|(&loc, _)| loc).collect();
-        let entry = state_at(&entries, false, false, None);
+        let entry = state_at(&entries, false, false, None, None);
         let effect_on_every_path = |effects: &BTreeSet<Location>| {
             if effects.is_empty() { return false; }
             let mut work = incoming.clone();
@@ -6575,7 +6923,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let mut edge_state = if unshared && preds.len() == 1 {
                 state.state.clone()
             } else {
-                state_at(&[from], true, !edge_runs(from), Some(&runtime)).state
+                state_at(&[from], true, !edge_runs(from), Some(&runtime), None).state
             };
             match body[from.block].terminator().kind {
                 TerminatorKind::Call { destination, target: Some(target), .. }
@@ -6797,6 +7145,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         skipped_closure_returns,
         binding_sources,
         joins,
+        loops,
         branch_entries,
         arm_boundaries,
         def_id,

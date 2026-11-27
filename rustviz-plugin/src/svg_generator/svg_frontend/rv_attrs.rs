@@ -14,7 +14,7 @@
 //! (`code_line_attrs`).
 
 use crate::expr_visitor_utils::display_text;
-use crate::svg_generator::data::{AltRuntime, BreakAlt, Event, ExternalEvent, LineState, ResourceAccessPoint, ResourceTy, State, VisualizationData};
+use crate::svg_generator::data::{AltRuntime, BreakAlt, Event, ExternalEvent, LineState, MaybeMovedAt, ResourceAccessPoint, ResourceTy, State, VisualizationData};
 use std::collections::HashMap;
 
 /// Element kinds (`data-rv-kind`).
@@ -185,6 +185,7 @@ pub fn event_name(e: &Event) -> &'static str {
         Event::LoopIteratorDrop { .. } => "loop_iterator_drop",
         Event::LoopMaybeInit { .. } => "loop_maybe_init",
         Event::LoopExitKept { .. } => "loop_exit_kept",
+        Event::LoopExitMove { at: MaybeMovedAt::LoopPartial, .. } => "loop_partial_move",
         Event::LoopExitMove { .. } => "loop_exit_move",
         Event::OwnerDropIfTryReturns { .. } => "owner_drop_if_try_returns",
         Event::OwnerDropUnlessReturned { is_break: true } => "owner_drop_unless_break_value",
@@ -238,6 +239,7 @@ pub fn external_event_name(e: &ExternalEvent) -> &'static str {
         ExternalEvent::LoopIteratorDrop { .. } => "loop_iterator_drop",
         ExternalEvent::LoopMaybeInit { .. } => "loop_maybe_init",
         ExternalEvent::LoopExitKept { .. } => "loop_exit_kept",
+        ExternalEvent::LoopExitMove { at: MaybeMovedAt::LoopPartial, .. } => "loop_partial_move",
         ExternalEvent::LoopExitMove { .. } => "loop_exit_move",
         ExternalEvent::OwnerDropIfTryReturns { .. } => "owner_drop_if_try_returns",
         ExternalEvent::OwnerDropUnlessReturned { is_break: true, .. } => "owner_drop_unless_break_value",

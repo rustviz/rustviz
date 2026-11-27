@@ -341,7 +341,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let ExprKind::Loop(block, _, source, _) = l.kind else { continue };
       // One that never comes back round (#1467): a bare `loop` runs its
       // body once, as drawn; a `while` / `for` once or not at all.
-      let at_most_once = self.loop_never_rounds(l.span) == Some(true);
+      let at_most_once = self.loop_never_rounds(l.hir_id) == Some(true);
       // An irrefutable while-let has no pattern-failure path on which
       // to skip the body. Its scrutinee can still exit during evaluation.
       let always_matches = block.expr.is_some_and(|e| matches!(e.kind, ExprKind::If(cond, ..)
@@ -381,7 +381,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         .filter(|(o, ..)| o.hir_id != l.hir_id && l.span.contains(o.span))
         .map(|&(_, h, e)| (h, e))
         .collect();
-      self.approx_notes.push(ApproxNote::Loop { head, pass, head_cols, locals, nested, declares, at_most_once });
+      let constant_pruned_backedge = self.facts.and_then(|f| f.loops.get(&l.hir_id))
+        .is_some_and(|boundary| boundary.constant_pruned_backedge);
+      let text = hover_messages::approx_note_loop(declares, at_most_once, constant_pruned_backedge);
+      self.approx_notes.push(ApproxNote::Loop { head, pass, head_cols, locals, nested, text });
     }
   }
 }

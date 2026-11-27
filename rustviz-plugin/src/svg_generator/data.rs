@@ -1761,7 +1761,9 @@ pub enum MaybeMovedAt {
     /// `carried`: a `break` that doesn't come after the move moves it
     /// itself (`break s`, #1504): with `definite`, every way out moves
     /// it, by then or by its value.
-    Loop { nothing_above: bool, kept: bool, carried: bool },
+    Loop { nothing_above: bool, kept: bool, carried: bool, only_breaks: bool },
+    /// An unnamed payload can be moved, so the whole binding is unusable.
+    LoopPartial,
     /// The end of a labeled block (`'a: { … break 'a; … }`).
     /// `skipped`: the move is on the way to the block's end, and a
     /// `break` out of it before the move skips it (`'a: { if c { break
@@ -2426,6 +2428,9 @@ pub enum ExternalEvent {
         ro: ResourceAccessPoint,
         before_loop: Option<bool>,
         nested: bool,
+        prior_assignment: bool,
+        /// MIR says the loop assigns it on every exit that runs.
+        always_assigned: bool,
         id: usize
     },
     // At the end of a bare `loop` (#1000): `ro`, declared before the
@@ -3064,7 +3069,7 @@ pub enum Event {
     // See ExternalEvent::LoopIteratorDrop.
     LoopIteratorDrop { left: LoopLeft, early: Vec<usize> },
     // See ExternalEvent::LoopMaybeInit.
-    LoopMaybeInit { before_loop: Option<bool>, nested: bool },
+    LoopMaybeInit { before_loop: Option<bool>, nested: bool, prior_assignment: bool, always_assigned: bool },
     // See ExternalEvent::LoopExitKept.
     LoopExitKept { reassigned: bool },
     // See ExternalEvent::LoopExitMove.
@@ -4023,8 +4028,11 @@ impl Event {
             Event::ManuallyDropByHand => {
                 hover_messages::event_dot_manually_drop_by_hand(my_name)
             }
-            Event::LoopExitMove { definite, at: MaybeMovedAt::Loop { carried, .. } } => {
-                hover_messages::event_dot_loop_exit_move(my_name, *definite, false, *carried)
+            Event::LoopExitMove { definite, at: MaybeMovedAt::Loop { carried, only_breaks, .. } } => {
+                hover_messages::event_dot_loop_exit_move(my_name, *definite, false, *carried, *only_breaks)
+            }
+            Event::LoopExitMove { at: MaybeMovedAt::LoopPartial, .. } => {
+                hover_messages::event_dot_loop_partial_move(my_name)
             }
             Event::LoopExitMove { at: MaybeMovedAt::LabeledBlock { skipped: true, .. }, .. } => {
                 hover_messages::event_dot_block_break_skips_move(my_name)
@@ -4033,7 +4041,7 @@ impl Event {
                 hover_messages::event_dot_runtime_block_move(my_name)
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock { skipped: false, carried, .. } } => {
-                hover_messages::event_dot_loop_exit_move(my_name, *definite, true, *carried)
+                hover_messages::event_dot_loop_exit_move(my_name, *definite, true, *carried, false)
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, path, how } } => {
                 hover_messages::event_dot_chain_fail_move(my_name, *definite, to, dropped, *path, how)
@@ -4154,8 +4162,8 @@ impl Event {
             Event::LoopMaybeInit { nested: true, .. } => {
                 hover_messages::event_dot_loop_maybe_init_nested(my_name, true, true)
             }
-            Event::LoopMaybeInit { before_loop, .. } => {
-                hover_messages::event_dot_loop_maybe_init(my_name, true, true, None, *before_loop)
+            Event::LoopMaybeInit { before_loop, prior_assignment, .. } => {
+                hover_messages::event_dot_loop_maybe_init(my_name, true, true, None, *before_loop, *prior_assignment)
             }
             Event::TemporaryDrop { ty: Some(ty), when, part: Some(part), .. } => {
                 hover_messages::event_dot_temporary_part_drop(ty, when, part)
@@ -4987,20 +4995,14 @@ pub enum ApproxNote {
     /// a column first given a value inside the loop is the loop's
     /// receiver (`let n = loop { … break v; }`, bound once) or a
     /// temporary. Dots on the lines of a loop inside it (`nested`) don't
-    /// count: a loop with no other dot gets no note. `declares`: whether the loop declares
-    /// any variable (the note then says each pass has its own).
-    /// `at_most_once`: a `while` / `for` loop that never comes back
-    /// round (every pass leaves it, #1467), so it runs its body once or
-    /// not at all. (A bare `loop` that never comes back round runs it
-    /// once and gets no note.)
+    /// count: a loop with no other dot gets no note.
     Loop {
         head: usize,
         pass: (usize, usize),
         head_cols: Vec<u64>,
         locals: Vec<u64>,
         nested: Vec<(usize, usize)>,
-        declares: bool,
-        at_most_once: bool,
+        text: String,
     },
 }
 
@@ -5631,6 +5633,7 @@ impl Visualizable for VisualizationData {
             // not usable after the loop, like after a conditional that
             // moved it on some paths (the scope-end dot says whether a
             // drop flag decides the drop).
+            (_, Event::LoopExitMove { at: MaybeMovedAt::LoopPartial, .. }) => previous_state.clone(),
             (_, Event::LoopExitMove { .. }) =>
                 State::ResourceMoved{ move_to: ResourceTy::Anonymous, move_at_line: event_line, dropped_by_hand: false },
             // Moved into a name an or-pattern binds, if its alternative
@@ -6206,8 +6209,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopIteratorDrop{ left, early, .. } => {
           vec![(line_num, Event::LoopIteratorDrop { left: *left, early: early.clone() })]
         },
-        ExternalEvent::LoopMaybeInit{ before_loop, nested, .. } => {
-          vec![(line_num, Event::LoopMaybeInit { before_loop: *before_loop, nested: *nested })]
+        ExternalEvent::LoopMaybeInit{ before_loop, nested, prior_assignment, always_assigned, .. } => {
+          vec![(line_num, Event::LoopMaybeInit { before_loop: *before_loop, nested: *nested, prior_assignment: *prior_assignment, always_assigned: *always_assigned })]
         },
         ExternalEvent::LoopExitKept{ reassigned, .. } => {
           vec![(line_num, Event::LoopExitKept { reassigned: *reassigned })]
@@ -6734,8 +6737,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopIteratorDrop{ro, left, early, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left, early }, line_number);
             },
-            ExternalEvent::LoopMaybeInit{ro, before_loop, nested, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit { before_loop, nested }, line_number);
+            ExternalEvent::LoopMaybeInit{ro, before_loop, nested, prior_assignment, always_assigned, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopMaybeInit { before_loop, nested, prior_assignment, always_assigned }, line_number);
             },
             ExternalEvent::LoopExitKept{ro, reassigned, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitKept { reassigned }, line_number);

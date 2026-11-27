@@ -536,10 +536,6 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // what an earlier iteration assigned. Keyed by the loop (what its
   // `break`s name).
   pub loop_entry_uninit: Vec<(rustc_hir::HirId, HashSet<rustc_hir::HirId>)>,
-  // At each `break` visited so far: the loop (or block) it leaves, and
-  // the definitely and maybe uninitialized `let x;` locals there
-  // (#786). The loop joins them where it ends.
-  pub break_uninit: Vec<(rustc_hir::HirId, HashSet<rustc_hir::HirId>, HashSet<rustc_hir::HirId>)>,
   // A `let x;` local's name, once assigned, to `DeferredLet::frames_at`
   // (#786): it joins `in_scope` where it's first assigned, maybe inside
   // a loop, but belongs to the scope of its `let`.
@@ -892,9 +888,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub dead_loan_checked: HashSet<(Local, rustc_middle::mir::Location)>,
 
 
-  // Variables moved in a branch that then `break`s out of a loop
-  // (#344), recorded when the branch is built; the loop turns them
-  // into `LoopExitMove` events at its end.
+  // Moves made in a branch that breaks out of a labeled block.
   pub break_moves: Vec<BreakMove>,
   // The labeled blocks being visited, innermost last (#1286).
   pub labeled_frames: Vec<LabeledFrame>,
@@ -905,24 +899,19 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub way_out_moves: Vec<(rustc_hir::HirId, Option<rustc_hir::HirId>, BTreeSet<String>)>,
   // The loops being visited (by the HirId their `break`s name) and
   // the variables declared before each that hold no value where it
-  // starts but may where it comes back round (`given_round_loop`,
+  // starts but may where it comes back round (the backedge,
   // #1001): a later time round, an assignment to one drops what an
   // earlier time round gave it, if it still holds that.
   pub loop_given: Vec<(rustc_hir::HirId, Vec<ResourceAccessPoint>)>,
   // The loops being visited and the variables declared before each
   // that may hold a value where it starts, but only may (a branch
   // above moved them on some paths), each with what it holds where the
-  // loop comes back round (`round_states_loop`, #1012). An assignment
+  // loop comes back round (#1012). An assignment
   // to one the first time round drops the old value only if no branch
   // above moved it; a later time round, what the time round before
   // left. With each, whether something other than a branch may have
   // moved it (a drop flag's "nothing above", `moved_by_chain_condition`).
   pub loop_maybe_entry: Vec<(rustc_hir::HirId, Vec<MaybeEntry>)>,
-  // At each `break` (#1000, #1001): the loop it leaves, the variables
-  // declared before the loop that the path from the loop's start to
-  // the `break` gives a value to, and what each of the loop's
-  // `loop_given` variables holds there (`Ownership`).
-  pub break_states: Vec<BreakState>,
   // Set when a conditional directly in the function's body has every
   // branch leaving the function (`return`, panic): the closing brace
   // is unreachable, so it drops nothing (#515).
@@ -1121,10 +1110,7 @@ pub struct BreakMove {
   pub brk: rustc_hir::HirId,
   pub rap: ResourceAccessPoint,
   pub definite: bool,
-  /// Found on the path from the loop's start to `brk` (#980), not
-  /// only in the branch that breaks: the move may be outside any
-  /// branch, so a drop-flag text says "nothing above" moved it.
-  pub on_path: bool,
+
 }
 
 /// A labeled block being visited (`'a: { … }`, #1286): its block's
@@ -1142,23 +1128,11 @@ pub struct LabeledFrame {
   pub paths: Vec<(Vec<(usize, ExternalEvent)>, Vec<std::ops::Range<usize>>, BTreeSet<String>)>,
 }
 
-/// See `ExprVisitor::break_states`.
-#[derive(Clone)]
-pub struct BreakState {
-  pub target: rustc_hir::HirId,
-  pub assigned: Vec<ResourceAccessPoint>,
-  pub given: Vec<(ResourceAccessPoint, Ownership)>,
-  // The loop's `loop_maybe_entry` variables that nothing on the path
-  // from the start of its body to the `break` changes (#1012).
-  pub untouched: Vec<ResourceAccessPoint>,
-}
-
 /// See `ExprVisitor::loop_maybe_entry`.
 #[derive(Clone)]
 pub struct MaybeEntry {
   pub ro: ResourceAccessPoint,
-  /// What it holds where the loop comes back round.
-  pub round: Ownership,
+  /// The preceding move may run in a condition or an inline let.
   pub by_cond: bool,
   /// `Some(moves)` when the loop is inside another loop that `ro` was
   /// declared before (#1019): a run of it may follow an earlier one
@@ -1300,7 +1274,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       maybe_init_locals: HashSet::new(),
       maybe_init_by_loop: HashSet::new(),
       loop_entry_uninit: Vec::new(),
-      break_uninit: Vec::new(),
       deferred_decl_at: HashMap::new(),
       deferred_slots: HashMap::new(),
       rhs_arm_ids: HashMap::new(),
@@ -1377,7 +1350,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       break_moves: Vec::new(),
       loop_given: Vec::new(),
       loop_maybe_entry: Vec::new(),
-      break_states: Vec::new(),
       all_paths_exit: false,
       all_paths_exit_from: usize::MAX,
       dead_tail: false,
