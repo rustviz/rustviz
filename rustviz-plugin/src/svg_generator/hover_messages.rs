@@ -4065,44 +4065,60 @@ pub fn state_reserved(my_name: &String, call: Option<&str>) -> String {
 /// A two-phase reservation on a reference column. Reserving the referent
 /// still allows shared access through the reference and can allow replacing
 /// the binding. A reservation on the binding itself restricts that too.
-pub fn state_ref_reserved(my_name: &String, call: Option<&str>, through_ref: bool) -> String {
-    let me = styled_name_html(my_name);
-    let by = call.map_or(" by a call".to_owned(), |c| format!(" by the call to {}", styled_name_html(&c.to_owned())));
-    if through_ref {
-        format!("Access through {me} is reserved for a mutable borrow{by}. Until the call starts, shared reads through {me} are allowed. The reservation blocks moving the reference or borrowing through it mutably again")
+pub fn state_ref_reserved(name: &str, mutable: bool, call: Option<&str>, binding_reserved: bool, binding_shared: bool) -> String {
+    let me = styled_name_html(name);
+    let kind = if mutable { "mutable" } else { "shared" };
+    let by = call.map_or_else(|| "a call".to_owned(), |c| format!("the call to {}", styled_name_html(c)));
+    let mut title = format!("{me} holds a {kind} reference. ");
+    if binding_reserved {
+        title.push_str(&format!("The reference {me} is reserved for a mutable borrow by {by}. Until the call starts, shared reads of {me} are allowed. The reservation blocks moving, replacing, or mutably borrowing the reserved reference"));
     } else {
-        format!("The reference {me} is reserved for a mutable borrow{by}. Until the call starts, shared reads of {me} are allowed. The reservation blocks moving, replacing, or mutably borrowing the reserved reference")
+        title.push_str(&format!("Access through {me} is reserved for a mutable borrow by {by}. Until the call starts, shared reads through {me} are allowed. The reservation blocks moving the reference or taking another mutable borrow of the reserved place"));
     }
+    if binding_shared {
+        title.push_str(&format!(". The binding {me} is also shared and cannot be replaced while that shared borrow is live"));
+    }
+    title
 }
 
-/// The faint dotted segment of a column while it is mutably lent out
-/// (RevokedPrivilege, #722): the column can't be used until the `&mut`
-/// borrow ends. Worded like the lender's dot (`event_dot_mut_lend`,
-/// `event_dot_lend_through_ref`, `event_dot_lend_to_loop_iterator`),
-/// with "until the borrow ends" for the stretch of rows.
-///
-/// `through_ref`: the column is a `&mut` reference, so what's borrowed is
-/// what it points to (Some(pointee_copy)); `ref_itself`: the column is a
-/// `&T` binding that was itself borrowed `&mut` (`&mut r`).
-pub fn state_lent_out(my_name: &String, to: LentTo, through_ref: Option<bool>, ref_itself: bool, holds_value: bool) -> String {
-    let me = styled_name_html(my_name);
+/// What the exclusive loan on this segment restricts.
+pub enum LentPlace {
+    Owned { holds_value: bool },
+    RefBinding,
+    ThroughRef { pointee_copy: bool, binding_borrowed: bool },
+}
+
+/// A revoked-privilege segment. The source can be conditional even
+/// though borrowck restricts access on every path after the join.
+pub fn state_lent_out(name: &str, to: LentTo, place: LentPlace, alt: Option<&crate::svg_generator::data::BreakAlt>) -> String {
+    let me = styled_name_html(name);
     let by = match &to {
         LentTo::Var(v) => format!(" by {}", styled_name_html(v)),
         LentTo::Closure(c) => format!(" by closure {}", styled_name_html(c)),
         LentTo::LoopIterator => " by the `for` loop's iterator".to_owned(),
         LentTo::Unknown => String::new(),
     };
-    let until = if matches!(to, LentTo::LoopIterator) { "the loop ends" } else { "the borrow ends" };
-    if let Some(pointee_copy) = through_ref.filter(|_| !ref_itself) {
-        let pointee = held(pointee_copy);
-        return format!("the {pointee} {me} points to is mutably borrowed{by} through {me}. Until {until}, the reference in {me} can't be read, moved, or used to access the {pointee}. A mutable binding can still be assigned a new reference");
-    }
-    let subject = if ref_itself {
-        format!("{} is mutably borrowed{}", me, by)
-    } else {
-        format!("{}'s {} is mutably borrowed{}", me, held(holds_value), by)
+    let condition = alt.map_or_else(String::new, break_alt_if_suffix);
+    let subject = match place {
+        LentPlace::ThroughRef { pointee_copy, binding_borrowed } => {
+            let pointee = held(pointee_copy);
+            let while_live = if matches!(to, LentTo::LoopIterator) {
+                "While the iterator or a reference it yielded keeps the borrow live"
+            } else {
+                "Until the borrow ends"
+            };
+            let reassign = if binding_borrowed {
+                format!("The binding {me} is also borrowed, so it cannot be assigned a new reference yet")
+            } else {
+                "A mutable binding can still be assigned a new reference if the binding itself is unborrowed".to_owned()
+            };
+            return format!("the {pointee} {me} points to is mutably borrowed{by} through {me}{condition}. {while_live}, the reference in {me} can't be read, moved, or used to access the {pointee}. {reassign}");
+        }
+        LentPlace::RefBinding => format!("{me} is mutably borrowed{by}"),
+        LentPlace::Owned { holds_value } => format!("{me}'s {} is mutably borrowed{by}", held(holds_value)),
     };
-    format!("{}; {} can't be used until {}", subject, me, until)
+    let until = if matches!(to, LentTo::LoopIterator) { "the loop ends" } else { "the borrow ends" };
+    format!("{subject}{condition}; {me} can't be used until {until}")
 }
 
 // The dots of a `&mut` reference whose pointee a `for` loop's iterator

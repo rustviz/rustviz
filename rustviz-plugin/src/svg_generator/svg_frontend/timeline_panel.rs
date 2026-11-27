@@ -4305,33 +4305,51 @@ fn moved_between(visualization_data: &VisualizationData, r: &ResourceAccessPoint
 /// result (`let w = first_mut(&mut v);`) isn't named; with several
 /// holders (`it` and the `y` taken out of it) none is.
 fn lent_out_title(rap: &ResourceAccessPoint, visualization_data: &VisualizationData, line: usize, path: &[(usize, usize)]) -> String {
-    let through_ref = rap.is_mutref().then(|| rap.points_to_copy());
-    if loop_iterator_holds(visualization_data, rap, line).is_some() {
-        return hover_messages::state_lent_out(
-            rap.name(), hover_messages::LentTo::LoopIterator, through_ref, rap.is_ref() && !rap.is_mutref(), rap.holds_value(),
-        );
-    }
-    let (holder, of_ref_var) = replayed_lent_holder(rap, visualization_data, line, path);
-    let to = match holder.as_ref() {
+    let iterator = loop_iterator_holds(visualization_data, rap, line).is_some();
+    let replay = if iterator { ReplayedLend::default() } else { replayed_lent_holder(rap, visualization_data, line, path) };
+    let to = match replay.holder.as_ref() {
+        _ if iterator => hover_messages::LentTo::LoopIterator,
         Some((name, true)) => hover_messages::LentTo::Closure(name),
         Some((name, false)) => hover_messages::LentTo::Var(name),
         None => hover_messages::LentTo::Unknown,
     };
-    // `&mut r` borrows the reference itself, unlike `&mut *r` (#914).
-    let ref_itself = (rap.is_ref() && !rap.is_mutref()) || of_ref_var;
-    hover_messages::state_lent_out(rap.name(), to, through_ref, ref_itself, rap.holds_value())
+    // Deref coercion can leave a loan of the binding live while the
+    // result accesses its referent. Only claim this at a known boundary.
+    let table = &visualization_data.state_table;
+    let binding_borrowed = visualization_data.fn_source_lines.get(rap.hash())
+        .zip(rv_attrs::line_of(line, &visualization_data.row_lines))
+        .and_then(|(&f, r)| Some((f, table.cell(f, rap.name(), r, r)?)))
+        .is_some_and(|(f, c)| !c.may_lend && c.lent.iter().any(|l|
+            table.loan(f, rap.name(), l.loan).is_some_and(|i| i.whole.contains(rap.name()))));
+    hover_messages::state_lent_out(rap.name(), to, lent_place(rap, replay.of_ref_var, binding_borrowed), replay.alt)
 }
 
-/// The holder the legacy title would name (and whether it is a closure),
-/// plus whether all the replayed loans borrow the reference binding.
-fn replayed_lent_holder(
+fn lent_place(rap: &ResourceAccessPoint, of_ref_var: bool, binding_borrowed: bool) -> hover_messages::LentPlace {
+    if rap.is_ref() && (of_ref_var || !rap.is_mutref()) {
+        hover_messages::LentPlace::RefBinding
+    } else if rap.is_mutref() {
+        hover_messages::LentPlace::ThroughRef { pointee_copy: rap.points_to_copy(), binding_borrowed }
+    } else {
+        hover_messages::LentPlace::Owned { holds_value: rap.holds_value() }
+    }
+}
+
+/// The holder and source qualification the legacy title would use.
+#[derive(Default)]
+struct ReplayedLend<'a> {
+    holder: Option<(String, bool)>,
+    of_ref_var: bool,
+    alt: Option<&'a BreakAlt>,
+}
+
+fn replayed_lent_holder<'a>(
     rap: &ResourceAccessPoint,
-    visualization_data: &VisualizationData,
+    visualization_data: &'a VisualizationData,
     line: usize,
     path: &[(usize, usize)],
-) -> (Option<(String, bool)>, bool) {
+) -> ReplayedLend<'a> {
     let Some(timeline) = visualization_data.timelines.get(rap.hash()) else {
-        return (None, false);
+        return ReplayedLend::default();
     };
     let mut history = Vec::new();
     flat_history(&timeline.history, path, &mut history);
@@ -4344,7 +4362,7 @@ fn replayed_lent_holder(
     };
     // Each live lend's holder, and whether it borrows the reference
     // column itself (`&mut r`, #914).
-    let mut holders: Vec<(Option<(String, bool, bool)>, bool)> = Vec::new();
+    let mut holders: Vec<(Option<(String, bool, bool)>, bool, usize)> = Vec::new();
     // Holders reached by following a reference's moves (#1237).
     let mut moved_to: Vec<Option<(String, bool, bool)>> = Vec::new();
     for (l, e) in history.iter().filter(|(l, _)| *l <= line) {
@@ -4354,14 +4372,14 @@ fn replayed_lent_holder(
             // r;`, `G { f: r }`), that one holds the borrow now (#1237);
             // into a call's result (`let k = id(r);`, #1128), the result's
             // holder has a lend of its own.
-            Event::MutableLend { to: ResourceTy::Value(r), of_ref_var, .. } if r.is_mutref() && moved_between(visualization_data, r, *l, line) => {
+            Event::MutableLend { to: ResourceTy::Value(r), of_ref_var, id, .. } if r.is_mutref() && moved_between(visualization_data, r, *l, line) => {
                 if let Some(h) = holder_after_moves(visualization_data, r, *l, line) {
                     let k = key(&ResourceTy::Value(h));
                     moved_to.push(k.clone());
-                    holders.push((k, *of_ref_var));
+                    holders.push((k, *of_ref_var, *id));
                 }
             }
-            Event::MutableLend { to, of_ref_var, .. } => holders.push((key(to), *of_ref_var)),
+            Event::MutableLend { to, of_ref_var, id, .. } => holders.push((key(to), *of_ref_var, *id)),
             Event::MutableReacquire { from, .. } => {
                 let k = key(from);
                 if let Some(i) = holders.iter().position(|h| h.0 == k) {
@@ -4378,6 +4396,10 @@ fn replayed_lent_holder(
         holders.retain(|h| !moved_to.contains(&h.0));
     }
     let of_ref_var = !holders.is_empty() && holders.iter().all(|h| h.1);
+    // The same event ID that qualifies the lender dot also qualifies
+    // its segment. Only one of the value breaks actually supplied it.
+    let alt = holders.first().and_then(|h| borrow_break_alt(h.2, visualization_data))
+        .filter(|alt| holders.iter().all(|h| borrow_break_alt(h.2, visualization_data) == Some(*alt)));
     // A call that handed its borrow on to its result isn't the holder.
     let mut holders: Vec<(String, bool)> = holders.into_iter()
         .map(|h| h.0)
@@ -4390,7 +4412,7 @@ fn replayed_lent_holder(
         [one] if !one.0.is_empty() => Some(one.clone()),
         _ => None,
     };
-    (holder, of_ref_var)
+    ReplayedLend { holder, of_ref_var, alt }
 }
 
 /// The lender's dot of a borrow of a whole struct or tuple by a pattern
@@ -10448,7 +10470,7 @@ fn owner_loan_title(
         // same kind of loan stands.
         return (layout.clone(), legacy(), true);
     } else if exclusive {
-        hover_messages::state_lent_out(name, to, None, false, rap.holds_value())
+        hover_messages::state_lent_out(name, to, lent_place(rap, false, false), None)
     } else {
         hover_messages::state_shared_by(name, exact_holder, rap.holds_value())
     };
@@ -10778,6 +10800,9 @@ fn table_lent_state_of(
     let lender = |loan: usize| table.loan_lender(fn_line, col, loan).unwrap_or("");
     let of_itself = |loan: usize| lender(loan) == col;
     let of_parent = |loan: usize| col.starts_with(&format!("{}.", lender(loan).trim_start_matches('*')));
+    let reserved = own_loans.iter().find(|l| l.kind == "reserved");
+    let binding_shared = own_loans.iter().any(|l| l.kind == "shared"
+        && table.loan(fn_line, col, l.loan).is_some_and(|info| info.whole.contains(col)));
     if rap.is_ref() && !own_loans.is_empty() {
         // Where the table can't say it per path or 2.x's words don't fit,
         // 2.x's style stands: a loan taken in one arm of a branch on one
@@ -10786,7 +10811,7 @@ fn table_lent_state_of(
         // or a loan through it taken before it was given another reference
         // on some path (it may point elsewhere now).
         if own_loans.iter().any(|l| table.loan_arm(fn_line, col, l.loan).is_some())
-            || own_loans.iter().any(|l| l.kind == "shared" && (of_itself(l.loan) || of_parent(l.loan)))
+            || (binding_shared && reserved.is_none())
             || own_loans.iter().any(|l| l.kind == "unique" && of_parent(l.loan))
         {
             return None;
@@ -10797,7 +10822,7 @@ fn table_lent_state_of(
             .collect();
         if let (Some(first), Some(t)) = (through_lines.iter().min(), visualization_data.timelines.get(rap.hash())) {
             let mut evs = Vec::new();
-            flat_history(&t.history, &[], &mut evs);
+            flat_history(&t.history, path, &mut evs);
             let repointed = evs.iter().any(|(l, e)| {
                 matches!(e, Event::StaticBorrow { .. } | Event::MutableBorrow { .. } | Event::Acquire { .. } | Event::Copy { .. })
                     && rv_attrs::line_of(*l, &visualization_data.row_lines).is_some_and(|sl| sl > *first && sl <= src)
@@ -10809,7 +10834,6 @@ fn table_lent_state_of(
     }
     let exclusive: Vec<_> = own_loans.iter().filter(|l| matches!(l.kind, "mut" | "unique")).collect();
     let shared = own_loans.iter().any(|l| l.kind == "shared");
-    let reserved = own_loans.iter().find(|l| l.kind == "reserved");
     if !exclusive.is_empty() {
         // Its holder, when every path agrees on one (a join may bring a
         // loan of it from each arm to a different holder).
@@ -10825,54 +10849,50 @@ fn table_lent_state_of(
             let covered: BTreeSet<usize> = arms.iter().flatten().filter(|((l2, b2, _), _)| l2 == l && b2 == b).map(|((_, _, a), _)| *a).collect();
             arms.iter().flatten().find(|((l2, b2, _), _)| l2 == l && b2 == b).is_some_and(|(_, n)| covered.len() == *n)
         });
-        let holder = (holders.len() == 1 && !in_arm)
-            .then(|| visualization_data.timelines.values().map(|t| &t.resource_access_point).find(|h| {
-                // (Not the column itself: a reborrow it returns, `&mut v[0]`
-                // as the fn's value, is held by the caller's reference.)
-                h.name() != rap.name() && holders.contains(h.name().as_str()) && visualization_data.fn_source_lines.get(h.hash()) == Some(&fn_line)
-            }))
-            .flatten();
-        // A closure's unique immutable borrow (it writes through a `&mut`
-        // stored in the column) isn't a mutable borrow of it.
-        let unique = exclusive.iter().all(|l| l.kind == "unique");
-        let holds_loan = |h: &ResourceAccessPoint| {
+        let column = |name: &str| visualization_data.timelines.values().map(|t| &t.resource_access_point)
+            .find(|h| h.name() == name && visualization_data.fn_source_lines.get(h.hash()) == Some(&fn_line));
+        let carries = |h: &ResourceAccessPoint, loan: &crate::facts::schema::Lent| {
             if h.is_member() {
-                // Cell::holds describes whole locals. Projected holders
-                // are tracked on the loan itself.
-                return exclusive.iter().any(|l| l.current.contains(h.name()));
+                // Cell::holds is for whole locals. The loan records which
+                // projected places carry it at this same MIR boundary.
+                loan.current.contains(h.name())
+            } else {
+                table.cell(fn_line, h.name(), cell.from_row, cell.from_row)
+                    .is_some_and(|c| c.holds.contains(&loan.loan))
             }
-            table.cell(fn_line, h.name(), cell.from_row, cell.from_row)
-                .is_some_and(|c| exclusive.iter().any(|l| c.holds.contains(&l.loan)))
         };
-        let mut stale = false;
+        let unique = exclusive.iter().all(|l| l.kind == "unique");
+        let named = holders.first().filter(|_| holders.len() == 1 && !in_arm).and_then(|name| column(name));
+        // A capture belongs to the closure even on the row that constructs
+        // it, before the completed closure is stored in its binding.
+        let capture = named.filter(|h| unique && h.is_closure() && exclusive.iter().all(|l|
+            table.loan(fn_line, col, l.loan).is_some_and(|i| i.direct_holders.contains(h.name()))));
+        let holder = capture.or_else(|| named.filter(|h| h.hash() != rap.hash() && exclusive.iter().all(|l| {
+                // Lent::holder can select one of several live carriers.
+                // A join with different possible holders has no single name.
+                carries(h, l) && table.loan(fn_line, col, l.loan).is_some_and(|info| info.holders.iter()
+                    .filter(|n| *n != h.name() && *n != col).all(|n| !table.cell(fn_line, n, cell.from_row, cell.from_row)
+                        .is_some_and(|c| c.holds.contains(&l.loan))))
+            })));
         if matches!(state, State::RevokedPrivilege { .. }) {
-            // 2.x's own wording (it knows chains, loops, closures, "along
-            // with p", `by h.r`) stands, unless the facts show it wrong: a
-            // unique borrow, a borrow on some paths only, or a holder that
-            // no longer holds the loan, even if it still has a value.
-            if let Some(current) = holder.filter(|h| holds_loan(h)) {
-                // The layout's `to` can be anonymous even when its
-                // tooltip names a holder. Check the holder it would say.
-                if loop_iterator_holds(visualization_data, rap, row).is_none() {
-                    let (old, _) = replayed_lent_holder(rap, visualization_data, row, path);
-                    stale = old.is_some_and(|(name, _)| {
-                        name != *current.name() && visualization_data.timelines.values().any(|t| {
-                            let h = &t.resource_access_point;
-                            h.name() == &name && visualization_data.fn_source_lines.get(h.hash()) == Some(&fn_line) && !holds_loan(h)
-                        })
-                    });
-                }
-            }
-            if !unique && every_path && !stale {
+            let old = if loop_iterator_holds(visualization_data, rap, row).is_none() {
+                let replayed = replayed_lent_holder(rap, visualization_data, row, path);
+                replayed.holder.as_ref().and_then(|(name, _)| column(name))
+            } else {
+                None
+            };
+            // Validate the old claim even when there is no single named
+            // replacement. A shared reference can keep a mutable loan
+            // live, but cannot provide mutable access to its referent.
+            let invalid = old.is_some_and(|h| (h.is_ref() && !h.is_mutref())
+                || !exclusive.iter().all(|l| carries(h, l)));
+            if !unique && every_path && !invalid {
                 return None;
             }
         }
-        // A shared reference or an aggregate can keep a mutable loan
-        // live. Name that role without saying it holds an exclusive
-        // reference to this particular place (Q8).
-        let kept_by = holder.filter(|h| stale && !h.is_closure() && !(h.is_mutref() && exclusive.iter().all(|l| {
-            table.loan(fn_line, col, l.loan).is_some_and(|i| i.direct_holders.contains(h.name()))
-        })));
+        let direct_mut = |h: &ResourceAccessPoint| h.is_mutref() && exclusive.iter().all(|l|
+            table.loan(fn_line, col, l.loan).is_some_and(|i| i.direct_holders.contains(h.name())));
+        let kept_by = holder.filter(|h| !h.is_closure() && !direct_mut(h));
         let lent_to = match holder.filter(|_| kept_by.is_none()) {
             Some(h) if h.is_closure() => hover_messages::LentTo::Closure(h.name()),
             Some(h) => hover_messages::LentTo::Var(h.name()),
@@ -10889,12 +10909,33 @@ fn table_lent_state_of(
             // a field of: `&mut p` for `p.n`; always so for a `&T`), or what
             // it points to is, through it (`&mut *r`).
             let ref_itself = !rap.is_mutref() || exclusive.iter().all(|l| of_itself(l.loan) || of_parent(l.loan));
-            hover_messages::state_lent_out(rap.name(), lent_to, rap.is_mutref().then(|| rap.points_to_copy()), ref_itself, rap.holds_value())
+            hover_messages::state_lent_out(col, lent_to, lent_place(rap, ref_itself, binding_shared), None)
         } else {
-            hover_messages::state_lent_out(rap.name(), lent_to, None, false, rap.holds_value())
+            hover_messages::state_lent_out(col, lent_to, lent_place(rap, false, false), None)
         };
+        let origin = exclusive.first().and_then(|l| table.loan(fn_line, col, l.loan)?.direct_holders.first())
+            .and_then(|name| column(name));
+        if let Some(h) = origin.filter(|h| h.is_mutref() && !cell.may_lend && holder.is_none_or(|cur| cur.hash() != h.hash())
+            && exclusive.iter().all(|l| table.loan(fn_line, col, l.loan)
+                .is_some_and(|i| i.runs && i.direct_holders.first() == Some(h.name()))))
+        {
+            // The initial borrower is meaningful even when it is no
+            // longer the live carrier. A match scrutinee can also be
+            // borrowed before the arm binds its reference.
+            let original = styled_name_html(h.name());
+            if exclusive.iter().all(|l| table.loan(fn_line, col, l.loan).is_some_and(|i|
+                i.direct_holder.as_ref() == Some(h.name()) && i.through.is_some()))
+            {
+                title.push_str(&format!(". {original} took the original mutable reborrow"));
+            } else {
+                title.push_str(&format!(". This borrow supplies the reference for {original}"));
+            }
+        }
         if let Some(h) = kept_by {
             title.push_str(&format!(". The borrow checker tracks this borrow through {}", styled_name_html(h.name())));
+            if h.is_ref() && !h.is_mutref() {
+                title.push_str(", which holds a shared reference");
+            }
         }
         let to = holder.map_or(ResourceTy::Anonymous, |h| ResourceTy::Value(h.clone()));
         return Some((State::RevokedPrivilege { to: to.clone(), borrow_to: to, prev_state: Box::new(State::FullPrivilege { s }) }, Some(title)));
@@ -10904,8 +10945,9 @@ fn table_lent_state_of(
         // meanwhile; a `&T` is drawn shared all along (2.x's style).
         if let Some(reserved) = reserved {
             let loan = table.loan(fn_line, col, reserved.loan)?;
-            let through_ref = loan.through.as_ref() == Some(col);
-            let title = hover_messages::state_ref_reserved(col, loan.to_call.as_deref(), through_ref);
+            // `whole` tests the column's MIR place. A reservation of **r
+            // goes through r as well as *r, and leaves r replaceable.
+            let title = hover_messages::state_ref_reserved(col, rap.is_mutref(), loan.to_call.as_deref(), loan.whole.contains(col), binding_shared);
             return Some((State::PartialPrivilege { s }, Some(title)));
         }
         return match (shared, state) {

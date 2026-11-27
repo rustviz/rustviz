@@ -17927,7 +17927,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "reborrow_kinds",
         must_contain: &[
             "a's resource is mutably borrowed by ra; a can't be used until the borrow ends",
-            "the resource ra points to is mutably borrowed by ra2 through ra. Until the borrow ends, the reference in ra can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference",
+            "the resource ra points to is mutably borrowed by ra2 through ra. Until the borrow ends, the reference in ra can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference if the binding itself is unborrowed",
             // rb2 = &mut rb borrows rb itself, not what rb points to (#914).
             "rb is mutably borrowed by rb2; rb can't be used until the borrow ends",
         ],
@@ -22779,7 +22779,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "reborrow_through_local_mut_ref_1152",
         must_contain: &[
             "Mutable reborrow from r1 to it: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
-            "the resource r1 points to is mutably borrowed by it through r1. Until the borrow ends, the reference in r1 can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference",
+            "the resource r1 points to is mutably borrowed by it through r1. Until the borrow ends, the reference in r1 can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference if the binding itself is unborrowed",
             "it's mutable borrow ends",
             "_x's mutable borrow ends",
             "Mutable reborrow from r2 to x: first_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
@@ -28242,7 +28242,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "return_elem_reborrow",
         // A reborrow returned to the caller: held by the caller's
         // reference, not by v.
-        must_contain: &["the resource v points to is mutably borrowed through v. Until the borrow ends, the reference in v can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference"],
+        must_contain: &["the resource v points to is mutably borrowed through v. Until the borrow ends, the reference in v can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference if the binding itself is unborrowed"],
         must_not_contain: &["mutably borrowed by v through v"],
     },
     // #1860's review: where the table can't word a reference's loan, 2.x's
@@ -28590,10 +28590,33 @@ fn reference_reservation_shows_shared_access_1861() {
     for row in [4, 5] {
         let (state, tips) = column_line_at(&svg, "r", row);
         assert_eq!(state, "partial_privilege", "row {row}: {tips:?}");
-        assert_eq!(tips, ["Access through r is reserved for a mutable borrow by the call to push. Until the call starts, shared reads through r are allowed. The reservation blocks moving the reference or borrowing through it mutably again"]);
+        assert!(tips[0].contains("r holds a mutable reference. Access through r is reserved for a mutable borrow by the call to push"), "{tips:?}");
+        assert!(tips[0].contains("shared reads through r are allowed"), "{tips:?}");
     }
     let (state, _) = column_line_at(&svg, "r", 6);
     assert_eq!(state, "full_privilege");
+}
+
+#[test]
+fn reference_reservation_places_1861() {
+    let svg = run_with_local_backend("reference_two_phase_reservation_1861").timeline_panel_string();
+    // The pending push retains the original vector when r is replaced.
+    let (_, nested) = column_line_at(&svg, "r", 11);
+    assert!(nested[0].contains("Access through r is reserved"), "{nested:?}");
+    assert!(!nested[0].contains("replacing"), "{nested:?}");
+    // Taking &r during argument evaluation keeps both loans live.
+    let (_, both) = column_line_at(&svg, "r", 20);
+    assert!(both[0].contains("mutable borrow by the call to push") && both[0].contains("binding r is also shared"), "{both:?}");
+    // Slot::take reserves the reference binding itself.
+    let (_, binding) = column_line_at(&svg, "r", 33);
+    assert!(binding[0].contains("moving, replacing, or mutably borrowing the reserved reference"), "{binding:?}");
+}
+
+#[test]
+fn reserved_reference_field_keeps_its_type_1861() {
+    let svg = run_with_local_backend("rv3_part_loan_titles").timeline_panel_string();
+    let (_, tips) = column_line_at(&svg, "p.r", 52);
+    assert!(tips[0].contains("p.r holds a mutable reference") && tips[0].contains("mutable borrow by the call to std::mem::replace"), "{tips:?}");
 }
 
 #[test]
@@ -28602,9 +28625,64 @@ fn initialized_reference_can_stop_holding_a_loan_1862() {
     let svg = rv.timeline_panel_string();
     // r10 is still initialized after the copy, but the rustc loan is
     // live through o10's later use. o10 may contain the other arm's reference.
-    let (_, tips) = column_line_at(&svg, "p10", 108);
-    assert!(tips.iter().any(|t| t.contains("The borrow checker tracks this borrow through o10")), "{tips:?}");
-    assert!(!tips.iter().any(|t| t.contains("mutably borrowed by r10") || t.contains("mutably borrowed by o10")), "{tips:?}");
+    for (row, holder) in [(107, "r10"), (108, "o10")] {
+        let (_, tips) = column_line_at(&svg, "p10", row);
+        assert!(tips[0].contains(&format!("The borrow checker tracks this borrow through {holder}")), "{row}: {tips:?}");
+        assert!(!tips[0].contains("mutably borrowed by"), "{row}: {tips:?}");
+        if row == 107 {
+            assert!(tips[0].contains("holds a shared reference"), "{tips:?}");
+        }
+    }
+}
+
+#[test]
+fn original_reborrow_and_current_holder_1862() {
+    let svg = run_with_local_backend("reborrow_chain_ends_1415").timeline_panel_string();
+    for (row, current) in [(30, "h"), (60, "m3")] {
+        let (_, tips) = column_line_at(&svg, "m", row);
+        assert!(tips[0].contains("m2 took the original mutable reborrow") &&
+            tips[0].contains(&format!("tracks this borrow through {current}")), "{row}: {tips:?}");
+    }
+}
+
+#[test]
+fn stale_holder_without_a_named_replacement_1862() {
+    let svg = run_with_local_backend("reference_loan_holders_1862").timeline_panel_string();
+    let (state, tips) = column_line_at(&svg, "r", 24);
+    assert_eq!(state, "revoked_privilege");
+    assert!(tips[0].contains("mutably borrowed") && !tips[0].contains("mutably borrowed by first"), "{tips:?}");
+}
+
+#[test]
+fn several_possible_holders_1862() {
+    let svg = run_with_local_backend("reference_loan_holders_1862").timeline_panel_string();
+    let (state, tips) = column_line_at(&svg, "r", 40);
+    assert_eq!(state, "revoked_privilege");
+    assert!(!tips[0].contains("mutably borrowed by") && !tips[0].contains("tracks this borrow through"), "{tips:?}");
+}
+
+#[test]
+fn sibling_reassignment_does_not_hide_the_live_holder_1862() {
+    let svg = run_with_local_backend("reference_loan_holders_1862").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let titles: Vec<_> = doc.descendants()
+        .filter(|n| n.attribute("data-rv-kind") == Some("branch_line") && n.attribute("data-rv-var") == Some("r"))
+        .filter(|n| n.attribute("data-rv-line-end") == Some("13"))
+        .flat_map(|n| timeline_tooltips(&svg[n.range()])).collect();
+    assert!(titles.iter().any(|t| t.contains("tracks this borrow through h")), "{titles:?}");
+    assert!(!titles.iter().any(|t| t.contains("mutably borrowed by m")), "{titles:?}");
+}
+
+#[test]
+fn reborrow_origin_survives_an_unnamed_carrier_1862() {
+    let svg = run_with_local_backend("reference_loan_holders_1862").timeline_panel_string();
+    let (_, tips) = column_line_at(&svg, "r", 24);
+    assert!(tips[0].contains("first took the original mutable reborrow"), "{tips:?}");
+
+    // The match scrutinee supplies s, which is only bound on the next row.
+    let svg = run_with_local_backend("rv3_issues/1638_match_mut_ref_of_ref_var").timeline_panel_string();
+    let (_, tips) = column_line_at(&svg, "r", 4);
+    assert!(tips[0].contains("This borrow supplies the reference for s") && !tips[0].contains("mutably borrowed by s"), "{tips:?}");
 }
 
 #[test]
@@ -28615,9 +28693,36 @@ fn reborrow_allows_reassigning_the_reference_1863() {
     // before the reassignment while a is live. The reassignment compiles.
     let (state, tips) = column_line_at(&svg, "r", 5);
     assert_eq!(state, "revoked_privilege");
-    assert_eq!(tips, ["the value r points to is mutably borrowed by a through r. Until the borrow ends, the reference in r can't be read, moved, or used to access the value. A mutable binding can still be assigned a new reference"]);
+    assert!(tips[0].contains("mutably borrowed by a through r") && tips[0].contains("can't be read, moved, or used to access the value"), "{tips:?}");
+    assert!(tips[0].contains("A mutable binding can still be assigned a new reference"), "{tips:?}");
     let (state, _) = column_line_at(&svg, "r", 6);
     assert_eq!(state, "full_privilege");
+}
+
+#[test]
+fn coercion_keeps_the_binding_borrowed_1863() {
+    let svg = run_with_local_backend("coerced_reborrow_arrow_926").timeline_panel_string();
+    let (_, tips) = column_line_at(&svg, "gm", 11);
+    assert!(tips[0].contains("mutably borrowed by s through gm"), "{tips:?}");
+    assert!(tips[0].contains("binding gm is also borrowed") && !tips[0].contains("can still be assigned"), "{tips:?}");
+}
+
+#[test]
+fn only_the_selected_break_makes_the_reborrow_1863() {
+    let svg = run_with_local_backend("loop_break_borrow_alt").timeline_panel_string();
+    for source in ["rp", "rq"] {
+        let (_, tips) = column_line_at(&svg, source, 50);
+        assert!(tips[0].contains(&format!("mutably borrowed by r through {source}, if the loop ended with break {source}")), "{tips:?}");
+    }
+}
+
+#[test]
+fn iterator_reborrow_lasts_while_in_use_1863() {
+    let svg = run_with_local_backend("param_writes_1046").timeline_panel_string();
+    let (_, tips) = column_line_at(&svg, "v", 2);
+    assert!(tips[0].contains("mutably borrowed by the `for` loop's iterator through v"), "{tips:?}");
+    assert!(tips[0].contains("While the iterator or a reference it yielded keeps the borrow live")
+        && !tips[0].contains("Until the loop ends"), "{tips:?}");
 }
 
 /// #1497: `r = r;` keeps r's loan: its write ends no borrow (it draws
