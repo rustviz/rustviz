@@ -12,6 +12,7 @@ use std::vec::Vec;
 use std::fmt::{Formatter, Result, Display};
 use std::hash::{Hash, Hasher};
 use std::cmp::Ordering;
+use crate::facts::JoinAssignment;
 use crate::svg_generator::{
   svg_frontend::timeline_panel::TimelineColumnData,
   hover_messages,
@@ -1750,7 +1751,7 @@ pub enum MaybeMovedAt {
     /// `break` out of it before the move skips it (`'a: { if c { break
     /// 'a; } drop(s); }`, #1286); otherwise a `break` comes after it.
     /// `carried`: as for `Loop`.
-    LabeledBlock { skipped: bool, carried: bool },
+    LabeledBlock { skipped: bool, carried: bool, runtime_only: bool },
     /// The start of the `else` branch (`path`: or the implicit empty
     /// one) of an `if` whose let-chain condition moves the variable in
     /// a part that a part which can be false comes after
@@ -2033,6 +2034,7 @@ pub enum TryMove {
 /// it was this one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BreakAlt {
+    pub runtime: AltRuntime,
     /// Loan issued by the MIR reborrow of this break operand, when unique.
     pub reborrow: Option<usize>,
     /// The `break` as written (`break a`), or `None` when it is too
@@ -2047,6 +2049,13 @@ pub struct BreakAlt {
     /// { if c { break 'a s; } t };`, #1134), through a `break` or by
     /// running to its last expression.
     pub end: AltEnd,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AltRuntime {
+    Possible,
+    Selected,
+    Skipped,
 }
 
 /// See BreakAlt::end.
@@ -2335,6 +2344,8 @@ pub enum ExternalEvent {
         // every path (`let s = *b;`): only its heap allocation is freed
         // (#1145).
         contents_gone: bool,
+        // This assignment appears in the checked CFG but cannot execute.
+        skipped: bool,
     },
     // `ManuallyDrop::drop(&mut md)`: the value inside `md` is dropped
     // by hand. `md` itself stays in scope but must not be used again.
@@ -2575,7 +2586,7 @@ pub enum ExternalEvent {
         id: usize
     },
     /// Incoming MIR edges differ over whether the place was assigned.
-    AssignmentJoin { ro: ResourceAccessPoint, always_assigned: bool, id: usize },
+    AssignmentJoin { ro: ResourceAccessPoint, assignment: JoinAssignment, id: usize },
     // A `for` loop whose pattern leaves parts of each element unbound
     // (`for (f, _) in v`, `for _ in v`, #1434): at the end of each pass
     // those parts are dropped with the rest of the element. Stated on
@@ -3028,7 +3039,7 @@ pub enum Event {
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
     // `maybe_init`: see ExternalEvent::OwnerDropAtReassign.
     // `payload`, `loop_head`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, loop_head: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool, contents_gone: bool },
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, loop_head: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool, contents_gone: bool, skipped: bool },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -3072,7 +3083,7 @@ pub enum Event {
     TiedParamNote { lifetime: String, inputs: TiedInputs },
     // See ExternalEvent::ReslicedInPlace.
     ReslicedInPlace { lender: String, mutable: bool, part: bool },
-    AssignmentJoin { always_assigned: bool, drops: bool },
+    AssignmentJoin { assignment: JoinAssignment, drops: bool },
     // See ExternalEvent::DeadElseNote.
     DeadElseNote,
     // See ExternalEvent::PassRestDrop.
@@ -3108,7 +3119,7 @@ pub enum Event {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CallTiming { Direct, AfterArguments, Never }
+pub enum CallTiming { Direct, AfterArguments, Never, Skipped }
 
 /// What a fn parameter's pattern leaves of the argument (#1181).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -3979,6 +3990,8 @@ impl Event {
             Event::RefGoOutOfScope { .. } => {
                 hover_messages::event_dot_ref_go_out_of_scope(my_name)
             }
+            Event::OwnerDropAtReassign { skipped: true, .. } =>
+                hover_messages::event_dot_skipped_reassignment(my_name),
             Event::OwnerDropAtReassign { parts: Some(p), .. } => {
                 hover_messages::event_dot_struct_drop_at_reassign_partial(my_name, p)
             }
@@ -4000,7 +4013,10 @@ impl Event {
             Event::LoopExitMove { at: MaybeMovedAt::LabeledBlock { skipped: true, .. }, .. } => {
                 hover_messages::event_dot_block_break_skips_move(my_name)
             }
-            Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock { skipped: false, carried } } => {
+            Event::LoopExitMove { at: MaybeMovedAt::LabeledBlock { runtime_only: true, .. }, .. } => {
+                hover_messages::event_dot_runtime_block_move(my_name)
+            }
+            Event::LoopExitMove { definite, at: MaybeMovedAt::LabeledBlock { skipped: false, carried, .. } } => {
                 hover_messages::event_dot_loop_exit_move(my_name, *definite, true, *carried)
             }
             Event::LoopExitMove { definite, at: MaybeMovedAt::ChainFail { to, dropped, path, how } } => {
@@ -4069,8 +4085,9 @@ impl Event {
             Event::ChainFailUse { uses, definite, path, is_ref, pointee_value } => {
                 hover_messages::event_dot_chain_fail_use(my_name, uses, *definite, *path, *is_ref, *pointee_value)
             }
-            Event::AssignmentJoin { always_assigned: true, .. } => hover_messages::state_imaginary_unassigned(my_name),
-            Event::AssignmentJoin { always_assigned: false, drops } => hover_messages::event_dot_assignment_join(my_name, *drops),
+            Event::AssignmentJoin { assignment: JoinAssignment::Always, .. } => hover_messages::state_imaginary_unassigned(my_name),
+            Event::AssignmentJoin { assignment: JoinAssignment::Sometimes, drops } => hover_messages::event_dot_assignment_join(my_name, *drops),
+            Event::AssignmentJoin { assignment: JoinAssignment::Skipped, .. } => hover_messages::event_dot_skipped_assignment_join(my_name),
             Event::DeadElseNote => {
                 hover_messages::event_dot_dead_else_note(my_name)
             }
@@ -4304,7 +4321,13 @@ impl Event {
             Event::Move{ to: ResourceTy::Value(t), is, ..} if is.extract_rap().is_some_and(|r| r.hash() == t.hash()) => {
                 hover_messages::event_dot_move_out_for_new_value(&self.deref_name(my_name), is_plain(is))
             }
-            Event::Move { carried_with: Some((parent, dest)), to, .. } =>
+            Event::Move { carried_with: Some((parent, _)), to: ResourceTy::Temporary { tuple: Some(t), .. }, .. } =>
+                hover_messages::event_dot_copy_field_into_tuple(my_name, parent, t),
+            Event::Move { carried_with: Some((parent, _)), to: ResourceTy::Caller, .. } =>
+                hover_messages::event_dot_copy_field_returned(my_name, parent),
+            Event::Move { carried_with: Some((parent, _)), is: ResourceTy::Value(field), to: ResourceTy::Anonymous, .. }
+                if field.is_copy_owner() => hover_messages::event_dot_copy_field_in_moved_parent(my_name, parent),
+            Event::Move { carried_with: Some((parent, dest)), to, .. } if !matches!(to, ResourceTy::Anonymous) =>
                 hover_messages::field_carried_with(my_name, &to.name(), parent, dest),
             Event::Move{ to, is, ..} => {
                 let v = is_plain(is);
@@ -4456,7 +4479,8 @@ impl Event {
                             if r.name().contains('.') && !place.starts_with('*') && !place.starts_with(r.name().as_str()) =>
                             hover_messages::event_dot_assign_through(r.name(), place),
                         PlaceWrite::AssignCopy => place_assign_copy_message(place, from),
-                        PlaceWrite::AssignDropsOld | PlaceWrite::AssignOverMoved | PlaceWrite::AssignMaybeMoved { .. } =>
+                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_replace_at_place(place),
+                        PlaceWrite::AssignOverMoved | PlaceWrite::AssignMaybeMoved { .. } =>
                             hover_messages::event_dot_owner_drop_at_reassign(place, ""),
                         // The old element has nothing to drop (that's what makes
                         // it AssignOwned): a plain assignment (#484).
@@ -4491,7 +4515,8 @@ impl Event {
                     };
                     match write {
                         PlaceWrite::AssignCopy => place_assign_copy_message(&self.deref_name(my_name), from),
-                        PlaceWrite::AssignDropsOld => hover_messages::event_dot_owner_drop_at_reassign(&self.deref_name(my_name), ""),
+                        PlaceWrite::AssignDropsOld =>
+                            hover_messages::event_dot_replace_at_place(&self.deref_name(my_name)),
                         // `*b = v` after b's contents were moved out
                         // (#928), on every path or some only.
                         PlaceWrite::AssignOverMoved =>
@@ -5092,6 +5117,11 @@ impl Visualizable for VisualizationData {
             return previous_state.clone();
         }
         if event_invalid(event) { return State::Invalid; }
+        if matches!(event, Event::Move { break_alt: Some(BreakAlt { runtime: AltRuntime::Skipped, .. }), .. }) {
+            // The move is shown for borrow checking. It leaves the value
+            // in place on every executable path through this block.
+            return previous_state.clone();
+        }
         // An or-pattern's possible borrow (#565) changes the state the
         // way the plain borrow event it stands for does.
         if let Some(plain) = event.or_alt_plain_equivalent() {
@@ -6145,8 +6175,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, .. } => {
-          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, loop_head: *loop_head, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload, contents_gone: *contents_gone })]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, skipped, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, loop_head: *loop_head, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload, contents_gone: *contents_gone, skipped: *skipped })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -6182,8 +6212,8 @@ impl Visualizable for VisualizationData {
           let rc = if place.is_some() { None } else { ro.rc_drop() };
           vec![(line_num, Event::ChainFailAssign { place: place.clone(), drops_old: *drops_old, rc, path: *path })]
         },
-        ExternalEvent::AssignmentJoin { ro, always_assigned, .. } => {
-          vec![(line_num, Event::AssignmentJoin { always_assigned: *always_assigned, drops: !ro.drops_nothing() })]
+        ExternalEvent::AssignmentJoin { ro, assignment, .. } => {
+          vec![(line_num, Event::AssignmentJoin { assignment: *assignment, drops: !ro.drops_nothing() })]
         }
         ExternalEvent::DeadElseNote{ .. } => {
           vec![(line_num, Event::DeadElseNote)]
@@ -6331,7 +6361,8 @@ impl Visualizable for VisualizationData {
                     // `p.a` in `p = Pair { a: p.a, .. }` (#1508): moved out
                     // by the right-hand side and back with the new value,
                     // as outside a branch (#1411).
-                    if *to == *is && matches!(event, ExternalEvent::Move { .. }) {
+                    if matches!(event, ExternalEvent::Move { id, .. }
+                        if *to == *is || (through_rap(to) && self.moves_out_first.contains(id))) {
                         for (l, e) in self.event_of_external_event(line_number, event, true) {
                             push_history_event(b_history, l, e);
                         }
@@ -6671,8 +6702,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone }, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, skipped, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, skipped }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
@@ -6724,9 +6755,9 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ReslicedInPlace{ro, lender, mutable, part, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ReslicedInPlace { lender, mutable, part }, line_number);
             },
-            ExternalEvent::AssignmentJoin { ro, always_assigned, .. } => {
+            ExternalEvent::AssignmentJoin { ro, assignment, .. } => {
                 let drops = !ro.drops_nothing();
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::AssignmentJoin { always_assigned, drops }, line_number);
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::AssignmentJoin { assignment, drops }, line_number);
             }
             ExternalEvent::DeadElseNote{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::DeadElseNote, line_number);

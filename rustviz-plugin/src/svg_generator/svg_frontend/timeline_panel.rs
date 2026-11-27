@@ -1,6 +1,6 @@
 extern crate handlebars;
 use crate::facts::table::{FunctionStart, Init, JoinCell};
-use crate::svg_generator::data::state_after_loop_exits;
+use crate::svg_generator::data::{state_after_loop_exits, AltRuntime};
 use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
@@ -1350,7 +1350,10 @@ fn render_branch_dots(
                 .and_then(|i| history_path(&visualization_data.timelines[hash].history, history, i))
                 .is_some_and(|path| maybe_moved_at_end(&path)
                     || matches!(init_at_end(&path), Some(InitJoin::Maybe { .. } | InitJoin::Loop))),
-            |cell| cell.init == crate::facts::table::Init::Maybe);
+            // The runtime view can say "moved" where the borrow checker
+            // still counts a path that holds a value (a write only a dead
+            // path reaches): it still can't prove the place holds one.
+            |cell| cell.init == crate::facts::table::Init::Maybe || cell.borrowck_maybe);
         let fork_title = || if let Some(binding) = initializer {
             hover_messages::event_dot_imaginary_initializer(binding)
         } else if visualization_data.row_layout.ended_at_fork.contains(&(event.get_id(), *hash)) {
@@ -1612,11 +1615,24 @@ fn render_branch_dots(
         });
         let mixed_init = join.filter(|j| !j.change.replaces_moved && !j.change.entry_own).map(|j| &j.cell).filter(|c| c.mixed_init.is_some_and(|mixed|
             mixed.may_hold_value && !is_branch_temp_col(rap)));
+        // The irrefutable-pattern join already explains which arm ran.
+        let runtime_assigned = join.map(|j| &j.cell).filter(|c| c.always_assigned && !branch_history.iter().any(|b| b.imaginary.is_some()));
         let title = if field_initialized {
             let kind = if rap.is_mutref() { "a mutable" } else { "an immutable" };
             Some(format!("{} holds {kind} reference after the short-circuit expression.", styled_name_html(rap.name())))
         } else if imaginary_join.is_some() {
             imaginary_join
+        } else if let Some(cell) = runtime_assigned {
+            Some(hover_messages::event_dot_runtime_assigned(rap.name(), !rap.drops_nothing(), rap.is_mut(), cell.reassigned, &rap.drop_note()))
+        } else if join.is_some_and(|j| j.cell.partial_without_drop) {
+            Some(format!("{}. No resource remains in {} on the paths that run.",
+                hover_messages::event_dot_borrowck_maybe_moved(rap.name()), styled_name_html(rap.name())))
+        } else if join.is_some_and(|j| j.cell.borrowck_maybe && j.cell.init == Init::Moved && !staged) {
+            // Every path that runs moved it; the checker also counts a
+            // path (a dead branch) that kept it. The dot is drawn
+            // because that branch's line still reaches the join.
+            Some(format!("{}. No resource remains in {} on the paths that run.",
+                hover_messages::event_dot_borrowck_maybe_moved(rap.name()), styled_name_html(rap.name())))
         } else if visualization_data.row_layout.ended_at_fork.contains(&(event.get_id(), *hash)) {
             Some(hover_messages::state_ref_borrow_ended(&is.real_name()))
         } else if borrow_ended_in_every_arm {
@@ -1796,6 +1812,22 @@ fn render_branch_dots(
             // the arms; the scope-end dot says why nothing is
             // dropped there (`all_moved_at_end`).
             None
+        } else if let Some(timing) = rap.is_closure().then(|| branch_history.iter()
+            .filter(|b| b.diverges && b.imaginary.is_none())
+            .flat_map(|b| &b.e_data)
+            .find_map(|(_, e)| match e {
+                Event::ClosureCall { timing, .. } => Some(*timing),
+                _ => None,
+            })).flatten()
+        {
+            use crate::svg_generator::data::CallTiming;
+            let name = styled_name_html(rap.name());
+            Some(match timing {
+                CallTiming::Direct => format!("Calling {name} consumes it on the branch that exits here"),
+                CallTiming::Skipped => format!("The branch that would consume {name} is skipped at runtime"),
+                CallTiming::AfterArguments | CallTiming::Never => format!(
+                    "{name} is moved into a temporary before evaluating the call arguments on the branch that exits here"),
+            })
         } else {
             Some(branch_join_message(branch_history, ty, is, imaginary_arm, join))
         };
@@ -1830,14 +1862,31 @@ fn render_branch_dots(
 }
 
 /// Preserve the detailed teaching text when it describes the runtime drop.
-fn scope_end_by_rustc(vd: &VisualizationData, row: usize, ro: &ResourceAccessPoint, history: &[(usize, Event)], resource_hold: bool, name: &String) -> Option<(String, bool)> {
+fn scope_end_by_rustc(vd: &VisualizationData, row: usize, ro: &ResourceAccessPoint, history: &[(usize, Event)], resource_hold: bool, name: &String, has_partial: bool) -> Option<(String, bool)> {
+    let skipped_move = history.iter().any(|(_, e)| matches!(e,
+        Event::Move { break_alt: Some(BreakAlt { runtime: AltRuntime::Skipped, .. }), .. }));
+    let pattern_field = ro.is_member() && (skipped_move || history.iter().any(|(_, e)| matches!(e, Event::OrAltMove { .. })));
+    let aggregate = matches!(ro, ResourceAccessPoint::Struct(Struct { is_member: false, .. }));
     if !matches!(ro, ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_)) || ro.never_drops() || ro.is_plain_value() || ro.is_closure()
-        || ro.is_union() || ro.is_manually_drop() || ro.is_temporary() || ro.holds_borrow() || ro.box_contents_moved() {
+        || ro.is_union() || ro.is_manually_drop() || ro.is_temporary() || ro.holds_borrow() {
         return None;
     }
     let src = rv_attrs::line_of(row, &vd.row_lines)?;
     let function = *vd.fn_source_lines.get(ro.hash())?;
     let how = vd.state_table.local_scope_drop(function, ro.name(), src, ro.owner_local())?;
+    let uses_flag = vd.state_table.uses_drop_flag(function, ro.name(), src, ro.owner_local(), false);
+    // A partial aggregate's ordinary scope tooltip says which fields
+    // moved, so a recorded partial drop keeps it. A whole aggregate is
+    // described by rustc's drop when that drop depends on a flag, or the
+    // runtime paths all skip a drop that still has one. (History alone
+    // would guess "each branch moved it" for a move in a nested branch.)
+    let consumed_at_runtime = aggregate && how == "nothing_to_drop" && uses_flag;
+    if aggregate && !pattern_field && how != "drops_if_init" && !consumed_at_runtime && !(how == "drops" && uses_flag) {
+        return None;
+    }
+    if has_partial {
+        return None;
+    }
     // The history's drop flag (`init_at_end`, `maybe_moved_at_end`).
     let init = init_at_end(history);
     let flag = (!ro.holds_value() && matches!(init, Some(InitJoin::Loop | InitJoin::Maybe { .. })))
@@ -1846,16 +1895,18 @@ fn scope_end_by_rustc(vd: &VisualizationData, row: usize, ro: &ResourceAccessPoi
         && vd.state_table.incoming_cell(function, ro.name(), src).is_some_and(|c| c.mixed_init.is_some());
     let note = ro.drop_note();
     match how {
-        "drops_if_init" if !flag || mixed =>
+        "drops_if_init" if !ro.box_contents_moved() && (!flag || mixed) =>
             Some((hover_messages::event_dot_go_out_of_scope_maybe_kept(name, &note), true)),
-        "nothing_to_drop" if resource_hold || flag => Some((
-            hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_no_resource_dropped_suffix(),
-            false,
-        )),
-        "drops" if !resource_hold || flag => Some((
-            hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_resource_dropped_suffix(&note),
-            true,
-        )),
+        "nothing_to_drop" if resource_hold || flag || uses_flag => {
+            let mut title = hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_no_resource_dropped_suffix();
+            if uses_flag { title.push_str(hover_messages::runtime_drop_flag()); }
+            Some((title, false))
+        }
+        "drops" if !resource_hold || flag || skipped_move || uses_flag => {
+            let mut title = hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_resource_dropped_suffix(&note);
+            if uses_flag { title.push_str(hover_messages::runtime_drop_flag()); }
+            Some((title, true))
+        }
         _ => None,
     }
 }
@@ -1923,19 +1974,31 @@ fn render_scope_end_dot(
             // away (`let g = f;`); then there's nothing left to
             // drop (#271).
             let move_count = closure_move_capture_count(visualization_data, *hash);
-            let maybe_moved = move_count > 0 && !resource_hold && maybe_moved_at_end(history);
-            if move_count > 0 && (resource_hold || maybe_moved) {
+            let drop_site = visualization_data.fn_source_lines.get(hash).zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines));
+            let how = drop_site.and_then(|(&function, row)| {
+                visualization_data.state_table.local_scope_drop(function, ro.name(), row, ro.owner_local())
+            });
+            let maybe_moved = move_count > 0 && (how == Some("drops_if_init")
+                || (how.is_none() && !resource_hold && maybe_moved_at_end(history)));
+            if move_count > 0 && (matches!(how, Some("drops" | "drops_if_init" | "drops_rest"))
+                || (how.is_none() && (resource_hold || maybe_moved))) {
                 let cx = timeline_data.x_val;
                 let cy = event_y;
                 // Called (so moved) on some paths only: the drop
                 // flag decides whether its captures are dropped.
                 let title = if maybe_moved {
-                {
                     let (called, moved) = closure_used_up_in_branches(history);
                     hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, moved_by_chain_condition(history), move_count, called, moved)
-                }
+                } else if how == Some("drops_rest") {
+                    format!("{} goes out of scope. Any captured resources it still holds are dropped.",
+                        styled_name_html(&name))
                 } else {
-                    hover_messages::event_dot_closure_go_out_of_scope(&name, move_count)
+                    let mut title = hover_messages::event_dot_closure_go_out_of_scope(&name, move_count);
+                    if drop_site.is_some_and(|(&function, row)| visualization_data.state_table
+                        .uses_drop_flag(function, ro.name(), row, ro.owner_local(), false)) {
+                        title.push_str(hover_messages::runtime_drop_flag());
+                    }
+                    title
                 };
                 let drop_data = DropDotData {
                     hash: *hash as u64,
@@ -1952,6 +2015,10 @@ fn render_scope_end_dot(
             data.title = event.print_message_with_name(&mut name);
             if move_count > 0 {
                 data.title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix());
+                if drop_site.is_some_and(|(&function, row)| visualization_data.state_table
+                    .uses_drop_flag(function, ro.name(), row, ro.owner_local(), false)) {
+                    data.title.push_str(hover_messages::runtime_drop_flag());
+                }
             }
         } else if (ro.is_manually_drop() || ro.is_maybe_uninit() || (ro.is_union() && !ro.union_drop())) && !never_drops
             && (visualization_data.timelines[hash].history.iter()
@@ -2049,8 +2116,11 @@ fn render_scope_end_dot(
             };
             append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
             return true;
-        } else if let Some((title, dropped)) = (partial.is_none() && matches!(event, Event::OwnerGoOutOfScope { early: None, .. }))
-            .then(|| scope_end_by_rustc(visualization_data, *line_number, ro, history, resource_hold, &name)).flatten() {
+        } else if let Some((title, dropped)) = matches!(event, Event::OwnerGoOutOfScope { early: None, .. })
+            .then(|| scope_end_by_rustc(visualization_data, *line_number, ro, history, resource_hold, &name,
+                // Payload and variant facts only the partial text states.
+                partial.is_some_and(|p| !p.payloads_moved.is_empty() || !p.payloads_conditional.is_empty()
+                    || !p.payloads_empty.is_empty() || !p.variant_drops.is_empty()))).flatten() {
             // What's drawn above says something else about what's
             // dropped here than rustc does (#1036, #1037).
             if !dropped {
@@ -2605,6 +2675,9 @@ fn render_dot(
                     append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
                     continue;
                 },
+                Event::OwnerDropAtReassign { skipped: true, .. } => {
+                    data.title = hover_messages::event_dot_skipped_reassignment(&name);
+                }
                 Event::OwnerDropAtReassign { .. } | Event::OwnerDropIfTryReturns { .. } | Event::OwnerDropUnlessReturned { .. } | Event::TemporaryDrop { .. } | Event::TupleTempDrop { .. } | Event::LoopIteratorDrop { .. } => {
                     let cx = timeline_data.x_val;
                     let cy = event_y;
@@ -2642,16 +2715,18 @@ fn render_dot(
                     let box_paths = matches!(event, Event::OwnerDropAtReassign { parts: None, payload: false, .. })
                         && mixed_box_paths(&visualization_data.timelines[hash].resource_access_point,
                             &history[..i].iter().filter(|(l, _)| l < line_number).cloned().collect::<Vec<_>>());
-                    let conditional_write = matches!(event, Event::OwnerDropAtReassign { .. }) &&
+                    let conditional_drop = matches!(event, Event::OwnerDropAtReassign { .. }).then(||
                         visualization_data.fn_source_lines.get(hash).zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines))
-                            .is_some_and(|(&f, src)| visualization_data.state_table.skips_reassignment(f, &name, src));
-                    let mut title = if box_paths {
+                            .and_then(|(&f, src)| visualization_data.state_table.conditional_reassignment_drop(f, &name, src))).flatten();
+                    let mut title = if matches!(event, Event::OwnerDropAtReassign { payload: true, parts: None, maybe_moved: false, maybe_init: None, contents_gone: false, .. }) {
+                        hover_messages::event_dot_replace_at_place(&name)
+                    } else if box_paths {
                         // A Box whose contents were moved out, given a
                         // new Box or moved away on some paths only
                         // (#1220): what the old value drops depends on
                         // the path.
                         hover_messages::event_dot_owner_drop_at_reassign_box_paths(&name)
-                    } else if conditional_write && !matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Loop), .. }) {
+                    } else if conditional_drop == Some("drops_if_init") && !matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Loop), .. }) {
                         hover_messages::event_dot_owner_drop_at_reassign_maybe_kept(&name, &note)
                     } else if matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. })
                         // (Before the new value's Acquire on this line.)
@@ -2668,7 +2743,23 @@ fn render_dot(
                         // A loop above may have ended before assigning
                         // it (#786), maybe after a branch moved it
                         // before the loop (#1012).
-                        hover_messages::event_dot_owner_drop_at_reassign_after_loop(&name, &note, loop_maybe_init_before(&history[..i]))
+                        let ro = &visualization_data.timelines[hash].resource_access_point;
+                        let drop = visualization_data.fn_source_lines.get(hash).and_then(|&function| {
+                            let row = rv_attrs::line_of(*line_number, &visualization_data.row_lines)?;
+                            visualization_data.state_table.reassignment_drop(function, ro.name(), row, ro.owner_local())
+                        });
+                        if drop == Some("drops") {
+                            let mut title = hover_messages::event_dot_owner_drop_at_reassign(&name, &note);
+                            if visualization_data.fn_source_lines.get(hash).zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines))
+                                .is_some_and(|(&function, row)| visualization_data.state_table
+                                    .uses_drop_flag(function, ro.name(), row, ro.owner_local(), true)) {
+                                title.push('.');
+                                title.push_str(hover_messages::runtime_drop_flag());
+                            }
+                            title
+                        } else {
+                            hover_messages::event_dot_owner_drop_at_reassign_after_loop(&name, &note, loop_maybe_init_before(&history[..i]))
+                        }
                     } else if let Event::OwnerDropAtReassign { maybe_init: Some(InitBy::EarlierIteration), maybe_moved: true, by_cond, .. } = event {
                         // The first thing a loop's body does to it,
                         // which only may hold a value as the loop
@@ -2788,8 +2879,8 @@ fn render_dot(
                             }
                         }
                     }
-                    if conditional_write {
-                        title.push_str(" This assignment runs on only some paths through this expression.");
+                    if conditional_drop.is_some() {
+                        title = format!("{}. This assignment runs on only some paths through this expression.", title.trim_end_matches('.'));
                     }
                     // A struct whose parts were all moved out before it
                     // is overwritten drops nothing: a plain dot that says
@@ -2833,8 +2924,16 @@ fn render_dot(
                     } else {
                         None
                     };
-                    data.title = hover_messages::event_dot_loop_maybe_init(
-                        &name, rap.drops_nothing(), rap.is_mut(), reassigned, *before_loop);
+                    let assigned = visualization_data.fn_source_lines.get(hash).and_then(|&function| {
+                        let row = rv_attrs::line_of(*line_number, &visualization_data.row_lines)?;
+                        visualization_data.state_table.segment_cell(function, rap.name(), row)
+                    }).is_some_and(|cell| cell.always_assigned);
+                    data.title = if assigned {
+                        hover_messages::event_dot_runtime_assigned(rap.name(), !rap.drops_nothing(), rap.is_mut(), reassigned, &rap.drop_note())
+                    } else {
+                        hover_messages::event_dot_loop_maybe_init(
+                            &name, rap.drops_nothing(), rap.is_mut(), reassigned, *before_loop)
+                    };
                 }
                 Event::LoopExitKept { reassigned } => {
                     let rap = &visualization_data.timelines[hash].resource_access_point;
@@ -2954,7 +3053,11 @@ fn render_dot(
                             };
                         }
                         Event::Duplicate { break_alt: Some(alt), .. } => {
-                            data.title.push_str(&hover_messages::break_alt_if_suffix(alt));
+                            if let Some(skipped) = hover_messages::skipped_break_alt(alt) {
+                                data.title = skipped;
+                            } else {
+                                data.title.push_str(&hover_messages::break_alt_if_suffix(alt));
+                            }
                         }
                         // The lender of a borrow one of the `break`s
                         // made (`break rb` reborrowing a `&mut`, #657):
@@ -2974,6 +3077,10 @@ fn render_dot(
                             if let Some(alt) = borrow_break_alt(*id, visualization_data) {
                                 data.title.push_str(&hover_messages::break_alt_if_suffix(alt));
                             }
+                        }
+                        Event::Acquire { break_alt: Some(BreakAlt { runtime: AltRuntime::Skipped, .. }), .. }
+                        | Event::Copy { break_alt: Some(BreakAlt { runtime: AltRuntime::Skipped, .. }), .. } => {
+                            data.title.clear();
                         }
                         Event::Acquire { is, break_alt: Some(alt), .. } | Event::Copy { is, break_alt: Some(alt), .. } => {
                             // Which `break` ran isn't known here, so
@@ -3137,6 +3244,15 @@ fn render_dot(
         if let Some(title) = visualization_data.row_layout.aggregate_titles.get(&event.get_id()) {
             data.title.clone_from(title);
         }
+        let mut event_kind = rv_attrs::event_name(event);
+        if matches!(event, Event::StaticLend { .. } | Event::MutableLend { .. }
+            | Event::StaticBorrow { .. } | Event::MutableBorrow { .. }) {
+            if let Some(skipped) = borrow_break_alt(event.get_id(), visualization_data)
+                .and_then(hover_messages::skipped_break_alt) {
+                data.title = skipped;
+                event_kind = rv_attrs::SKIPPED_EXIT;
+            }
+        }
         let rap = &visualization_data.timelines[hash].resource_access_point;
         if let Some(state) = one_dot_holder_state(history, i, rap, &visualization_data.row_layout) {
             let tip = timeline_segment_title(&state, rap, visualization_data, None);
@@ -3147,7 +3263,21 @@ fn render_dot(
             Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => Some(*id),
             _ => None,
         };
-        append_dot(data, timeline_data, dots, lend_id, rv_attrs::event_name(event), *line_number);
+        let borrower_title = visualization_data.row_layout.shadowed_borrow_lenders.get(&event.get_id()).and_then(|lender| {
+            let mutable = match event {
+                Event::StaticBorrow { .. } => false,
+                Event::MutableBorrow { .. } => true,
+                _ => return None,
+            };
+            let name = rap.name();
+            let generic = if mutable { hover_messages::event_dot_mut_borrow } else { hover_messages::event_dot_static_borrow };
+            (data.title == generic(name, false) || data.title == generic(name, true))
+                .then(|| format!("{} from {}", data.title, styled_name_html(lender)))
+        });
+        if let Some(title) = borrower_title {
+            data.title = title;
+        }
+        append_dot(data, timeline_data, dots, lend_id, event_kind, *line_number);
         if let Some(holder) = borrow_before_capture(history, i, &visualization_data.row_layout) {
             let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
             if let [.., release, capture] = dot.lines.as_mut_slice() {
@@ -3244,6 +3374,15 @@ fn field_lenders_dot_title(event: &Event, name: &String, vd: &VisualizationData)
         _ => return None,
     };
     let f = vd.field_lenders.get(id).filter(|f| f.end == end)?;
+    if !end {
+        if let Some(via) = vd.external_events.iter().find_map(|(_, event)| match event {
+            ExternalEvent::StaticBorrow { id: event_id, via, .. }
+            | ExternalEvent::MutableBorrow { id: event_id, via, .. } if event_id == id => via.as_ref(),
+            _ => None,
+        }).filter(|via| hover_messages::is_forwarded_borrow(&via.tie, f.lenders.len())) {
+            return Some(hover_messages::event_dot_forwarded_borrow(name, via, &f.lenders));
+        }
+    }
     Some(if end {
         hover_messages::event_dot_field_lenders_end(name, &f.lenders)
     } else {
@@ -7882,6 +8021,8 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             _ => { let v = rap.holds_value(); Box::new(move |name: &String| hover_messages::event_dot_move_to_caller(name, v)) }
         };
         let title = match external_event {
+            ExternalEvent::Move { carried_with: Some((parent, _)), .. } =>
+                hover_messages::event_dot_copy_field_returned(rap.name(), parent),
             // `&self.s` returned: a reborrow through `self` (#784).
             ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _, _), .. } if place.starts_with('&') =>
                 hover_messages::event_dot_reborrow_to_caller(r.name(), place),
@@ -7907,7 +8048,17 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             _ => message(&rap.name().to_string()),
         };
 
-        let title = visualization_data.row_layout.aggregate_titles.get(id).cloned().unwrap_or(title);
+        let alt = match external_event {
+            ExternalEvent::Move { break_alt, .. } | ExternalEvent::Copy { break_alt, .. } => break_alt.as_ref(),
+            _ => None,
+        };
+        let title = if let Some(skipped) = alt.and_then(hover_messages::skipped_break_alt) {
+            skipped
+        } else {
+            let mut title = visualization_data.row_layout.aggregate_titles.get(id).cloned().unwrap_or(title);
+            if let Some(alt) = alt { title.push_str(&hover_messages::break_alt_if_suffix(alt)); }
+            title
+        };
         let rv = Rv::new(rv_attrs::ARROW).event(rv_attrs::external_event_name(external_event))
             .var(rap.name()).to("caller").row(*line_number).attrs();
         dots.lanes.capture(Drawn {
@@ -11362,6 +11513,15 @@ fn render_timeline(
                 matches!(e, Event::Branch { merge_point, .. } if merge_point == seg_start)
                     && visualization_data.row_layout.short_circuit_forks.contains(&e.get_id())
             });
+        if rap.is_closure() && history.iter().any(|(at, e)| at == seg_end
+            && matches!(e, Event::LoopExitMove { definite: true, at: MaybeMovedAt::LabeledBlock { runtime_only: true, .. } }))
+            && visualization_data.fn_source_lines.get(hash).zip(line(*seg_start))
+                .and_then(|(&function, src)| visualization_data.state_table.next_row_runs(function, src)) == Some(false)
+        {
+            // This connector follows the arm that would skip consuming
+            // the closure. That arm's continuation is dead at runtime.
+            continue;
+        }
         let mut bounds = vec![*seg_start];
         if owner {
             // OOS includes the placeholder occupied by the arm legs.
@@ -11591,7 +11751,7 @@ fn owner_segment_of(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usiz
                 hover_messages::state_maybe_init(name, &cell)
             } else if cell.cause == Some("imaginary") && !rap.holds_value() && !rap.is_ref() {
                 format!("{}. {}", timeline_segment_title(&full, rap, vd, Some(row)), hover_messages::state_maybe(name, cell.cause))
-            } else if cell.always_assigned {
+            } else if cell.always_assigned && cell.cause == Some("unassigned") {
                 hover_messages::state_imaginary_unassigned(name)
             } else {
                 hover_messages::state_maybe(name, cell.cause)
@@ -12259,7 +12419,6 @@ fn table_lent_state_of(
     row: usize,
     path: &[(usize, usize)],
 ) -> Option<(State, Option<String>)> {
-    use crate::facts::table::Init;
     let table = &visualization_data.state_table;
     let s = match state {
         State::FullPrivilege { s } | State::PartialPrivilege { s } => s.clone(),

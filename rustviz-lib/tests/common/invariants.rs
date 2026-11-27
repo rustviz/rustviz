@@ -84,7 +84,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("geometry_1907/rv3_1907_1127_22_arrow_along_leg", "event-on-dead-column", 1907),
     ("geometry_1907/rv3_1907_1127_55_outside_figure", "event-on-dead-column", 1907),
     ("geometry_1907/rv3_1907_2711_04_arrow_along_leg", "event-on-dead-column", 1907),
-    ("geometry_1907/rv3_1907_2711_24_arrow_along_leg", "drop-without-value", 1907),
     ("geometry_1907/rv3_1907_2711_26_arrow_along_leg", "event-on-dead-column", 1907),
     ("geometry_1907/rv3_1907_2711_36_arrow_along_leg", "event-on-dead-column", 1907),
 ];

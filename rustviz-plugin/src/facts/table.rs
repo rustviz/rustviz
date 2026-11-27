@@ -67,7 +67,7 @@ pub enum Why {
     Assigned { reassign: bool, maybe_had: bool },
     /// Its old value dropped ("drops", "drops_if_init", "drops_rest",
     /// "nothing_to_drop"), on this row's path or an early exit's.
-    Dropped { local: Option<rustc_middle::mir::Local>, how: &'static str, early_exit: Option<usize>, at_reassign: bool, route: DropRoute },
+    Dropped { local: Option<rustc_middle::mir::Local>, how: &'static str, early_exit: Option<usize>, at_reassign: bool, route: DropRoute, flag: bool },
 }
 
 /// One column on one row (or one arm of a row).
@@ -104,6 +104,9 @@ pub struct Cell {
     pub manually_taken: Option<Extraction>,
     pub option_holds: Vec<usize>,
     pub always_assigned: bool,
+    /// Moved on every path that runs, yet borrow checking sees "maybe".
+    pub borrowck_maybe: bool,
+    pub partial_without_drop: bool,
     pub reassigned: Option<bool>,
     pub unwind_before_write: bool,
     pub moved_in_arm: bool,
@@ -145,6 +148,7 @@ pub struct ArmSpan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArmInfo {
     pub runs: bool,
+    runs_at_runtime: bool,
     pub parent: Option<usize>,
     edge: SwitchEdge,
     source: Option<SourceArm>,
@@ -161,6 +165,8 @@ struct RowCells {
     continues_to: Option<usize>,
     cells: Cells,
     before: Option<Cells>,
+    runtime_entry: Option<bool>,
+    completed_bindings: Cells,
     block_end: bool,
     jumps: bool,
     /// The row's events by column, each with the arm it happens in.
@@ -412,6 +418,11 @@ impl StateTable {
         Some(cell)
     }
 
+    /// A forward entry into the next row with MIR, on the runtime CFG.
+    pub fn next_row_runs(&self, function: FunctionStart, row: usize) -> Option<bool> {
+        self.bodies.get(&function.body)?.rows.range(row + 1..).find_map(|(_, r)| r.runtime_entry)
+    }
+
     /// The state between source rows. Read the incoming edges of the
     /// next MIR row, including all predecessors at a join. Empty source
     /// rows between those edges carry the same state.
@@ -419,6 +430,9 @@ impl StateTable {
         let b = self.bodies.get(&function.body)?;
         if !(b.first_line..b.last_line).contains(&row) { return None; }
         if let Some(rc) = b.rows.get(&row) {
+            if let Some(cell) = rc.completed_bindings.get(column) {
+                return Some(Cell { from_row: row, ..cell.clone() });
+            }
             if rc.snapshot && !rc.block_end && !rc.jumps {
                 let mut own = self.cell(function, column, row, row)?;
                 // The row's state joins all its exits; the line below it is
@@ -438,6 +452,8 @@ impl StateTable {
                         own.cause = n.cause;
                         own.mixed_init = n.mixed_init;
                         own.always_assigned = n.always_assigned;
+                        own.borrowck_maybe = n.borrowck_maybe;
+                        own.partial_without_drop = n.partial_without_drop;
                         own.reassigned = n.reassigned;
                         own.unwind_before_write = n.unwind_before_write;
                     }
@@ -502,33 +518,63 @@ impl StateTable {
         cells.as_ref()?.get(column)
     }
 
-    /// On a shared row, the only write is in one arm and a real sibling
-    /// can leave the place moved. This also covers a short-circuit RHS.
+    /// A write that may be skipped and whose drop is conditional.
     pub fn skips_reassignment(&self, function: FunctionStart, column: &str, row: usize) -> bool {
-        let Some(rc) = self.bodies.get(&function.body).and_then(|b| b.rows.get(&row)) else { return false };
-        let Some(why) = rc.why.get(column) else { return false };
+        self.conditional_reassignment_drop(function, column, row) == Some("drops_if_init")
+    }
+
+    /// The assignment may be skipped, independently of whether a write
+    /// that runs definitely drops a previous value.
+    pub fn conditional_reassignment_drop(&self, function: FunctionStart, column: &str, row: usize) -> Option<&'static str> {
+        let rc = self.bodies.get(&function.body)?.rows.get(&row)?;
+        let why = rc.why.get(column)?;
         let mut writes = why.iter().filter(|(_, w)| matches!(w, Why::Assigned { .. }));
-        let Some((Some(arm), Why::Assigned { reassign: true, .. })) = writes.next() else { return false };
-        if writes.next().is_some() || !why.iter().any(|(a, w)| a.as_ref() == Some(arm) && matches!(w,
-            Why::Dropped { how: "drops_if_init", at_reassign: true, .. })) { return false; }
-        let Some((written, _)) = rc.arms.get(*arm) else { return false };
-        rc.arms.iter().any(|(a, cells)| a.runs && a.edge.switch == written.edge.switch && a.edge.successor != written.edge.successor
-            // A shared target's snapshot includes paths from other tests.
-            // It cannot establish what skipping this particular write did.
-            && !rc.arms.iter().any(|(other, _)| other.edge.switch != a.edge.switch && other.edge.successor == a.edge.successor)
-            && cells.get(column).is_some_and(|c| c.init == Init::Maybe && c.cause == Some("moved")))
+        let Some((Some(arm), Why::Assigned { reassign: true, .. })) = writes.next() else { return None };
+        if writes.next().is_some() { return None; }
+        let mut drops = why.iter().filter_map(|(a, why)| match why {
+            Why::Dropped { how: "drops_if_init", at_reassign: true, .. } if a.as_ref() == Some(arm) => Some("drops_if_init"),
+            Why::Dropped { how: "drops", flag: true, at_reassign: true, .. } if a.as_ref() == Some(arm) => Some("drops"),
+            _ => None,
+        });
+        let how = drops.next()?;
+        if !drops.all(|other| other == how) { return None; }
+        let (written, _) = rc.arms.get(*arm)?;
+        (written.runs_at_runtime && rc.arms.iter().any(|(a, cells)| a.runs_at_runtime
+            && a.edge.switch == written.edge.switch && a.edge.successor != written.edge.successor
+            && (how == "drops" || (
+                // A shared target's snapshot includes paths from other tests.
+                // It cannot establish what skipping this particular write did.
+                !rc.arms.iter().any(|(other, _)| other.edge.switch != a.edge.switch && other.edge.successor == a.edge.successor)
+                && cells.get(column).is_some_and(|c| c.init == Init::Maybe && c.cause == Some("moved"))))))
+            .then_some(how)
     }
 
     /// A normal scope-end drop (the column can already be out of storage
     /// in the row's after-cell). Several sites must agree.
     pub fn local_scope_drop(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>) -> Option<&'static str> {
+        self.drop_kind(function, column, row, local, false)
+    }
+
+    pub fn reassignment_drop(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>) -> Option<&'static str> {
+        self.drop_kind(function, column, row, local, true)
+    }
+
+    pub fn uses_drop_flag(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>, reassign: bool) -> bool {
+        self.bodies.get(&function.body).and_then(|b| b.rows.get(&row)).and_then(|r| r.why.get(column))
+            .is_some_and(|events| events.iter().any(|(_, why)| matches!(why,
+                Why::Dropped { local: l, at_reassign, early_exit: None, flag: true, .. }
+                    if *at_reassign == reassign && (local.is_none() || *l == local))))
+    }
+
+    fn drop_kind(&self, function: FunctionStart, column: &str, row: usize, local: Option<rustc_middle::mir::Local>, reassign: bool) -> Option<&'static str> {
         let events = self.bodies.get(&function.body)?.rows.get(&row)?.why.get(column)?.iter()
-            .filter(|(_, why)| local.is_none() || matches!(why, Why::Dropped { local: l, .. } if *l == local));
-        if events.clone().any(|(_, w)| matches!(w, Why::Dropped { how: "drops_if_init", early_exit: None, at_reassign: false, route: DropRoute::Shared, .. })) {
+            .filter(|(_, why)| matches!(why, Why::Dropped { local: l, at_reassign, .. }
+                if *at_reassign == reassign && (local.is_none() || *l == local)));
+        if events.clone().any(|(_, w)| matches!(w, Why::Dropped { how: "drops_if_init", early_exit: None, route: DropRoute::Shared, .. })) {
             return None;
         }
         let mut drops = events.filter_map(|(_, w)| match w {
-            Why::Dropped { how, early_exit: None, at_reassign: false, route: DropRoute::Normal | DropRoute::Shared, .. } => Some(*how),
+            Why::Dropped { how, early_exit: None, route: DropRoute::Normal | DropRoute::Shared, .. } => Some(*how),
             _ => None,
         });
         let how = drops.next()?;
@@ -883,6 +929,8 @@ fn cells_of(st: &State) -> Cells {
                 cause: st.cause.get(col).copied(),
                 mixed_init: st.mixed_init.get(col).copied(),
                 always_assigned: st.always_assigned.contains(col),
+                borrowck_maybe: st.borrowck_maybe.contains(col),
+                partial_without_drop: st.partial_without_drop.contains(col),
                 reassigned: st.reassigned.get(col).copied(),
                 unwind_before_write: st.unwind_before_write.contains(col),
                 moved_in_arm: st.moved_in_arm.contains(col),
@@ -921,12 +969,12 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let mut moved_places = BTreeMap::<_, BTreeSet<_>>::new();
     let mut rows = BTreeMap::new();
     for r in &b.rows {
-        let mut rc = RowCells { snapshot: !r.after.state.is_empty() || !r.after.locals.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
+        let mut rc = RowCells { snapshot: !r.after.state.is_empty() || !r.after.locals.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), runtime_entry: r.runtime_entry, completed_bindings: r.completed_bindings.iter().flat_map(cells_of).collect(), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
         for a in &r.arms {
             let exit = b.switches.binary_search_by_key(&a.edge, |e| e.edge).ok().map(|i| &b.switches[i]);
             let branch = exit.and_then(|e| e.branch);
             let source = exit.and_then(|e| Some(SourceArm { branch: branch?, index: e.arm? }));
-            let info = ArmInfo { edge: a.edge, branch, source, runs: a.runs,
+            let info = ArmInfo { edge: a.edge, branch, source, runs: a.runs, runs_at_runtime: a.runs_at_runtime,
                 parent: a.parent, has_exit: a.has_exit, continuing: a.continuing.as_ref().map(cells_of) };
             rc.arms.push((info, cells_of(&a.after)));
         }
@@ -943,7 +991,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
                 }
                 Fact::Init { path, reassign, maybe_had, .. } => add(path, Why::Assigned { reassign: *reassign, maybe_had: *maybe_had }),
                 Fact::Drop { path, how, early_exit, at_reassign, .. } if ev.drop_route != DropRoute::Unwind => add(path, Why::Dropped {
-                    local: ev.place_local, how, early_exit: *early_exit, at_reassign: *at_reassign, route: ev.drop_route,
+                    local: ev.place_local, how, early_exit: *early_exit, at_reassign: *at_reassign, route: ev.drop_route, flag: b.drop_flags.contains(&ev.location) || b.drop_part_flags.contains(&(ev.location, path.clone())),
                 }),
                 Fact::Borrow { loan, .. } => {
                     for c in loan_cols.get(loan).into_iter().flat_map(|v| v.iter()) {
@@ -1016,7 +1064,7 @@ mod tests {
 
     fn row(line: usize, cols: &[(&str, &'static str)], lent: &[(&str, usize, &'static str)], facts: Vec<(Option<usize>, Fact)>) -> Row {
         let facts = facts.into_iter().map(|(arm, fact)| Ev { location: rustc_middle::mir::Location::START, display_location: rustc_middle::mir::Location::START, place_local: None, drop_route: DropRoute::Normal, occurrence: super::super::Occurrence::at(rustc_middle::mir::Location::START), end_places: vec![], continuing_places: vec![], fieldless_operand: None, caller_slot: None, transfer_paths: vec![], col: 1, arm, fact, order: (0, 0, 0) }).collect();
-        Row { line, continues_to: None, after: state(cols, lent), before: None, block_end: false, jumps: false, facts, arms: Vec::new(), partial_drops: Vec::new() }
+        Row { line, after: state(cols, lent), facts, ..Default::default() }
     }
 
     fn col(name: &str) -> ColumnInfo {
@@ -1043,6 +1091,10 @@ mod tests {
             inline_holder_ends: vec![],
             evaluated_spans: Vec::new(),
             implicit_mut_reborrows: Default::default(),
+            effect_sites: Default::default(),
+            reassignment_sites: Default::default(),
+            drop_flags: Default::default(),
+            drop_part_flags: Default::default(),
             constructed_vecs: Default::default(),
             def_id: def(1),
             take_calls: BTreeSet::new(),
@@ -1104,9 +1156,9 @@ mod tests {
         let mut one_line = row(8, &[("s", "maybe")], &[], vec![(Some(0), Fact::Move { path: "s".into(), to: "f()".into(), in_macro: None })]);
         one_line.after.cause.insert("s".into(), "moved");
         one_line.arms = vec![
-            Arm { runs: true, branch: 0, arm: 0, parent: None, col_lo: 10, col_hi: 20, has_exit: true,
+            Arm { runs: true, runs_at_runtime: true, branch: 0, arm: 0, parent: None, col_lo: 10, col_hi: 20, has_exit: true,
                 edge: SwitchEdge { switch: rustc_middle::mir::Location::START, successor: rustc_middle::mir::BasicBlock::from_usize(1) }, continuing: None, after: state(&[("s", "moved")], &[]) },
-            Arm { runs: true, branch: 0, arm: 1, parent: None, col_lo: 30, col_hi: 40, has_exit: true,
+            Arm { runs: true, runs_at_runtime: true, branch: 0, arm: 1, parent: None, col_lo: 30, col_hi: 40, has_exit: true,
                 edge: SwitchEdge { switch: rustc_middle::mir::Location::START, successor: rustc_middle::mir::BasicBlock::from_usize(2) }, continuing: None, after: state(&[("s", "own")], &[]) },
         ];
         body("main", 1, &["s", "p", "p.a"], vec![

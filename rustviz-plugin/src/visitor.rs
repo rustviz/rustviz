@@ -335,6 +335,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let place = format!("&mut *{}", rap.name());
         let holds = self.field_holds(lhs_ty.builtin_deref(true)?, e.hir_id.owner);
         Some(ResourceTy::DerefField(rap, place, PlaceWrite::Update, holds))
+      }).or_else(|| {
+        let crate::expr_visitor::Reborrow { loan, through, holder: "<return>" } = self.mut_ref_reborrow_at(e)? else {
+          return None;
+        };
+        let prefix = if loan.kind == "mut" { "&mut " } else { "&" };
+        Some(ResourceTy::DerefField(through, format!("{prefix}{}", loan.lender),
+          PlaceWrite::Update, self.field_holds(lhs_ty.builtin_deref(true)?, e.hir_id.owner)))
       })
     } else { None };
     // `v.get_mut(0).unwrap()`: the borrow the call takes through `v`
@@ -4799,13 +4806,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   }
 
   fn emit_assignment_joins(&mut self, expr: &'tcx Expr<'tcx>, imaginary: bool) {
+    use crate::facts::schema::JoinAssignment;
     let Some(join) = self.facts.and_then(|f| f.joins.get(&expr.hir_id)) else { return };
-    for (name, always_assigned) in &join.assignments {
-      if *always_assigned != imaginary { continue; }
+    for (name, assignment) in &join.assignments {
+      if (*assignment == JoinAssignment::Always) != imaginary { continue; }
       if let Some(rd) = self.raps.get(name) {
         let ro = rd.rap.clone();
         self.add_external_event(span_end_line(&expr.span, &self.tcx), ExternalEvent::AssignmentJoin {
-          ro, always_assigned: *always_assigned, id: *self.unique_id,
+          ro, assignment: *assignment, id: *self.unique_id,
         });
         *self.unique_id += 1;
       }
@@ -4841,7 +4849,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let line = span_end_line(&expr.span, &self.tcx);
     for ro in skipped {
       self.add_external_event(line, ExternalEvent::LoopExitMove {
-        ro, definite: false, at: MaybeMovedAt::LabeledBlock { skipped: true, carried: false }, id: *self.unique_id,
+        ro, definite: false, at: MaybeMovedAt::LabeledBlock { skipped: true, carried: false, runtime_only: false }, id: *self.unique_id,
       });
       *self.unique_id += 1;
     }
@@ -6163,7 +6171,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.note_break_path_moves(target, expr.hir_id, &value_moves, call);
           self.note_labeled_break_path(target, expr.hir_id, value_moves);
         }
+        let first_effect = self.preprocessed_events.len();
         intravisit::walk_expr(self, expr);
+        if let Ok(target) = dest.target_id {
+          if self.labeled_frames.iter().any(|frame| frame.id == target) {
+            if let Some(events) = self.preprocessed_events.get(first_effect..) {
+              for (closure, definite) in moved_out_of_outer(events, &HashSet::new()).into_iter()
+                .filter(|(rap, _)| rap.is_closure())
+              {
+                self.break_moves.push(BreakMove {
+                  target, brk: expr.hir_id, rap: closure, definite, on_path: true,
+                });
+              }
+            }
+          }
+        }
         // `let r = loop { break k; }`: `r` gets `k` (#431).
         if let (Ok(target), Some(value)) = (dest.target_id, value) {
           let has_receiver = self.break_pats.iter().any(|(id, ..)| *id == target)
@@ -7114,12 +7136,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let box_deref = !rap.is_ref() && matches!(lhs_expr.kind, ExprKind::Unary(UnOp::Deref, inner)
         if self.tcx.typeck(inner.hir_id.owner).node_type(inner.hir_id).is_box());
       match write {
-        PlaceWrite::AssignDropsOld if box_deref => match self.rap_ownership_now(rap.name()) {
-          Ownership::None => PlaceWrite::AssignOverMoved,
-          Ownership::Maybe => PlaceWrite::AssignMaybeMoved {
-            by_cond: self.maybe_moved_by_let_now(rap.name()) || self.moved_by_chain_condition(rap),
+        PlaceWrite::AssignDropsOld if box_deref => match self.box_payload_drop_at(lhs_expr, rap) {
+          Some("nothing_to_drop") => PlaceWrite::AssignOverMoved,
+          _ => match self.rap_ownership_now(rap.name()) {
+            Ownership::None => PlaceWrite::AssignOverMoved,
+            Ownership::Maybe => PlaceWrite::AssignMaybeMoved {
+              by_cond: self.maybe_moved_by_let_now(rap.name()) || self.moved_by_chain_condition(rap),
+            },
+            Ownership::Held => write,
           },
-          Ownership::Held => write,
         },
         _ => write,
       }
@@ -8155,6 +8180,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let hash = *rap.hash();
       let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
         || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
+      let skipped = self.body_facts.zip(rap.owner_local()).is_some_and(|(facts, local)|
+        facts.reassignment_sites.get(&(lhs_expr.span.with_parent(None), local)) == Some(&false));
       self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
         ro: rap,
         id: *self.unique_id,
@@ -8165,6 +8192,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         maybe_init,
         payload,
         contents_gone: contents_gone.is_some_and(|h| h == hash),
+        skipped,
       });
       *self.unique_id += 1;
     }
@@ -8179,6 +8207,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         maybe_init: Some(InitBy::EarlierIteration),
         payload: false,
         contents_gone: false,
+        skipped: false,
       });
       *self.unique_id += 1;
     }
@@ -8806,23 +8835,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       let mut front: Vec<(usize, ExternalEvent)> = Vec::new();
       // (A struct or tuple variable's part columns too, #627.)
-      let unbound: Vec<ResourceAccessPoint> = scrutinee_moves.iter()
-        .flat_map(|v| self.tuple_scrutinee_unbound(v, &[])).collect();
-      for r in &unbound {
-        front.push((if_end, ExternalEvent::Move {
-          from: ResourceTy::Value(r.clone()),
-          to: self.tuple_scrutinee_target(let_expr.init),
-          id: *self.unique_id,
-          is_partial: false,
-          into_closure: false,
-          loop_head: LoopHead::No,
-          break_alt: None,
-          break_out: false,
-          carried_with: None, via_try: None,
-          closure_value: false,
-        }));
-        *self.unique_id += 1;
-        liveness.insert(r.clone());
+      let mut unbound = Vec::new();
+      let into_tuple = self.tuple_scrutinee_target(let_expr.init);
+      for v in &scrutinee_moves {
+        for r in self.tuple_scrutinee_unbound(v, &[]) {
+          front.push((if_end, self.tuple_scrutinee_move(v, r.clone(), into_tuple.clone())));
+          liveness.insert(r.clone());
+          unbound.push(r);
+        }
       }
       // (A pattern that always matches, #981, is drawn inline above,
       // #995: there's no path where it fails.)
@@ -9196,9 +9216,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // the ones the pattern took, #627.)
       for v in scrutinee_moves.iter() {
         for r in self.tuple_scrutinee_unbound(v, &arm_moved) {
-          let id = *self.unique_id;
-          *self.unique_id += 1;
-          let ext_ev = self.ext_ev_of_evt(Evt::Move, into_tuple.clone(), ResourceTy::Value(r), id, false);
+          let ext_ev = self.tuple_scrutinee_move(v, r, into_tuple.clone());
           if inline {
             self.add_external_event(pat_line, ext_ev);
           } else {
@@ -9647,7 +9665,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           branch_e_data.push((pat_line, ext_ev));
         }
         if let Some(b) = box_payload {
-          self.move_struct_fields_away(pat_line, &b);
+          self.move_struct_fields_away(pat_line, &b, &format!("*{b}"));
         }
         match e {               // A borrow, mut/immut must be returned at the end of the block
           Evt::SBorrow => {
@@ -15435,6 +15453,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       maybe_init: Some(InitBy::EarlierIteration),
       payload: false,
       contents_gone: false,
+      skipped: false,
     });
     *self.unique_id += 1;
   }
@@ -16197,7 +16216,8 @@ fn moved_out_of_outer(
   let outer = |r: &ResourceAccessPoint| !r.is_fn() && !decls.contains(r);
   for (_, ev) in events {
     match ev {
-      ExternalEvent::Move { from: ResourceTy::Value(rap), .. } if outer(rap) => {
+      ExternalEvent::Move { from: ResourceTy::Value(rap), .. }
+      | ExternalEvent::ClosureCall { closure: ResourceTy::Value(rap), .. } if outer(rap) => {
         match out.iter_mut().find(|(r, _)| r == rap) {
           Some(e) => e.1 = true,
           None => out.push((rap.clone(), true)),
@@ -16512,7 +16532,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // whichever ran, so that is one plain move.
       pair(self, values[0].0);
     } else {
-      for (value, brk) in &values {
+      let skipped = |value: &Expr<'_>| self.facts.is_some_and(|facts| {
+        let span = value.span.with_parent(None);
+        let inside = |effect: &rustc_span::Span| effect.ctxt() == span.ctxt()
+          && !effect.is_empty() && span.contains(*effect);
+        let join = facts.joins.get(&loop_expr.hir_id).map(|j| j.at.block);
+        let sites = || facts.effect_sites.iter().filter(|(effect, _)| inside(effect))
+          .flat_map(|(_, sites)| sites)
+          // After the join, rustc can give a reborrow the tail's span.
+          // It is a use of the selected result, not another exit.
+          .filter(|(block, _)| !join.is_some_and(|j| self.mir_body.basic_blocks.dominators().dominates(j, *block)));
+        sites().any(|(_, runs)| !runs) && !sites().any(|(_, runs)| *runs)
+      });
+      let runtime: Vec<_> = values.iter().map(|(v, _)| skipped(v)).collect();
+      let single = runtime.iter().filter(|&&skipped| !skipped).count() == 1;
+      for ((value, brk), skipped) in values.iter().zip(runtime) {
         // A field of a local (`break 'blk g.name`) goes with the local
         // (#1288).
         let mut root: &Expr = value;
@@ -16539,7 +16573,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let loan = issued.next()?;
           issued.next().is_none().then_some(loan.loan)
         });
-        self.break_alt = Some(BreakAlt { brk: brk.clone(), in_loop, end, reborrow });
+        let runtime = if skipped { AltRuntime::Skipped } else if single { AltRuntime::Selected } else { AltRuntime::Possible };
+        self.break_alt = Some(BreakAlt { brk: brk.clone(), in_loop, end, reborrow, runtime });
         pair(self, value);
         self.break_alt = None;
       }
@@ -16636,7 +16671,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let carries = |b: &HirId| !definite_breaks.contains(b)
         && self.way_out_moves.iter().any(|(t, brk, moved)| *t == target && *brk == Some(*b) && moved.contains(m.rap.name()));
       let carried = breaks.iter().any(carries);
-      let definite = !ends_otherwise && breaks.iter().all(|b| definite_breaks.contains(b) || carries(b));
+      let all_ways_move = !ends_otherwise && breaks.iter().all(|b| definite_breaks.contains(b) || carries(b));
+      let runtime_only = !all_ways_move && block.is_some() && m.rap.is_closure()
+        && self.facts.and_then(|f| f.joins.get(&loop_expr.hir_id))
+          .is_some_and(|j| j.state.state.get(m.rap.name()) == Some(&"moved"));
+      let definite = all_ways_move || runtime_only;
       // Only seen on the path to a `break`, not in the branch that
       // breaks: the move may be in no branch (#980).
       let nothing_above = mine.iter().all(|o| o.rap != m.rap || o.on_path);
@@ -16649,7 +16688,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       self.add_external_event(line, ExternalEvent::LoopExitMove {
         ro: m.rap.clone(), definite,
-        at: if block.is_some() { MaybeMovedAt::LabeledBlock { skipped: false, carried } } else { MaybeMovedAt::Loop { nothing_above, kept, carried } },
+        at: if block.is_some() { MaybeMovedAt::LabeledBlock { skipped: false, carried, runtime_only } } else { MaybeMovedAt::Loop { nothing_above, kept, carried } },
         id: *self.unique_id,
       });
       *self.unique_id += 1;
