@@ -28959,11 +28959,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "pending's value is moved into the `?`. If pending produces an output value, the returned value can be an Ok value holding that output if execution reaches that construction. If pending produces a residual, the `?` returns early.",
             "pending's value is moved into the `?`. If pending produces an output value, the returned value can be an Ok value holding a Some value holding that output if execution reaches that construction. If pending produces a residual, the `?` returns early.",
-            "pending.0's value is moved",
+            // The field is a bool: Copy, so only the whole struct moves.
+            "pending moves as a whole, so pending.0 is no longer accessible here. The field is still Copy",
         ],
         must_not_contain: &[
             "If pending produces an output value, the caller receives an Ok value holding the value inside it.",
-            "pending.0's value is moved to the caller",
+            "pending.0's value is moved",
         ],
     },
     TooltipExpect {
