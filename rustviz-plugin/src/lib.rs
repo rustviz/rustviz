@@ -24,6 +24,7 @@ extern crate rustc_span;
 extern crate rustc_borrowck;
 extern crate polonius_engine;
 extern crate rustc_mir_dataflow;
+extern crate rustc_mir_transform;
 extern crate rustc_abi;
 
 

@@ -1,7 +1,7 @@
 extern crate handlebars;
 use crate::facts::table::{FunctionStart, Init, JoinCell};
 use crate::svg_generator::data::{state_after_loop_exits, AltRuntime};
-use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, ElemsLeft, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
+use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -1788,7 +1788,7 @@ fn render_branch_dots(
                         _ => None,
                     }).flatten().collect();
                 let still: Vec<String> = el.all().into_iter().filter(|n| !moved.contains(n) && !before.contains(n)).collect();
-                hover_messages::event_dot_branch_merge_elems_moved(&is.real_name(), &moved, &still)
+                hover_messages::event_dot_branch_merge_elems_moved(&is.real_name(), &moved, &still, &el.payloads)
             } else {
                 // A `&mut` reference moved on some paths (`if b {
                 // x } else { y }` returned, #674) owns nothing to
@@ -1861,79 +1861,26 @@ fn render_branch_dots(
         return;
 }
 
-/// Preserve the detailed teaching text when it describes the runtime drop.
-fn scope_end_by_rustc(vd: &VisualizationData, row: usize, ro: &ResourceAccessPoint, history: &[(usize, Event)], resource_hold: bool, name: &String, has_partial: bool) -> Option<(String, bool)> {
-    let skipped_move = history.iter().any(|(_, e)| matches!(e,
-        Event::Move { break_alt: Some(BreakAlt { runtime: AltRuntime::Skipped, .. }), .. }));
-    let pattern_field = ro.is_member() && (skipped_move || history.iter().any(|(_, e)| matches!(e, Event::OrAltMove { .. })));
-    let aggregate = matches!(ro, ResourceAccessPoint::Struct(Struct { is_member: false, .. }));
-    if !matches!(ro, ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_)) || ro.never_drops() || ro.is_plain_value() || ro.is_closure()
-        || ro.is_union() || ro.is_manually_drop() || ro.is_temporary() || ro.holds_borrow() {
-        return None;
-    }
-    let src = rv_attrs::line_of(row, &vd.row_lines)?;
-    let function = *vd.fn_source_lines.get(ro.hash())?;
-    let how = vd.state_table.local_scope_drop(function, ro.name(), src, ro.owner_local())?;
-    let uses_flag = vd.state_table.uses_drop_flag(function, ro.name(), src, ro.owner_local(), false);
-    // A partial aggregate's ordinary scope tooltip says which fields
-    // moved, so a recorded partial drop keeps it. A whole aggregate is
-    // described by rustc's drop when that drop depends on a flag, or the
-    // runtime paths all skip a drop that still has one. (History alone
-    // would guess "each branch moved it" for a move in a nested branch.)
-    let consumed_at_runtime = aggregate && how == "nothing_to_drop" && uses_flag;
-    if aggregate && !pattern_field && how != "drops_if_init" && !consumed_at_runtime && !(how == "drops" && uses_flag) {
-        return None;
-    }
-    if has_partial {
-        return None;
-    }
-    // The history's drop flag (`init_at_end`, `maybe_moved_at_end`).
-    let init = init_at_end(history);
-    let flag = (!ro.holds_value() && matches!(init, Some(InitJoin::Loop | InitJoin::Maybe { .. })))
-        || (!resource_hold && maybe_moved_at_end(history));
-    let mixed = matches!(init, Some(InitJoin::Maybe { moved: true }))
-        && vd.state_table.incoming_cell(function, ro.name(), src).is_some_and(|c| c.mixed_init.is_some());
-    let note = ro.drop_note();
-    match how {
-        "drops_if_init" if !ro.box_contents_moved() && (!flag || mixed) =>
-            Some((hover_messages::event_dot_go_out_of_scope_maybe_kept(name, &note), true)),
-        "nothing_to_drop" if resource_hold || flag || uses_flag => {
-            let mut title = hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_no_resource_dropped_suffix();
-            if uses_flag { title.push_str(hover_messages::runtime_drop_flag()); }
-            Some((title, false))
-        }
-        "drops" if !resource_hold || flag || skipped_move || uses_flag => {
-            let mut title = hover_messages::event_dot_owner_go_out_of_scope(name) + &hover_messages::event_dot_resource_dropped_suffix(&note);
-            if uses_flag { title.push_str(hover_messages::runtime_drop_flag()); }
-            Some((title, true))
-        }
-        _ => None,
-    }
-}
-
 /// The dot for `Event::OwnerGoOutOfScope`: a variable's scope end, with the
-/// drop triangle when its resource is dropped there. Sets `data.title` for
-/// the plain dot; returns true when it drew the dot itself (a drop triangle,
-/// or nothing at all) so the caller must not add the plain one.
-fn render_scope_end_dot(
+/// drop triangle when its resource is dropped there. Return the tooltip
+/// and whether that occurrence runs drop glue.
+fn scope_end_message(
     hash: &u64,
     history: &Vec<(usize, Event)>,
     index: usize,
     event: &Event,
     line_number: &usize,
-    event_y: i64,
     resource_hold: bool,
     mut name: String,
-    data: &mut EventDotData,
-    timeline_data: &TimelineColumnData,
     visualization_data: &VisualizationData,
-    dots: &mut DotLayer,
-) -> bool {
-        let Event::OwnerGoOutOfScope { ro, exit_site, .. } = event else { unreachable!() };
+) -> (String, bool) {
+        use crate::facts::ScopeDrop;
+        let mut title;
+        let Event::OwnerGoOutOfScope { ro, id, .. } = event else { unreachable!() };
         // A static outlives the function (#690).
         if ro.is_static() {
-            data.title = hover_messages::event_dot_static(&name);
-            return false;
+            title = hover_messages::event_dot_static(&name);
+            return (title, false);
         }
         let in_branch = !std::ptr::eq(&visualization_data.timelines[hash].history, history);
         // The events on the path to an exit's drop in a branch, from the
@@ -1945,20 +1892,67 @@ fn render_scope_end_dot(
         // (A Copy field of a struct moved on some paths only
         // is a value to the drop flag too: nothing to drop.)
         let is_plain = ro.is_plain_value()
-            || (never_drops && !resource_hold && maybe_moved_at_end(history));
+            || never_drops;
+        let end = visualization_data.row_layout.scope_ends.get(id);
+        let effect = end.map(|end| end.effect);
+        // For named places the destructor's own state decides the mark.
+        // Replay is still used for synthetic columns and special exit
+        // explanations that have no ordinary MIR storage boundary.
+        let resource_hold = end.map_or(resource_hold, |end| end.has_value && !end.payload_moved && !end.payload_maybe);
+        let can_be_conditional = effect.is_none_or(|h| h == ScopeDrop::Conditional);
+        if effect == Some(ScopeDrop::ExitStorage) {
+            return (event.print_message_with_name(&mut name) + " on each path that leaves this scope.", false);
+        }
+        if effect == Some(ScopeDrop::ByPath) {
+            return (event.print_message_with_name(&mut name) + ". On paths that still hold a resource, it is dropped.", true);
+        }
         let is_closure = ro.is_closure();
         let is_box = matches!(ro, ResourceAccessPoint::Struct(Struct { is_box: true, .. }));
-        let partial = if matches!(ro, ResourceAccessPoint::Owner(_) | ResourceAccessPoint::Struct(_)) {
-            (|| visualization_data.state_table.partial_drop(
-                *visualization_data.fn_source_lines.get(hash)?,
-                ro.name(),
-                rv_attrs::line_of(*line_number, &visualization_data.row_lines)?,
-                ro.owner_local()?,
-                *exit_site,
-            ))()
-        } else {
-            None
-        };
+        let partial = end.and_then(|end| end.partial.as_ref());
+        if end.is_some_and(|end| end.effect == ScopeDrop::Storage && end.has_value) && !ro.drops_nothing() && !ro.is_closure() {
+            return (hover_messages::event_dot_owner_go_out_of_scope(&name) + ". This value needs no drop glue.", false);
+        }
+        if let Some(parts) = end.and_then(|end| end.array.as_ref()) {
+            let drops = !parts.conditional.is_empty() || !parts.left.is_empty();
+            if !parts.empty_payload.is_empty() {
+                let mut title = event.print_message_with_name(&mut name) + ".";
+                for element in &parts.moved_payload {
+                    title.push_str(&format!(" The payload of {} was moved out.", hover_messages::styled_name_html(element)));
+                }
+                for (element, variant) in &parts.absent_variant {
+                    title.push_str(&format!(" {} holds {}.", hover_messages::styled_name_html(element), hover_messages::styled_name_html(variant)));
+                }
+                for element in &parts.empty_payload {
+                    title.push_str(&format!(" No payload remains to drop in {}.", hover_messages::styled_name_html(element)));
+                }
+                for element in &parts.left {
+                    title.push_str(&format!(" {} is dropped.", hover_messages::styled_name_html(element)));
+                }
+                for element in &parts.moved {
+                    title.push_str(&format!(" {} was moved out earlier.", hover_messages::styled_name_html(element)));
+                }
+                for element in &parts.conditional {
+                    title.push_str(&format!(" {} is dropped only on paths that still hold it.", hover_messages::styled_name_html(element)));
+                }
+                return (title, drops);
+            }
+            if drops || ro.elems_left().is_some() || ro.is_member() {
+                return (hover_messages::event_dot_struct_partial_go_out_of_scope(
+                    &name, &parts.moved, &parts.conditional, &parts.left, false,
+                    moved_by_chain_condition(history) || maybe_moved_by_let(history), parts.may_be_refilled, false), drops);
+            }
+            return (event.print_message_with_name(&mut name) + &hover_messages::event_dot_no_resource_dropped_suffix(), false);
+        }
+        if end.is_some_and(|e| e.effect == ScopeDrop::Empty && e.has_value)
+            && partial.is_some_and(|p| p.drops_resource) {
+            let mut title = event.print_message_with_name(&mut name);
+            title.push_str(". No payload remains to drop.");
+            if partial.is_some_and(|p| p.variant_drops.iter().any(|v| v.variant == "None" &&
+                matches!(v.payload, crate::facts::VariantPayload::Empty))) {
+                title.push_str(" None carries no payload.");
+            }
+            return (title, false);
+        }
         if is_closure {
             // Closure value going out of scope: only
             // surface "Its captured resources are
@@ -1974,52 +1968,30 @@ fn render_scope_end_dot(
             // away (`let g = f;`); then there's nothing left to
             // drop (#271).
             let move_count = closure_move_capture_count(visualization_data, *hash);
-            let drop_site = visualization_data.fn_source_lines.get(hash).zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines));
-            let how = drop_site.and_then(|(&function, row)| {
-                visualization_data.state_table.local_scope_drop(function, ro.name(), row, ro.owner_local())
-            });
-            let maybe_moved = move_count > 0 && (how == Some("drops_if_init")
-                || (how.is_none() && !resource_hold && maybe_moved_at_end(history)));
-            if move_count > 0 && (matches!(how, Some("drops" | "drops_if_init" | "drops_rest"))
-                || (how.is_none() && (resource_hold || maybe_moved))) {
-                let cx = timeline_data.x_val;
-                let cy = event_y;
+            if move_count > 0 && end.is_some_and(|e| e.effect == ScopeDrop::Storage && e.has_value) {
+                return (event.print_message_with_name(&mut name) + ". Its captures need no drop glue.", false);
+            }
+            let maybe_moved = move_count > 0 && effect.map_or_else(|| !resource_hold && maybe_moved_at_end(history), |h| h == ScopeDrop::Conditional);
+            if move_count > 0 && (resource_hold || maybe_moved || effect == Some(ScopeDrop::Remaining)) {
                 // Called (so moved) on some paths only: the drop
                 // flag decides whether its captures are dropped.
                 let title = if maybe_moved {
                     let (called, moved) = closure_used_up_in_branches(history);
                     hover_messages::event_dot_closure_go_out_of_scope_maybe_moved(&name, moved_by_chain_condition(history), move_count, called, moved)
-                } else if how == Some("drops_rest") {
+                } else if effect == Some(ScopeDrop::Remaining) {
                     format!("{} goes out of scope. Any captured resources it still holds are dropped.",
                         styled_name_html(&name))
                 } else {
-                    let mut title = hover_messages::event_dot_closure_go_out_of_scope(&name, move_count);
-                    if drop_site.is_some_and(|(&function, row)| visualization_data.state_table
-                        .uses_drop_flag(function, ro.name(), row, ro.owner_local(), false)) {
-                        title.push_str(hover_messages::runtime_drop_flag());
-                    }
-                    title
+                    hover_messages::event_dot_closure_go_out_of_scope(&name, move_count)
                 };
-                let drop_data = DropDotData {
-                    hash: *hash as u64,
-                    dot_x: cx,
-                    dot_y: cy,
-                    title,
-                    p1x: cx - 3, p1y: cy - 1,
-                    p2x: cx + 3, p2y: cy - 1,
-                    p3x: cx,     p3y: cy + 3,
-                };
-                append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-                return true;
+                return (title, true);
             }
-            data.title = event.print_message_with_name(&mut name);
+            title = event.print_message_with_name(&mut name);
             if move_count > 0 {
-                data.title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix());
-                if drop_site.is_some_and(|(&function, row)| visualization_data.state_table
-                    .uses_drop_flag(function, ro.name(), row, ro.owner_local(), false)) {
-                    data.title.push_str(hover_messages::runtime_drop_flag());
-                }
+                title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix());
             }
+        } else if ro.is_manually_drop() && effect == Some(ScopeDrop::Storage) && !resource_hold {
+            return (event.print_message_with_name(&mut name) + ". No resource is dropped. A ManuallyDrop never drops the value inside it automatically.", false);
         } else if (ro.is_manually_drop() || ro.is_maybe_uninit() || (ro.is_union() && !ro.union_drop())) && !never_drops
             && (visualization_data.timelines[hash].history.iter()
                 .any(|(_, e)| matches!(e, Event::ManuallyDropByHand))
@@ -2032,7 +2004,7 @@ fn render_scope_end_dot(
             // ManuallyDrop has no drop glue, so no drop flag.
             // The same for a MaybeUninit and a union without a
             // Drop impl (#191, #1146).
-            data.title = if ro.is_union() {
+            title = if ro.is_union() {
                 hover_messages::event_dot_union_go_out_of_scope(&name)
             } else if ro.is_maybe_uninit() {
                 hover_messages::event_dot_maybe_uninit_go_out_of_scope(&name)
@@ -2042,7 +2014,7 @@ fn render_scope_end_dot(
         } else if is_plain {
             // Never a resource: going out of scope drops
             // nothing, whether or not it was moved earlier.
-            data.title = match partial {
+            title = match partial {
                 Some(split) =>
                     hover_messages::event_dot_partial_scope_drop(&name, split, true, false),
                 _ => event.print_message_with_name(&mut name),
@@ -2075,94 +2047,32 @@ fn render_scope_end_dot(
                 .cloned().collect();
             let held = other.iter().fold(false, |h, (_, e)| holds_value_after(h, e));
             if maybe_moved_at_end(&other) {
-                let cx = timeline_data.x_val;
-                let cy = event_y;
-                let drop_data = DropDotData {
-                    hash: *hash as u64,
-                    dot_x: cx,
-                    dot_y: cy,
-                    title: match &block {
+                return (match &block {
                         Some((alt, _)) => hover_messages::event_dot_block_break_out_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), alt),
                         None => hover_messages::event_dot_break_out_go_out_of_scope_maybe_moved(&name, &ro.drop_note()),
-                    },
-                    p1x: cx - 3, p1y: cy - 1,
-                    p2x: cx + 3, p2y: cy - 1,
-                    p3x: cx,     p3y: cy + 3,
-                };
-                append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-                return true;
+                    }, true);
             }
             if !held {
-                data.title = match &block {
+                title = match &block {
                     Some(_) => hover_messages::event_dot_block_break_out_go_out_of_scope_moved(&name),
                     None => hover_messages::event_dot_break_out_go_out_of_scope_moved(&name),
                 };
-                return false;
+                return (title, false);
             }
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title: match &block {
+            return (match &block {
                     Some((alt, Some(part))) => hover_messages::event_dot_block_break_out_part_go_out_of_scope(&name, alt, part),
                     Some((alt, None)) => hover_messages::event_dot_block_break_out_go_out_of_scope(&name, alt),
                     None => hover_messages::event_dot_break_out_go_out_of_scope(&name),
-                },
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
-        } else if let Some((title, dropped)) = matches!(event, Event::OwnerGoOutOfScope { early: None, .. })
-            .then(|| scope_end_by_rustc(visualization_data, *line_number, ro, history, resource_hold, &name,
-                // Payload and variant facts only the partial text states.
-                partial.is_some_and(|p| !p.payloads_moved.is_empty() || !p.payloads_conditional.is_empty()
-                    || !p.payloads_empty.is_empty() || !p.variant_drops.is_empty()))).flatten() {
-            // What's drawn above says something else about what's
-            // dropped here than rustc does (#1036, #1037).
-            if !dropped {
-                data.title = title;
-                return false;
-            }
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title,
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
-        // (`init_at_end` is `Some` only if nothing assigned
-        // the column since: it holds no definite value,
-        // whatever the merged states say.)
-        } else if !ro.holds_value() && init_at_end(history) == Some(InitJoin::AllMoved) {
+                }, true);
+        } else if effect.is_none_or(|h| h == ScopeDrop::Empty) && !ro.holds_value() && init_at_end(history) == Some(InitJoin::AllMoved) {
             // Every branch that assigned it moved it (#244).
-            data.title = hover_messages::event_dot_go_out_of_scope_init_all_moved(&name);
-        } else if let (false, Some(InitJoin::Loop)) = (ro.holds_value(), init_at_end(history)) {
+            title = hover_messages::event_dot_go_out_of_scope_init_all_moved(&name);
+        } else if !ro.holds_value() && init_at_end(history) == Some(InitJoin::Loop)
+            && (can_be_conditional || partial.is_some_and(|p| !p.payloads_conditional.is_empty())) {
             // A loop above may have ended before assigning
             // it (#786): the drop flag decides here.
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title: hover_messages::event_dot_go_out_of_scope_after_loop(&name, &ro.drop_note(), loop_maybe_init_before(history)),
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
-        } else if let (false, Some(InitJoin::Maybe { moved })) = (ro.holds_value(), (match &exit_path {
+            return (hover_messages::event_dot_go_out_of_scope_after_loop(&name, &ro.drop_note(), loop_maybe_init_before(history)), true);
+        } else if let (false, Some(InitJoin::Maybe { moved })) = (ro.holds_value() || !can_be_conditional, (match &exit_path {
             // An exit's drop in a branch, after a conditional above the
             // branch's that assigned it in some branches only (#1436).
             Some(path) => init_at_end(path),
@@ -2175,81 +2085,36 @@ fn render_scope_end_dot(
             // Whether it holds a value isn't only up to the branch
             // that ran when it may have held one as the conditional
             // started (#1036).
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title: if is_branch_temp_col(ro) {
+            return (if is_branch_temp_col(ro) {
                     // A temporary a `let` extends through a branch (#1397).
                     hover_messages::event_dot_go_out_of_scope_temp_made(&name, made_on_line(history, &visualization_data.row_lines))
-                } else if init_by_maybe_held(exit_path.as_deref().unwrap_or(history)) {
+                } else if end.is_some_and(|e| e.moved && e.unassigned) || init_by_maybe_held(exit_path.as_deref().unwrap_or(history)) {
                     hover_messages::event_dot_go_out_of_scope_maybe_kept(&name, &ro.drop_note())
                 } else {
                     hover_messages::event_dot_go_out_of_scope_maybe_init(&name, &ro.drop_note(), moved)
-                },
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
+                }, true);
+        } else if let Some(needs_drop) = end.filter(|e| e.payload_maybe && ro.box_contents_moved()).and_then(|e| e.box_contents_need_drop) {
+            let title = if effect == Some(ScopeDrop::Conditional) {
+                hover_messages::event_dot_box_maybe_moved_go_out_of_scope(&name, needs_drop)
+            } else if !needs_drop {
+                hover_messages::event_dot_go_out_of_scope_box_plain_contents_maybe_moved(&name)
+            } else {
+                hover_messages::event_dot_box_payload_conditional(&name, end.is_some_and(|e| e.flag))
             };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
-        } else if mixed_box_paths(ro, history) {
+            return (title, true);
+        } else if effect.is_none_or(|e| matches!(e, ScopeDrop::Remaining | ScopeDrop::Conditional)) && mixed_box_paths(ro, history) {
             // A Box whose contents were moved out, given a new Box
             // or moved away whole on some paths only (#1220): what is
             // dropped here depends on the path.
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title: hover_messages::event_dot_box_paths_go_out_of_scope(&name),
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
-        } else if let Some((moved, maybe, left)) = ro.elems_left().map(|el| {
-            let prior = &history[..index];
-            let start = prior.iter().rposition(|(_, e)| matches!(e, Event::OwnerGoOutOfScope { .. })).map_or(0, |i| i+1);
-            elems_split(&prior[start..], el)
-        })
-            .filter(|(moved, maybe, left)| !maybe.is_empty() || !moved.is_empty() && !left.is_empty()) {
-            // `let [a, _] = arr;` (#1166), `[first, ..] =>` (#1144): the
-            // elements the pattern didn't take are still in the array
-            // (whose column goes on, #1285), and are dropped with it; in
-            // some branches only, those it took are dropped only on the
-            // paths that didn't. (Patterns that took every element on
-            // every path leave nothing, #1302: the column has stopped.)
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let by_cond = !maybe.is_empty() && (moved_by_chain_condition(history) || maybe_moved_by_let(history));
-            let title = hover_messages::event_dot_struct_partial_go_out_of_scope(
-                &name, &moved, &maybe, &left, false, by_cond, false, false);
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title,
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
-        } else if !resource_hold && partial.is_none_or(|p| p.payloads_empty.is_empty())
-            && (maybe_moved_at_end(history)
+            return (hover_messages::event_dot_box_paths_go_out_of_scope(&name), true);
+        } else if partial.is_none_or(|p| p.payloads_empty.is_empty())
+            && effect.map_or_else(|| !resource_hold && (maybe_moved_at_end(history)
             // An exit's drop in a branch, after a conditional above the
             // branch's that moved it on some paths (#1194).
             || in_branch && history_path(&visualization_data.timelines[hash].history, history, history.len())
-                .is_some_and(|path| maybe_moved_at_end(&path))) {
+                .is_some_and(|path| maybe_moved_at_end(&path))), |h| h == ScopeDrop::Conditional) {
             // Moved in some branches of a conditional but
             // not others (#179): the drop flag decides here.
-            let cx = timeline_data.x_val;
-            let cy = event_y;
             let by_cond = moved_by_chain_condition(history) || maybe_moved_by_let(history);
             let last_branch = history.iter().rev().find_map(|(_, e)| match e {
                 Event::Branch { branch_history, .. } => Some(branch_history),
@@ -2261,110 +2126,41 @@ fn render_scope_end_dot(
                 && p.variant_drops.iter().any(|drop| matches!(drop.payload, crate::facts::schema::VariantPayload::Conditional(_))))
             {
                 hover_messages::event_dot_partial_scope_drop(&name, split, false, is_box)
+            } else if end.is_some_and(|end| end.unassigned && end.moved) {
+                hover_messages::event_dot_go_out_of_scope_maybe_kept(&name, &ro.drop_note())
             } else if chain_new_value_lasts(history) {
                 // Given a new value by a condition (#603).
                 hover_messages::event_dot_go_out_of_scope_chain_new_value(&name, &ro.drop_note())
-            } else if ro.box_contents_moved() && ro.drop_note().is_empty()
+            } else if end.is_none() && ro.box_contents_moved() && ro.drop_note().is_empty()
                 && last_branch.is_some_and(|b| moves_only_box_contents(b)) {
                 hover_messages::event_dot_go_out_of_scope_box_plain_contents_maybe_moved(&name)
             } else if ro.box_contents_moved() {
                 hover_messages::event_dot_box_paths_go_out_of_scope(&name)
-            } else if maybe_moved_by_kept_round(exit_path.as_deref().unwrap_or(history).iter()) {
+            } else if end.is_some_and(|end| end.unassigned || !maybe_moved_at_end(exit_path.as_deref().unwrap_or(history))) || maybe_moved_by_kept_round(history.iter()) {
                 // After a loop that moves it on some time rounds only
                 // (#1019).
                 hover_messages::event_dot_go_out_of_scope_maybe_kept(&name, &ro.drop_note())
-            } else if let Some(el) = ro.elems_left() {
-                // A slice pattern moved some elements out on some paths
-                // (#1144): the others are dropped here on every path.
-                hover_messages::event_dot_struct_partial_go_out_of_scope(
-                    &name, &[], &el.moved, &el.left, false, by_cond, false, false)
             } else {
                 hover_messages::event_dot_go_out_of_scope_maybe_moved(&name, &ro.drop_note(), by_cond)
             };
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title,
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
-        } else if let (false, Some(el)) = (resource_hold, ro.elems_left()) {
-            // Patterns that took every element (#1302): nothing is left
-            // to drop, so a plain dot.
-            if el.left.is_empty() {
-                data.title = hover_messages::event_dot_struct_partial_go_out_of_scope(
-                    &name, &el.moved, &[], &[], false, false, false, false);
-                return false;
-            }
-            // `let [a, _] = arr;` (#1166), `[first, ..] =>` (#1144): the
-            // elements the pattern didn't take are still in the array,
-            // and are dropped with it.
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title: hover_messages::event_dot_struct_partial_go_out_of_scope(
-                    &name, &el.moved, &[], &el.left, false, false, false, false),
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
-        } else if !resource_hold && ro.box_contents_moved() && box_contents_moved_last(&history[..index]) != Some(false) {
+            return (title, true);
+        } else if end.is_some_and(|e| e.payload_moved && e.effect.runs()) || end.is_none() && !resource_hold && ro.box_contents_moved() && box_contents_moved_last(&history[..index]) != Some(false) {
             // `take(*b)`: the contents are gone but the Box's
             // allocation is still freed here (#609). Not when the
             // Box was given a new value and moved away whole since
             // (#1145).
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title: hover_messages::event_dot_box_contents_moved_go_out_of_scope(&name),
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
+            return (hover_messages::event_dot_box_contents_moved_go_out_of_scope(&name), true);
         } else if let Some(split) = partial {
             // Partially moved struct (#207): only the
             // fields still holding a value are dropped,
             // and those moved on some paths only maybe
             // (#395).
             let title = hover_messages::event_dot_partial_scope_drop(&name, split, false, is_box);
-            // A Box's allocation is freed whatever is left in it.
-            // The containing aggregate shows the drop of an unnamed
-            // surviving payload. A field whose line ended at the pattern
-            // move can still explain that drop on its scope-end dot.
-            let in_parent_drop = ro.is_member() && !resource_hold && split.incomplete
-                && (split.payloads_moved.contains(&name) || split.payloads_conditional.contains(&name));
-            if !split.drops_resource || in_parent_drop {
-                data.title = title;
-            } else {
-                let cx = timeline_data.x_val;
-                let cy = event_y;
-                let drop_data = DropDotData {
-                    hash: *hash as u64,
-                    dot_x: cx,
-                    dot_y: cy,
-                    title,
-                    p1x: cx - 3, p1y: cy - 1,
-                    p2x: cx + 3, p2y: cy - 1,
-                    p3x: cx,     p3y: cy + 3,
-                };
-                append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-                return true;
-            }
-        } else if !resource_hold {
+            return (title, split.drops_resource);
+        } else if effect == Some(ScopeDrop::Remaining) {
+            return (event.print_message_with_name(&mut name)
+                + ". Any remaining initialized parts that need dropping are dropped.", true);
+        } else if end.is_some_and(|e| e.effect == ScopeDrop::Empty) || !resource_hold {
             // Resource was already moved out: note there's
             // nothing to drop here, and why, when a
             // conditional moved or dropped it in every branch
@@ -2372,54 +2168,40 @@ fn render_scope_end_dot(
             // A Copy value never had a resource to move or
             // drop, so its scope end reads the same whatever
             // its borrow history was (#793).
-            data.title = event.print_message_with_name(& mut name);
+            title = event.print_message_with_name(& mut name);
             if !never_drops {
                 match all_moved_at_end(history, &visualization_data.state_table, &name) {
-                    Some(ScopeMove::Scrutinee) => data.title.push_str(
+                    Some(ScopeMove::Scrutinee) => title.push_str(
                         &hover_messages::event_dot_scrutinee_move_scope_end(&name)),
-                    Some(ScopeMove::Conditional) => data.title.push_str(
+                    Some(ScopeMove::Conditional) => title.push_str(
                         &hover_messages::event_dot_go_out_of_scope_moved_through_conditional(&name)),
-                    Some(ScopeMove::Branches { some_diverge }) => data.title.push_str(
+                    Some(ScopeMove::Branches { some_diverge }) => title.push_str(
                         &hover_messages::event_dot_go_out_of_scope_all_moved_suffix(&name, some_diverge)),
-                    None => data.title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix()),
+                    None => title.push_str(&hover_messages::event_dot_no_resource_dropped_suffix()),
                 }
             }
         } else if ro.is_union() && ro.union_drop() && !never_drops {
             // Its own Drop impl runs; its fields are still never
             // dropped (#191, #1146).
-            let cx = timeline_data.x_val;
-            let cy = event_y;
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title: hover_messages::event_dot_union_drop_go_out_of_scope(&name),
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
+            return (hover_messages::event_dot_union_drop_go_out_of_scope(&name), true);
         } else if ro.is_union() && !never_drops {
             // A union never drops its fields (#191).
-            data.title = hover_messages::event_dot_union_go_out_of_scope(&name);
+            title = hover_messages::event_dot_union_go_out_of_scope(&name);
         } else if ro.is_manually_drop() && !never_drops {
             // Nor does a ManuallyDrop drop its contents (#283).
-            data.title = hover_messages::event_dot_manually_drop_go_out_of_scope(&name);
+            title = hover_messages::event_dot_manually_drop_go_out_of_scope(&name);
         } else if never_drops {
             // Copy types have no Drop glue — going out of
             // scope just reclaims storage. Render a plain
             // dot (no drop triangle) and skip the
             // "resource is dropped" suffix.
-            data.title = event.print_message_with_name(&mut name);
+            title = event.print_message_with_name(&mut name);
         } else {
             // Render with a down-arrow triangle inside the
             // dot to make the drop visible at a glance.
             // Triangle is inscribed in the 5px-radius
             // circle: base 1px above center (~6px wide),
             // apex 3px below center.
-            let cx = timeline_data.x_val;
-            let cy = event_y;
             let title = if ro.is_temporary() {
                 // A `let`-extended temporary (#400): say why
                 // it lives, and so drops, only here.
@@ -2433,19 +2215,9 @@ fn render_scope_end_dot(
                 }
                 title
             };
-            let drop_data = DropDotData {
-                hash: *hash as u64,
-                dot_x: cx,
-                dot_y: cy,
-                title,
-                p1x: cx - 3, p1y: cy - 1,
-                p2x: cx + 3, p2y: cy - 1,
-                p3x: cx,     p3y: cy + 3,
-            };
-            append_drop_dot(drop_data, timeline_data, dots, rv_attrs::event_name(event), *line_number);
-            return true;
+            return (title, true);
         }
-    false
+    (title, false)
 }
 
 /// At the `}` of a `loop` nothing breaks out of (#1057): whether the
@@ -2624,6 +2396,12 @@ fn render_dot(
             title: hover_messages::event_dot_unknown_owner()
         };
         if let Some(mut name) = visualization_data.get_name_from_hash(hash) {
+            if matches!(event, Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope { .. })
+                && visualization_data.row_layout.terminal_calls.contains(&event.get_id()) {
+                data.title = format!("The timeline for {} ends here because this call never returns.", hover_messages::styled_name_html(&name));
+                append_dot(data, timeline_data, dots, None, rv_attrs::event_name(event), *line_number);
+                continue;
+            }
             match event {
                 Event::OwnerGoOutOfScope { early: Some(EarlyReturns { process_exit: Some(exit), .. }), .. } => {
                     // At a `process::exit`: the process ends, no
@@ -2645,7 +2423,16 @@ fn render_dot(
                     continue;
                 }
                 Event::OwnerGoOutOfScope { early, .. } => {
-                if render_scope_end_dot(hash, history, i, event, line_number, event_y, resource_hold, name, &mut data, timeline_data, visualization_data, dots) {
+                let (mut title, dropped) = scope_end_message(hash, history, i, event, line_number, resource_hold, name, visualization_data);
+                let scope = visualization_data.row_layout.scope_ends.get(&event.get_id());
+                if scope.is_some_and(|end| end.flag) && !title.contains("drop flag") {
+                    title.push_str(" Rust tracks this with a runtime drop flag.");
+                } else if scope.is_some_and(|end| end.flag_on_some_paths) {
+                    title.push_str(" On some paths Rust tracks this with a runtime drop flag.");
+                }
+                if dropped {
+                    dots.add_event(*hash, timeline_data.x_val, event_y, timeline_data, title, true, None,
+                        rv_attrs::event_name(event), *line_number);
                     // A drop: `return`s in a loop body may drop it
                     // first (#1020).
                     if let Some(e) = early {
@@ -2654,6 +2441,7 @@ fn render_dot(
                     }
                     continue;
                 }
+                data.title = title;
                 },
                 // Reassignment-drop renders the same down-arrow dot as
                 // OwnerGoOutOfScope (resource is dropped at this line),
@@ -4092,7 +3880,7 @@ fn branch_join_message(
             // What is surely still in it: not what is moved at the end
             // (`left`), nor, when every element is moved, the rest
             // (#1302: they are moved above or below the branch).
-            return hover_messages::event_dot_branch_merge_elems_moved(var_name, &moved, &left.left);
+            return hover_messages::event_dot_branch_merge_elems_moved(var_name, &moved, &left.left, &left.payloads);
         }
     }
     let holder = is.extract_rap().is_some_and(|r| !r.is_ref() && r.holds_borrow());
@@ -12859,34 +12647,6 @@ fn elems_moved_before(history: &[(usize, Event)], line: usize, in_branch: bool) 
         }
     }
     (moved, maybe)
-}
-
-/// For an array slice patterns move elements out of
-/// (`Owner::elems_left`): the elements surely moved by the scope end (by
-/// moves outside any conditional), those moved only in some branches,
-/// and those left in it.
-fn elems_split(history: &[(usize, Event)], el: &ElemsLeft) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let mut moved: Vec<String> = Vec::new();
-    for (_, e) in history {
-        if let Event::Move { is: ResourceTy::Index(_, place, _), .. } = e {
-            if !place.starts_with('*') {
-                moved.extend(place_elem_names(place).into_iter().filter(|n| !moved.contains(n)).collect::<Vec<_>>());
-            }
-        }
-    }
-    let mut maybe: Vec<String> = Vec::new();
-    let (all_moved, _) = elems_moved_before(history, usize::MAX, false);
-    for p in all_moved.iter().flat_map(|p| place_elem_names(p)) {
-        if !moved.contains(&p) && !maybe.contains(&p) {
-            maybe.push(p);
-        }
-    }
-    let all = el.all();
-    let order = |v: &mut Vec<String>| v.sort_by_key(|n| all.iter().position(|a| a == n));
-    order(&mut moved);
-    order(&mut maybe);
-    let left = all.iter().filter(|n| !moved.contains(n) && !maybe.contains(n)).cloned().collect();
-    (moved, maybe, left)
 }
 
 /// The rows where a borrow of a field of what the `&mut` reference

@@ -509,8 +509,8 @@ const BOOK: &[Snippet] = &[
     },
     Snippet {
         id: "c6_04_match_moves_string",
-        must_contain: &["Partial move from opt to s", "s goes out of scope. Its resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag."],
-        must_not_contain: &[JOIN_OPT, "opt was moved in at least one branch above,"],
+        must_contain: &["Partial move from opt to s", "s goes out of scope. Its resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out."],
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.", JOIN_OPT, "opt was moved in at least one branch above,"],
         ..E
     },
     Snippet {
@@ -542,8 +542,8 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c6_07_if_let_else_string",
         note: "the None path has no payload, and the Some path moves its payload to n",
-        must_contain: &["Move from name to n", "n goes out of scope. Its resource is dropped.", "name may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of name's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "name goes out of scope. No value inside name remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag."],
-        must_not_contain: &[
+        must_contain: &["Move from name to n", "n goes out of scope. Its resource is dropped.", "name may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of name's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "name goes out of scope. No value inside name remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out."],
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "name was moved in at least one branch above,",
             "name was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
             "name goes out of scope. No resource is dropped.",
@@ -817,9 +817,9 @@ const BOOK: &[Snippet] = &[
             "Partial move from r to e",
             "e goes out of scope. Its resource is dropped.",
             "r may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of r's scope while it still holds its resource (including the String it holds, if any), it is dropped there.",
-            "r goes out of scope. No value inside r remains to drop here. No resource is dropped. Ok holds a value of type i32 that needs no drop. For Err, the String payload was moved out. Rust tracks the move with a runtime drop flag.",
+            "r goes out of scope. No value inside r remains to drop here. No resource is dropped. Ok holds a value of type i32 that needs no drop. For Err, the String payload was moved out.",
         ],
-        must_not_contain: &[
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.",
             "r was moved in at least one branch above,",
             "r was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
             // #873: `Ok(3)` builds a new value; `Ok` is not an actor.
@@ -1611,15 +1611,15 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "x16_match_arm_block_body",
         note: "control for c6_04: a block-bodied arm draws s's drop on canvas",
-        must_contain: &["Partial move from opt to s", "L6 s goes out of scope. Its resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag."],
-        must_not_contain: &[JOIN_OPT, "opt was moved in at least one branch above,"],
+        must_contain: &["Partial move from opt to s", "L6 s goes out of scope. Its resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out."],
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.", JOIN_OPT, "opt was moved in at least one branch above,"],
         ..E
     },
     Snippet {
         id: "x17_match_arm_fn_call_body",
         note: "control: fn-call arm body",
-        must_contain: &["Partial move from opt to s", "Move from s to show", "s goes out of scope. No resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out. Rust tracks the move with a runtime drop flag."],
-        must_not_contain: &[JOIN_OPT, "opt was moved in at least one branch above,"],
+        must_contain: &["Partial move from opt to s", "Move from s to show", "s goes out of scope. No resource is dropped.", "opt may be partially moved above, so it can't be used as a whole after the branches. If execution reaches the end of opt's scope while it still holds its resource (including the String it holds, if any), it is dropped there.", "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload. For Some, the String payload was moved out."],
+        must_not_contain: &["payload was moved out. Rust tracks the move with a runtime drop flag.", JOIN_OPT, "opt was moved in at least one branch above,"],
         ..E
     },
 ];

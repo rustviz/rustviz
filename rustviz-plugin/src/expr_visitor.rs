@@ -283,6 +283,11 @@ pub struct BodyRaps {
   active: HashMap<String, Local>,
   /// RAPs of completed sibling declarations, including their own drop wording.
   earlier: HashMap<Local, (RapData, Option<RefData>)>,
+  /// Earlier fields of sibling bindings that use the same visual column.
+  earlier_fields: BTreeMap<(Local, String), RapData>,
+  /// Ordinary places drawn in the enclosing timeline, as opposed to one
+  /// of its legs. The layout boundary is used for non-returning loops.
+  top_level_places: BTreeMap<(Local, String), usize>,
   /// Root local of the current struct declaration for each shared field group.
   struct_locals: HashMap<u64, Local>,
   pub bindings: std::rc::Rc<crate::facts::BodyBindings>,
@@ -300,11 +305,12 @@ impl BodyRaps {
   /// additionally identifies the projection within that particular local.
   pub(crate) fn place(&self, local: Local, column: &str) -> Option<&RapData> {
     let rd = self.columns.get(column)?;
-    if rd.local == Some(local) || rd.rap.owner_local() == Some(local)
-      || rd.rap.is_member() && self.struct_locals.get(&rd.rap.get_owner()) == Some(&local) {
+    if rd.local == Some(local) || rd.rap.scope_local() == Some(local)
+      || rd.rap.scope_local().is_none() && rd.rap.is_member() && self.struct_locals.get(&rd.rap.get_owner()) == Some(&local) {
       return Some(rd);
     }
     self.earlier.get(&local).map(|(rd, _)| rd).filter(|rd| rd.rap.name() == column)
+      .or_else(|| self.earlier_fields.get(&(local, column.to_owned())))
   }
 
   pub(crate) fn path_loan<'a>(&'a self, rd: &RapData, loans: &'a HashMap<String, RefData>) -> Option<&'a RefData> {
@@ -1984,9 +1990,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let key = if r.is_fn() { fn_key(r.name()) } else { r.name().to_string() };
     self.in_scope.push(key.clone());
     let local = self.raps.local(&key);
+    let scope_owner = r.is_member().then(|| self.raps.struct_locals.get(&r.get_owner()).copied()).flatten();
     match &mut r {
-      ResourceAccessPoint::MutRef(r) => r.binding.local = local,
+      ResourceAccessPoint::MutRef(r) => {
+        r.binding.local = local;
+        r.binding.scope_owner = scope_owner;
+      }
       ResourceAccessPoint::StaticRef(r) => {
+        r.binding.scope_owner = scope_owner;
         r.binding.local = local;
         r.binding.slice_item = local.is_some_and(|l| self.body_facts.is_some_and(|f| f.slice_items.contains(&l)));
       }
@@ -1995,6 +2006,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         s.local = if s.is_member { self.raps.struct_locals.get(&s.owner).copied() } else { local };
       }
       _ => {}
+    }
+    if let Some(owner) = r.scope_local() {
+      if is_global { self.raps.top_level_places.insert((owner, key.clone()), scope); }
+      if let Some(previous) = self.raps.columns.get(&key).filter(|rd| rd.rap.is_member()) {
+        if let Some(old) = previous.rap.scope_local().filter(|&old| old != owner) {
+          self.raps.earlier_fields.insert((old, key.clone()), previous.clone());
+        }
+      }
     }
     if let Some(previous) = self.raps.columns.get(&key).filter(|rd| rd.local != local) {
       if let Some(old) = previous.local { self.raps.earlier.insert(old, (previous.clone(), self.borrow_map.get(&key).cloned())); }
@@ -2016,7 +2035,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       std::collections::hash_map::Entry::Occupied(mut o) => {
         let rd = o.get_mut();
         if !r.is_fn() {
-          if rd.local != local || rd.rap.owner_local() != r.owner_local() {
+          if rd.local != local || rd.rap.scope_local() != r.scope_local() {
             // Each declaration gets its own semantic description on the shared column.
             let hash = *rd.rap.hash();
             rd.rap = r;
@@ -8899,7 +8918,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// element is moved and its column goes on, holding the rest. `from`
   /// otherwise.
   pub fn slice_elem_from(&self, pat: &'tcx Pat<'tcx>, r: &ResourceAccessPoint, e: &Evt, from: &ResourceTy) -> ResourceTy {
-    if !matches!(e, Evt::Move) {
+    if !matches!(e, Evt::Move) || !matches!(from, ResourceTy::Value(ResourceAccessPoint::Owner(_))) {
       return from.clone();
     }
     let Some(local) = r.owner_local().or_else(|| self.raps.local(r.name())) else { return from.clone() };
@@ -8917,17 +8936,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// bound inside an element's pattern (`[Some(a), _]`) takes from that
   /// element. None for anything else.
   pub fn slice_elem_source(&self, hirid: rustc_hir::HirId, from: &ResourceTy) -> Option<ResourceTy> {
-    let ResourceTy::Value(ResourceAccessPoint::Owner(arr)) = from else { return None };
+    let ResourceTy::Value(rap) = from else { return None };
+    if !(rap.elems_left().is_some() || matches!(rap, ResourceAccessPoint::Struct(s) if s.is_member)) { return None; }
     let facts = self.body_facts?;
     let local = facts.bindings.declarations.get(&hirid)?;
     let pattern = self.tcx.hir_span(hirid);
     let mut sites = facts.binding_sources.iter().filter(|s| s.declaration == *local && pattern.contains(s.site) && s.moves);
-    let element = sites.next()?.array_element.as_ref()?;
-    if !sites.all(|s| s.array_element.as_ref() == Some(element)) { return None; }
-    let (source, place) = element;
-    if Some(*source) != arr.local { return None; }
-    arr.elems_left.as_ref()?;
-    Some(ResourceTy::Index(ResourceAccessPoint::Owner(arr.clone()), place.clone(), PlaceWrite::Update))
+    let element = sites.next()?.projected_move.as_ref()?;
+    if !sites.all(|s| s.projected_move.as_ref() == Some(element)) { return None; }
+    let (source, column, place) = element;
+    if Some(*source) != rap.scope_local() || column != rap.name() { return None; }
+    if rap.is_member() && !facts.scope_ends.for_place(*source, column).iter().any(|e|
+        e.effect == crate::facts::ScopeDrop::Remaining && !e.optional_unwind) { return None; }
+    Some(ResourceTy::Index(rap.clone(), place.clone(), PlaceWrite::Update))
   }
 
   /// The reference `name` was just bound by copying (or, for `&mut`,
@@ -9162,6 +9183,62 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
 }
 
+/// Place the ordinary binding's end where rustc ends its storage or
+/// drops it. The enclosing visitor supplies the drawing leg, including
+/// a collapsed match arm. Its lexical boundary is only needed for
+/// synthetic columns and the explanations of non-returning control flow.
+pub(crate) fn scope_event(&mut self, ro: ResourceAccessPoint, layout_end: usize, leg: Option<rustc_span::Span>) -> Option<(usize, ExternalEvent)> {
+    let id = *self.unique_id;
+    let mut line = layout_end;
+    let mut exit_site = None;
+    if let Some(local) = ro.scope_local() {
+        let facts = self.body_facts?;
+        let ends: Vec<_> = facts.scope_ends.for_place(local, ro.name()).iter().filter(|e| !e.optional_unwind).collect();
+        let normal: Vec<_> = ends.iter().copied().filter(|end| end.site.is_none()).collect();
+        let within_leg: Vec<_> = normal.iter().copied().filter(|end|
+            leg.is_some_and(|span| span.contains(end.span))).collect();
+        let entered: Vec<_> = normal.iter().copied().filter(|end| leg.is_some_and(|span| end.legs.contains(&span))).collect();
+        let candidates = if !entered.is_empty() { &entered } else if !within_leg.is_empty() { &within_leg } else { &normal };
+        // An inline exit can represent the end of its enclosing column.
+        let end = if candidates.is_empty() {
+            crate::facts::ScopeEnd::across(&ends).or_else(|| {
+                // All returns diverge before the closing brace. A Copy
+                // column can still label its binding's scope without
+                // claiming that an instruction executes at the brace.
+                let mut summary = (*ends.first()?).clone();
+                if !ends.iter().all(|e| e.effect == crate::facts::ScopeDrop::Storage) { return None; }
+                summary.span = *facts.scope_ends.boundaries.get(&local)?;
+                summary.boundary = self.tcx.sess.source_map().lookup_char_pos(summary.span.source_callsite().hi()).line;
+                summary.site = None;
+                summary.effect = crate::facts::ScopeDrop::ExitStorage;
+                Some(summary)
+            })
+        } else {
+            crate::facts::ScopeEnd::across(candidates)
+        };
+        if let Some(end) = end {
+            line = if self.dead_ends.contains_key(&layout_end) { layout_end } else { end.boundary };
+            exit_site = end.site;
+            self.row_layout.scope_ends.insert(id, end);
+        } else if !self.dead_ends.contains_key(&layout_end) {
+            let calls = facts.scope_ends.terminal_calls.get(&local)?;
+            let mut reachable = calls.iter().filter(|(site, _)| leg.is_none_or(|span| span.contains(*site)));
+            let &(site, row) = reachable.next()?;
+            if !reachable.all(|other| other.0 == site) { return None; }
+            line = row;
+            self.row_layout.terminal_calls.insert(id);
+        }
+    }
+    *self.unique_id += 1;
+    Some((line, ExternalEvent::GoOutOfScope { ro, id, exit_site, early: None }))
+}
+
+fn add_scope_end(&mut self, ro: ResourceAccessPoint, layout_end: usize) {
+    if let Some((row, event)) = self.scope_event(ro, layout_end, None) {
+        self.add_external_event(row, event);
+    }
+}
+
 /// Emit a GoOutOfScope at `line` for each of `vars` (block-local
 /// bindings that print_out_of_scope skips because they were registered
 /// with is_global = false, e.g. a loop body's `let`s and a `for`
@@ -9207,8 +9284,7 @@ pub fn emit_scope_end(&mut self, vars: HashSet<ResourceAccessPoint>, line: usize
     vars.sort_by_key(|r| *r.hash());
     vars.dedup_by_key(|r| *r.hash());
     for var in vars {
-        self.add_external_event(line, ExternalEvent::GoOutOfScope { ro: var, exit_site: None, id: *self.unique_id, early: None });
-        *self.unique_id += 1;
+        self.add_scope_end(var, line);
     }
 }
 
@@ -9366,13 +9442,7 @@ pub fn register_iflet_let_bindings(
         }
         for r in scoped {
             if let Some(body_end) = emit_gos_at {
-                self.add_external_event(body_end, ExternalEvent::GoOutOfScope {
-                    exit_site: None,
-                    ro: r.clone(),
-                    id: *self.unique_id,
-                    early: None,
-                });
-                *self.unique_id += 1;
+                self.add_scope_end(r.clone(), body_end);
             }
             registered.insert(r);
         }
@@ -12430,7 +12500,38 @@ pub fn print_out_of_scope(&mut self){
   #[expect(clippy::disallowed_methods, reason = "sorted by (hash, name) on the next line")]
   let mut raps: Vec<RapData> = self.raps.values().cloned().collect();
   raps.sort_by(|a, b| a.rap.hash().cmp(b.rap.hash()).then_with(|| a.rap.name().cmp(b.rap.name())));
+  let mut pictured = BTreeSet::new();
+  fn pictured_ends(events: &[(usize, ExternalEvent)], pictured: &mut BTreeSet<(Local, String)>, exits: &HashSet<usize>) {
+    for (_, event) in events {
+      match event {
+        ExternalEvent::GoOutOfScope { ro, id, .. } if !exits.contains(id) => {
+          if let Some(local) = ro.scope_local() { pictured.insert((local, ro.name().clone())); }
+        }
+        ExternalEvent::Branch { branches, .. } => {
+          for arm in branches { pictured_ends(&arm.e_data, pictured, exits); }
+        }
+        _ => {}
+      }
+    }
+  }
+  pictured_ends(self.preprocessed_events, &mut pictured, &exit_ids);
+  let mut named: Vec<_> = std::mem::take(&mut self.raps.top_level_places).into_iter()
+    .filter(|(place, _)| !pictured.contains(place))
+    .filter_map(|((local, name), layout_end)| Some((self.raps.place(local, &name)?.rap.clone(), layout_end)))
+    .collect();
+  named.sort_by_key(|(ro, _)| *ro.hash());
+  // Event IDs also determine stacking with synthetic and reference columns.
+  // Emit both groups in the column's registration order.
   for rap in raps.iter() {
+    if rap.rap.scope_local().is_some() {
+      for (ro, layout_end) in named.iter().filter(|(ro, _)| ro.hash() == rap.rap.hash()) {
+        let facts = self.body_facts.map(|f| f.scope_ends.for_place(ro.scope_local().unwrap(), ro.name())).unwrap_or_default();
+        if self.all_paths_exit && *layout_end >= self.all_paths_exit_from && !ro.never_drops() && !ro.is_ref()
+          && !facts.iter().any(|end| end.site.is_none() && end.row < self.all_paths_exit_from) { continue; }
+        self.add_scope_end(ro.clone(), *layout_end);
+      }
+      continue;
+    }
     // need this to avoid duplicating out of scope events, this is due to the fact that RAPS is a map that lives over multiple fn ctxts
     // if a rap isn't global it means we annotated its GOS event inside its respective branch already
     // Every path left the function at a `return` / panic above, where
@@ -12467,13 +12568,11 @@ pub fn print_out_of_scope(&mut self){
       let later: Vec<_> = rap.extra_scopes.iter().filter(|(s, _)| !left_at(*s))
         .map(|(s, local)| (*s, local.and_then(&owner).unwrap_or_else(|| rap.rap.clone()))).collect();
       if rap.is_global && !duplicate && !left_at(rap.scope) {
-        self.add_external_event(rap.scope, ExternalEvent::GoOutOfScope { ro: first, exit_site: None, id: *self.unique_id, early: None });
-        *self.unique_id += 1;
+        self.add_scope_end(first, rap.scope);
       }
       // The later variables that share this column (#589).
       for (scope, ro) in later {
-        self.add_external_event(scope, ExternalEvent::GoOutOfScope { ro, exit_site: None, id: *self.unique_id, early: None });
-        *self.unique_id += 1;
+        self.add_scope_end(ro, scope);
       }
     }
   }
