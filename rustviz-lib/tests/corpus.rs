@@ -7074,7 +7074,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Immutable borrow from s to refs",
             "refs holds a value that immutably borrows s's resource (refs isn't a reference itself)",
-            "Immutable borrow from s to r: r is a reference copied out of refs",
+            "r is a reference copied out of refs. It holds a shared reference. The borrow checker keeps s borrowed while r is in use.",
             "If r holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
             // Q7 (P2-1b, ends from the facts): refs is last used where r copies its element; r gives s back.
             "refs's immutable borrow ends",
@@ -7083,6 +7083,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "refs's shared borrow of s ends",
             ", through the reference copied out of",
             "r's shared borrow of refs ends",
+            "r's borrow ends (what it borrows from isn't shown)",
             "refs's resource is no longer immutably borrowed",
         ],
     },
@@ -7105,6 +7106,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             ", through the reference copied out of",
             "first's shared borrow of pair ends",
             "pair's resource is no longer immutably borrowed",
+            "If pair holds a shared borrow affecting b, that borrow ends here",
+            "It may point",
         ],
     },
     TooltipExpect {
@@ -7128,12 +7131,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // copied out of them borrow `text` and `s`, never the
         // collection itself.
         must_contain: &[
-            "Immutable borrow from text to first: first is a reference copied out of words",
-            "Immutable borrow from s to last: last is a reference copied out of refs",
+            "first is a reference copied out of words. It holds a shared reference. The borrow checker keeps text borrowed while first is in use.",
+            "last is a reference copied out of refs. It holds a shared reference. The borrow checker keeps s borrowed while last is in use.",
             "If first holds a shared borrow affecting text, that borrow ends here. It no longer restricts access to text",
             "If last holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
         ],
         must_not_contain: &[
+            "first's borrow ends (what it borrows from isn't shown)",
+            "last's borrow ends (what it borrows from isn't shown)",
             "first's shared borrow of *first ends",
             "last's shared borrow of *last ends",
             "first's shared borrow of words ends",
@@ -20380,14 +20385,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "shelf.items holds a value that immutably borrows w's resource (shelf.items isn't a reference itself)",
             "w's resource is being shared by one or more variables",
             "w's resource is no longer borrowed by println!, but is still immutably borrowed by shelf.items",
-            "Immutable borrow from w to first: first is a reference copied out of shelf.items",
+            "first is a reference copied out of shelf.items. It holds a shared reference. The borrow checker keeps w borrowed while first is in use.",
             "Immutable borrow from w to b: top's signature gives the reference it returns the same lifetime as the references stored in shelf",
             "Immutable borrow from v to other.items: Shelf::new's signature gives the struct it returns the same lifetime as its argument",
-            "Immutable borrow from v to c: c is a reference copied out of other.items",
+            "c is a reference copied out of other.items. It holds a shared reference. The borrow checker keeps v borrowed while c is in use.",
             "Immutable borrow from a to f: first's signature gives the reference it returns the same lifetime as the references stored in p",
         ],
         must_not_contain: &[
-            "first's immutable borrow ends (what it borrows from isn't shown)",
+            "first's borrow ends (what it borrows from isn't shown)",
             "b's immutable borrow ends (what it borrows from isn't shown)",
             "c's immutable borrow ends (what it borrows from isn't shown)",
             "f's immutable borrow ends (what it borrows from isn't shown)",
@@ -20445,8 +20450,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // #1096
             "Immutable borrow from e to shelf.items, stored in shelf.items by push; shelf.items isn't a reference, but its value now holds one",
             "shelf.items holds a value that immutably borrows e's resource (shelf.items isn't a reference itself)",
-            "Immutable borrow from e to first: first is a reference copied out of shelf.items",
-            "e's resource is immutably borrowed by first; e is read-only while the borrow is live",
+            "first is a reference copied out of shelf.items. It holds a shared reference. The borrow checker keeps e borrowed while first is in use.",
+            "e's resource is being shared by one or more variables. e stays borrowed while first is in use. e is read-only while the borrow is live",
+            "If first holds a shared borrow affecting e, that borrow ends here. It no longer restricts access to e",
             // #1097
             "s2.items holds a value that immutably borrows g's resource (s2.items isn't a reference itself)",
         ],
@@ -20457,7 +20463,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v's resource is immutably borrowed by w",
             "w holds a value that immutably borrows v's resource",
             // #1096
-            "first's immutable borrow ends (what it borrows from isn't shown)",
+            "first's borrow ends (what it borrows from isn't shown)",
             "=shelf.items is the owner of the resource",
         ],
     },
@@ -27323,11 +27329,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "On each pass, h holds a mutable reference to either a or b.",
             "e's mutable reference is moved (not the resource it points to)",
-            "v's resource is no longer borrowed by e, but is still mutably borrowed by the `for` loop's iterator",
-            "w's resource is no longer borrowed by f, but is still mutably borrowed by the `for` loop's iterator",
-            "u's resource is no longer borrowed by g, but is still mutably borrowed by the `for` loop's iterator",
-            "h stops holding the yielded reference. The borrow checker still restricts access to a during iteration.",
-            "h stops holding the yielded reference. The borrow checker still restricts access to b during iteration.",
+            "e stops holding its reference to the element. The `for` loop's iterator still holds the mutable borrow of the collection.",
+            "f stops holding its reference to the element. The `for` loop's iterator still holds the mutable borrow of the collection.",
+            "g stops holding its reference to the element. The `for` loop's iterator still holds the mutable borrow of the collection.",
+            "h stops holding the yielded reference. The borrow checker still restricts access to a for the iterator's next call.",
+            "h stops holding the yielded reference. The borrow checker still restricts access to b for the iterator's next call.",
             "v's resource is mutably borrowed by the `for` loop's iterator; v can't be used until the loop ends",
             "The borrow checker keeps a exclusively borrowed during iteration. a can't be used until the borrow ends.",
         ],
@@ -27336,7 +27342,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b's resource is no longer borrowed by h, but is still mutably borrowed by the `for` loop's iterator",
             "a's resource is mutably borrowed by the `for` loop's iterator; a can't be used until the loop ends",
             "Each pass yields one reference. The borrow checker tracks borrowed data from a and b through h",
-            "iterator still holds the mutable borrow",
+            "h stops holding its reference to the element. The `for` loop's iterator still holds the mutable borrow",
             "=v's resource is mutably borrowed by e; v can't be used until the loop ends",
             "=w's resource is mutably borrowed by f; w can't be used until the borrow ends",
             "=u's resource is mutably borrowed by g; u can't be used until the borrow ends",
@@ -47454,4 +47460,118 @@ fn p4_review_shared_input_is_copyable_while_collection_reads_it() {
     let svg = run_with_local_backend("rv3_issues/1692_for_collect_through_shared_ref_b").timeline_panel_string();
     check_review_tip(&svg, "v@L4:dot:static_lend", &["result of iter keeps this borrow until collect returns",
         "v is a shared reference and can still be used or copied"], &["iter no longer borrows", "until the loop ends"]);
+}
+
+#[test]
+fn p4_indexed_holders_use_the_reaching_slot() {
+    let rv = run_with_local_backend("p4_indexed_holders");
+    let svg = rv.timeline_panel_string();
+    // Rust's indexed load reads the stored &String. The assignment to
+    // slot 0 cannot replace slot 1; a second access using the same
+    // unchanged usize argument must see the replacement.
+    // Constant indexes copy a proven slot of the array (the array copy
+    // arrow); `selected` uses the same runtime index for both accesses.
+    for (id, holder, source) in [
+        ("slots>different@L10:arrow:copy", "different", "b"),
+        ("slots>same@L11:arrow:copy", "same", "c"),
+    ] {
+        check_review_tip(&svg, id,
+            &[&format!("{holder} is a reference copied out of slots["), &format!("It points to {source}.")],
+            &["may point"]);
+    }
+    for (row, holder, source, others) in [
+        (21, "selected", "c", ["a", "b"]),
+    ] {
+        check_review_tip(&svg, &format!("{source}>{holder}@L{row}:arrow:static_borrow"),
+            &[&format!("{holder} is a reference copied out of slots")], &["may point"]);
+        for other in others {
+            assert!(tooltip_of_id(&svg, &format!("{other}>{holder}@L{row}:arrow:static_borrow")).is_none());
+        }
+    }
+}
+
+#[test]
+fn p4_indexed_holders_hedge_only_the_possible_sources() {
+    let rv = run_with_local_backend("p4_indexed_holders");
+    let svg = rv.timeline_panel_string();
+    check_review_tip(&svg, "selected@L29:dot:acquire",
+        &["selected is a reference copied out of slots", "It may point to a or b"], &["Immutable borrow from"]);
+    for lender in ["a", "b"] {
+        assert!(rv_elements(&svg, &format!("{lender}>selected@L29:arrow:")).is_empty());
+    }
+    check_review_tip(&svg, "answer@L46:dot:acquire",
+        &["answer copies the shared reference stored at the place returned by indexing"],
+        &["copy of the reference returned by indexing", "copied out of lookup", "points to text"]);
+    assert!(tooltip_of_id(&svg, "text>answer@L46:arrow:static_borrow").is_none());
+}
+
+#[test]
+fn p4_iterator_handoff_tracks_the_loan_past_the_item_move() {
+    let rv = run_with_local_backend("p4_iterator_storage");
+    let body = fact_body(rv.facts().unwrap(), "moved_item");
+    let first = &body["iterators"][0]["bindings"][0];
+    // The move into drop's argument occurs before the call, on its own
+    // successor edge. The next iterator call is on the loop's backedge.
+    let at = serde_json::json!([7, 4]);
+    let successor = serde_json::json!([7, 5]);
+    assert_eq!(first["consumed"], at);
+    let end = row_facts(body, 22).into_iter().find(|e| e["ev"] == "HoldEnd"
+        && e["end_places"][0]["local"] == first["local"]
+        && e["occurrence"]["at"] == at && e["occurrence"]["successor"] == successor).unwrap();
+    assert_eq!(first["handoffs"], serde_json::json!([{
+        "loan": end["loan"], "occurrence": end["occurrence"], "next_on_all_paths": true,
+    }]));
+    let svg = rv.timeline_panel_string();
+    check_review_tip(&svg, "values@L21-22:line:revoked_privilege",
+        &["iterator borrows the collection while yielding an element"],
+        &["borrowed by first", "iterator holds this borrow"]);
+    check_review_tip(&svg, "values@L21:dot:mutable_lend",
+        &["iterator mutably borrows the collection through values", "first can read and write that element"],
+        &["borrowed by first"]);
+    check_review_tip(&svg, "values@L22-24:line:revoked_privilege",
+        &["The `for` loop's iterator holds this borrow", "can't be read, moved, or used to access",
+          "A mutable binding can still be assigned a new reference"], &["borrowed by first"]);
+}
+
+#[test]
+fn p4_review_indexed_runtime_sources() {
+    let svg = run_with_local_backend("p4_indexed_review").timeline_panel_string();
+    // Only the replacement and the untouched slot can be selected.
+    check_review_tip(&svg, "chosen@L10:dot:acquire",
+        &["keeps a, b and c borrowed while chosen is in use"], &["It may point to a"]);
+    // Both projections use precisely the same input value.
+    check_review_tip(&svg, "corner@L20:dot:acquire",
+        &["It may point to a or d"], &["It may point to a, b"]);
+    // Both C-layout fields start at offset zero and have the same type.
+    check_review_tip(&svg, "b>result@L33:arrow:static_borrow",
+        &["result points to b"], &["points to a"]);
+    assert!(tooltip_of_id(&svg, "a>result@L33:arrow:static_borrow").is_none());
+}
+
+#[test]
+fn p4_review_indexed_reference_levels_and_names() {
+    let svg = run_with_local_backend("p4_indexed_review").timeline_panel_string();
+    check_review_tip(&svg, "direct@L49:dot:", &["copy of *p"], &["copied out of entries"]);
+    check_review_tip(&svg, "called@L54:dot:", &["copy of *q"], &["copied out of entries"]);
+    check_review_tip(&svg, "indirect@L61:dot:acquire",
+        &["shared reference pointed to by the reference at the indexed place"], &["copied out of slots"]);
+    check_review_tip(&svg, "implicit@L65:dot:acquire", &["copied out of slice"], &["*slice"]);
+    check_review_tip(&svg, "inner@L69:dot:acquire", &["copied out of nested"], &["nested[_]"]);
+    // r copies the stored &p: it points to the reference p, not to text.
+    check_review_tip(&svg, "slots>r@L77:arrow:copy", &["r is a reference copied out of slots[0]. It points to p."],
+        &["resource p points to", "It points to text"]);
+    check_review_tip(&svg, "p@L76-78:line:partial_privilege",
+        &["p holds a mutable reference", "p can only use it the way a shared reference can"], &[]);
+}
+
+#[test]
+fn p4_review_indexed_stored_holders_and_drop_use() {
+    let svg = run_with_local_backend("p4_indexed_review").timeline_panel_string();
+    check_review_tip(&svg, "a@L118:dot:static_lend",
+        &["r, made from slots, is in use"], &[]);
+    check_review_tip(&svg, "watch.r@L92:dot:acquire", &["copied out of slots"], &[]);
+    check_review_tip(&svg, "a@L95:dot:", &["still immutably borrowed by watch.r"], &["borrowed by slots"]);
+    check_review_tip(&svg, "b@L110:dot:", &["still immutably borrowed by r"], &["borrowed by shelf.items"]);
+    check_review_tip(&svg, "a@L128:dot:", &["still immutably borrowed by slots"], &[]);
+    check_review_tip(&svg, "a@L133:dot:", &["still immutably borrowed by slots"], &[]);
 }

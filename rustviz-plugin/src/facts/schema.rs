@@ -148,7 +148,7 @@ pub struct BodyFacts {
     /// Places a callee can write through a mutable operand, paired with
     /// the loans carried by the source operand at that exact MIR call.
     #[serde(skip)]
-    pub(crate) argument_stores: std::collections::HashMap<(rustc_span::Span, usize), Vec<(String, BTreeSet<usize>)>>,
+    pub(crate) argument_stores: std::collections::HashMap<(rustc_span::Span, usize), Vec<(EndPlace, BTreeSet<usize>, Location)>>,
     /// Named holders still carrying each loan when their destructor runs.
     #[serde(skip)]
     pub drop_holders: BTreeMap<usize, BTreeSet<String>>,
@@ -166,6 +166,9 @@ pub struct BodyFacts {
     pub(crate) explicit_drop_ends: BTreeMap<(Location, usize), BTreeSet<EndPlace>>,
     #[serde(skip)]
     pub bindings: std::rc::Rc<BodyBindings>,
+    /// Copies of references from indexed MIR places, keyed by source span.
+    #[serde(skip)]
+    pub(crate) indexed_reads: BTreeMap<rustc_span::Span, IndexedRead>,
     /// Loans carried by the operands of this MIR aggregate, in operand order.
     #[serde(skip)]
     pub aggregate_loans: std::collections::HashMap<rustc_span::Span, Vec<AggregateLoan>>,
@@ -293,6 +296,24 @@ pub struct BodyFacts {
     pub arm_boundaries: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, BTreeMap<usize, ArmBoundaries>>,
 }
 
+pub(crate) struct IndexedRead {
+    pub at: Location,
+    /// The displayed prefix, which may name a binding leading to the storage.
+    pub source: Option<String>,
+    pub through_element: bool,
+    pub trait_index: bool,
+    /// A named storage place and the loans its drop may use.
+    pub container: Option<(EndPlace, BTreeSet<usize>)>,
+    pub destination: Option<EndPlace>,
+    pub destination_drop: BTreeSet<usize>,
+    /// Referents in every slot of a fixed-size array, when all are proved.
+    pub stored_referents: Option<BTreeSet<usize>>,
+    /// Complete set of reaching referent loans, when the MIR walk can prove it.
+    pub candidates: Option<BTreeSet<usize>>,
+    /// Loans carried by the copied reference's region at the read.
+    pub restrictions: BTreeSet<usize>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IteratorInput { Move, Copy, Shared, Mutable }
@@ -319,6 +340,19 @@ pub struct IteratorBinding {
     /// The move into a call, while iterator storage continues carrying the loan.
     #[serde(serialize_with = "optional_location", skip_serializing_if = "Option::is_none")]
     pub consumed: Option<Location>,
+    /// The item stops holding these loans on this move edge; the iterator
+    /// still carries them at its successor.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub handoffs: Vec<IteratorHandoff>,
+}
+
+#[derive(Serialize)]
+pub struct IteratorHandoff {
+    pub loan: usize,
+    pub occurrence: Occurrence,
+    pub next_on_all_paths: bool,
+    #[serde(skip)]
+    pub(crate) row: usize,
 }
 
 #[derive(Serialize)]
@@ -813,7 +847,10 @@ pub struct Lent {
     pub holder: String,
     /// The hidden iterator carries this loan at this boundary.
     #[serde(skip)]
-    pub iterator: bool,
+    pub iterator: Option<rustc_middle::mir::Local>,
+    /// The item move and its successor, when this boundary follows that edge on every path.
+    #[serde(skip)]
+    pub iterator_handoff: Option<(Location, Location)>,
     /// Named places proven to carry this loan here. Multiple independent
     /// holders need not denote the same borrow on every incoming path.
     #[serde(skip)]

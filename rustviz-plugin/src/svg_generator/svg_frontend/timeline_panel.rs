@@ -3146,11 +3146,21 @@ fn render_dot(
         if let Some(title) = visualization_data.row_layout.aggregate_titles.get(&event.get_id()) {
             data.title.clone_from(title);
         }
+        if visualization_data.row_layout.collection_reborrow_ends.contains(&event.get_id()) {
+            if let Event::MutableReacquire { from, .. } = event {
+                let item = styled_name_html(&from.name());
+                data.title = format!("{item} stops holding its reference to the element. The `for` loop's iterator still holds the mutable borrow of the collection.");
+            }
+        }
         if visualization_data.row_layout.yielded_reference_ends.contains(&event.get_id()) {
             if let Event::MutableReacquire { from, is, .. } = event {
                 let item = hover_messages::styled_name_html(&from.name());
                 let place = hover_messages::styled_name_html(&is.name());
-                data.title = format!("{item} stops holding the yielded reference. The borrow checker still restricts access to {place} during iteration.");
+                data.title = if visualization_data.row_layout.iterator_next_ends.contains(&event.get_id()) {
+                    format!("{item} stops holding the yielded reference. The borrow checker still restricts access to {place} for the iterator's next call.")
+                } else {
+                    format!("{item} stops holding the yielded reference. The borrow checker still restricts access to {place} here.")
+                };
             }
         }
         if let Some(note) = visualization_data.row_layout.iterator_end_notes.get(&event.get_id()) {
@@ -7483,8 +7493,10 @@ fn render_generic_arrow(
             let item = hover_messages::styled_name_html(&from.name());
             if layout.collection_reborrow_ends.contains(&id) {
                 format!("{item} stops holding this reference. The iterator still holds a mutable borrow of the collection.")
+            } else if layout.iterator_next_ends.contains(&id) {
+                format!("{item} stops holding this reference. The borrow checker keeps the restriction live for the iterator's next call.")
             } else {
-                format!("{item} stops holding this reference. The borrow checker still restricts access through the iterator until iteration ends.")
+                format!("{item} stops holding this reference. The borrow checker still restricts access through the iterator at this point.")
             }
         }
         (None, ExternalEvent::StaticDie { static_lender, of_ref_var, .. } | ExternalEvent::MutableDie { static_lender, of_ref_var, .. }) => {
@@ -10920,7 +10932,7 @@ fn leg_table_row(rap: &ResourceAccessPoint, visualization_data: &VisualizationDa
                 // A short-circuit write inside this arm rejoins before its
                 // next row. The RHS alone cannot initialize the skipped path.
                 || (continues_here && (table.skips_reassignment(fn_line, col, l)
-                    || (!rap.is_ref() && cell.lent.iter().any(|loan| loan.iterator))))
+                    || (!rap.is_ref() && cell.lent.iter().any(|loan| loan.iterator.is_some()))))
         }
     };
     // (A match arm on one row, `0 => c = &y,`: as a one-row arm, #1865.)
@@ -12119,7 +12131,8 @@ fn owner_loan_title(
     let borrowed: BTreeSet<_> =
         loans.iter().filter_map(|l| table.loan(fn_line, l.loan).map(|info| info.lender.as_str())).collect();
     let by: BTreeSet<_> = loans.iter().flat_map(|l| l.current.iter().map(String::as_str)).collect();
-    let iterator = loans.iter().all(|l| l.iterator);
+    let iterator = loans.first().and_then(|l| l.iterator)
+        .is_some_and(|local| loans.iter().all(|l| l.iterator == Some(local)));
     let direct: BTreeSet<_> = loans
         .iter()
         .filter_map(|l| table.loan(fn_line, l.loan)?.direct_holder.as_deref())
@@ -12228,7 +12241,7 @@ fn owner_loan_title(
         format!("The borrow checker requires exclusive access to {} until the borrow ends", styled_name_html(name))
     } else if let Some(parent) = subject.filter(|p| *p != name && rap.is_member()).and_then(|p| display_place(vd, fn_line, name, p)) {
         hover_messages::state_lent_with_parent(name, &parent, exact_holder, exclusive, read_only)
-    } else if iterator && loans.iter().any(|l| table.iterator_restricts(fn_line, l.loan)) {
+    } else if iterator && loans.iter().any(|l| table.iterator_restricts(fn_line, l)) {
         let name = styled_name_html(name);
         if exclusive {
             format!("The borrow checker keeps {name} exclusively borrowed during iteration. {name} can't be used until the borrow ends.")
@@ -12273,6 +12286,10 @@ fn owner_loan_title(
     };
     if let Some(h) = kept_by.filter(|_| whole && !imaginary && !cell.may_lend && drop_holder.is_none()) {
         title.push_str(&hover_messages::state_kept_borrowed_by(name, h));
+        if !exclusive && read_only && holder_rap(h).is_some_and(|holder| vd.row_layout.indexed_copy_holders
+            .get(holder.hash()).is_some_and(|ids| loans.iter().any(|loan| ids.contains(&loan.loan)))) {
+            title.push_str(&format!(". {} is read-only while the borrow is live", styled_name_html(name)));
+        }
     }
     if let Some((h, sources)) = shown_holder.as_deref().zip(possible_sources).filter(|(_, s)| cell.may_lend && s.len() > 1) {
         let sources = display_loan_sources(vd, fn_line, name, sources);
@@ -12625,7 +12642,13 @@ fn table_lent_state_of(
         // reborrow the pointee; keep its reborrow explanation.
         if !cell.may_lend && rap.is_mutref() && matches!(state, State::PartialPrivilege { .. })
             && own_loans.iter().all(|l| l.kind == "shared" && of_itself(l.loan)
-                && table.loan(fn_line, l.loan).is_some_and(|loan| loan.holds_ref_slot))
+                && (table.loan(fn_line, l.loan).is_some_and(|loan| loan.holds_ref_slot)
+                    || visualization_data.timelines.values().any(|t| {
+                        let holder = &t.resource_access_point;
+                        l.current.contains(holder.name())
+                            && visualization_data.fn_source_lines.get(holder.hash()).is_some_and(|f| f.body == fn_line.body)
+                            && visualization_data.row_layout.indexed_copy_holders.get(holder.hash()).is_some_and(|ids| ids.contains(&l.loan))
+                    })))
         {
             let msg = format!("{0} holds a mutable reference. {0} is immutably borrowed and is read-only while the borrow is live", hover_messages::styled_name_html(rap.name()));
             return Some((State::PartialPrivilege { s }, Some(msg)));
@@ -12674,6 +12697,24 @@ fn table_lent_state_of(
                 .map(|(other, _)| other.successor).collect();
             covered.len() == *count
         });
+        if rap.is_mutref() && every_path && !cell.may_lend
+            && matches!(state, State::RevokedPrivilege { .. })
+            && exclusive.iter().all(|l| !of_itself(l.loan) && !of_parent(l.loan))
+        {
+            let mut storage = exclusive.iter().map(|l| table.collection_handoff(fn_line, l));
+            if let Some(Some((local, after_move))) = storage.next() {
+                if storage.all(|other| other == Some((local, after_move))) {
+                    let mut title = hover_messages::state_lent_out(col, hover_messages::LentTo::Unknown,
+                        lent_place(rap, false, binding_shared), None);
+                    if after_move {
+                        title.push_str(". The `for` loop's iterator holds this borrow");
+                    } else {
+                        title.push_str(". The `for` loop's iterator borrows the collection while yielding an element");
+                    }
+                    return Some((state.clone(), Some(title)));
+                }
+            }
+        }
         let column = |name: &str| visualization_data.timelines.values().map(|t| &t.resource_access_point)
             .find(|h| h.name() == name && visualization_data.fn_source_lines.get(h.hash()).is_some_and(|start| start.body == fn_line.body));
         let carries = |h: &ResourceAccessPoint, loan: &crate::facts::schema::Lent| {

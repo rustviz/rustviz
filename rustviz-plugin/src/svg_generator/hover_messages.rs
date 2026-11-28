@@ -2601,6 +2601,11 @@ pub fn closure_result_borrow(lender: &str, holder: &str, call: Option<&str>, mut
     format!("After {call} returns, {holder} may hold a reference from the closure argument. The borrow checker keeps the {kind} borrow of {place} live while {holder} is in use")
 }
 
+pub(crate) fn conditional_loan_end(holder: &str, place: &str, kind: &str) -> String {
+    let holder = styled_name_html(holder);
+    format!("If {holder} holds a {kind} borrow affecting {place}, that borrow ends here. It no longer restricts access to {place}")
+}
+
 pub fn conditional_aggregate_end(holder: &String, lender: &str) -> String {
     format!("If {} holds the borrow of {}, that borrow ends here", styled_name_html(holder), lender)
 }
@@ -3144,22 +3149,6 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
             to_fmt, func_fmt, whole
         );
     }
-    if carrier == ViaCarrier::Element {
-        // `let r = refs[0];` (#349): `func` is the collection.
-        if lenders.len() <= 1 {
-            return format!(": {0} is a reference copied out of {1}", to_fmt, func_fmt);
-        }
-        let names: Vec<String> = lenders.iter().map(|n| styled_name_html(n)).collect();
-        let list = match names.len() {
-            2 => format!("{} and {}", names[0], names[1]),
-            n => format!("{}, and {}", names[..n - 1].join(", "), names[n - 1]),
-        };
-        let (either, kept) = if names.len() == 2 { ("either", "both") } else { ("any of them", "all of them") };
-        return format!(
-            ": {4} is a reference copied out of {0}, which holds references to {1}, so it may point into {2}, and {3} stay borrowed while {4} is in use",
-            func_fmt, list, either, kept, to_fmt
-        );
-    }
     if let ViaCarrier::ReturnedClosure { mutable, through_ref } = carrier {
         // `let g = keep(|| s.len());` (#686): `func` is the call. The
         // closure may hold the borrow because it captured s, or got it
@@ -3237,7 +3226,7 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
                 format!("; {to_fmt}'s value can hold a reference ({to_fmt} isn't a reference itself)")),
         ViaCarrier::StructField => ("struct", String::new()),
         ViaCarrier::TupleField => ("tuple", String::new()),
-        ViaCarrier::Element | ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part | ViaCarrier::StoredThrough => unreachable!(),
+        ViaCarrier::StoredBy | ViaCarrier::PatternBinding { .. } | ViaCarrier::PatternRef | ViaCarrier::ReturnedClosure { .. } | ViaCarrier::Part | ViaCarrier::StoredThrough => unreachable!(),
     };
     // A value can hold borrows of several of them at once (`map` over
     // `v.iter()` with a closure that borrows `extra`).
@@ -3833,7 +3822,7 @@ pub fn state_shared_by(name: &String, holder: Option<&str>, value: bool) -> Stri
 }
 
 /// Names for a list of places; `None`: a temporary 2.x draws no column for.
-fn place_list(names: &[Option<String>], conj: &str) -> String {
+pub(crate) fn place_list(names: &[Option<String>], conj: &str) -> String {
     let fmt: Vec<String> = names.iter().map(|n| n.clone().unwrap_or_else(|| "a temporary value".to_owned())).collect();
     match fmt.as_slice() {
         [init @ .., last] if !init.is_empty() => format!("{} {conj} {last}", init.join(", ")),

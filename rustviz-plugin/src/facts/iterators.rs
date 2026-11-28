@@ -116,6 +116,7 @@ pub(super) fn collect<'tcx>(
                 bindings.push(IteratorBinding {
                     local, at: Location { block: bb, statement_index }, access,
                     part, derefs, loans: BTreeSet::new(), consumed: None,
+                    handoffs: Vec::new(),
                 });
             }
         }
@@ -284,6 +285,27 @@ pub(super) fn consumed_item<'tcx>(
         work.extend(super::rows::real_successor_blocks(body, bb));
     }
     Some(at)
+}
+
+/// All normal continuations of the move must reach this iterator's next
+/// call. A break, return, or cycle that avoids next cannot justify this.
+pub(super) fn proceeds_to_next(body: &Body<'_>, from: Location, next: Location) -> bool {
+    let mut guaranteed = BTreeSet::from([next.block]);
+    loop {
+        let mut changed = false;
+        for (bb, data) in body.basic_blocks.iter_enumerated() {
+            if data.is_cleanup || guaranteed.contains(&bb) {
+                continue;
+            }
+            let successors = super::rows::real_successor_blocks(body, bb);
+            if !successors.is_empty() && successors.iter().all(|succ| guaranteed.contains(succ)) {
+                changed |= guaranteed.insert(bb);
+            }
+        }
+        if !changed || guaranteed.contains(&from.block) {
+            return guaranteed.contains(&from.block);
+        }
+    }
 }
 
 /// Walk back from the move to the payload assignment. A write through

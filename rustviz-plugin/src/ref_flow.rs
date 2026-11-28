@@ -1319,23 +1319,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     kinds
   }
 
-  /// `let r = refs[0];`: `r` is a copy of a reference stored in the
-  /// collection, so it borrows what that reference borrows, never the
-  /// collection itself (#349). `Some` when `e` is such a read: the
-  /// lenders of a collection that holds a borrow we track (empty when
-  /// it isn't tracked, e.g. a `Vec` filled by `push`).
-  pub fn stored_ref_lenders(&self, e: &'tcx Expr<'tcx>) -> Option<Vec<ResourceTy>> {
-    let ExprKind::Index(base, _, _) = e.kind else { return None };
-    let typeck = self.tcx.typeck(e.hir_id.owner);
-    if !typeck.expr_ty(e).is_ref() {
-      return None;
-    }
-    let held = expr_to_rap_name(base, &self.tcx)
-      .filter(|n| self.raps.get(n).is_some_and(|rd| rd.rap.holds_borrow()))
-      .and_then(|n| self.borrow_map.get(&n))
-      .map(|rd| rd.all_lenders())
-      .unwrap_or_default();
-    Some(held)
+  pub(crate) fn indexed_read(&self, expr: &Expr<'_>) -> Option<&'a crate::facts::IndexedRead> {
+    self.body_facts?.indexed_reads.get(&expr.span)
+  }
+
+  pub(crate) fn indexed_lender(&self, read: &crate::facts::IndexedRead) -> Option<(ResourceTy, bool)> {
+    let mut candidates = read.candidates.as_ref()?.iter();
+    let first = *candidates.next()?;
+    if candidates.next().is_some() { return None; }
+    let loan = self.body_facts?.loans.iter().find(|l| l.loan == first)?;
+    let local = loan.lender_local?;
+    let rap = &self.raps.place(local, &loan.lender)?.rap;
+    Some((ResourceTy::Value(rap.clone()), rap.is_ref() && loan.through.is_none()))
   }
 
   /// Lenders reachable through one argument, after rustc's adjustments

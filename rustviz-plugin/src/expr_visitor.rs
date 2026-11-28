@@ -8,7 +8,7 @@
 
 use log::warn;
 use rustc_middle::{
-  mir::{Body, Local},
+  mir::{Body, Local, Location},
   ty::*,
 };
 use rustc_hir::{Expr, ExprKind, QPath, PatKind, Mutability, UnOp, def::*, Pat};
@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
 use rustc_borrowck::consumers::BodyWithBorrowckFacts;
-use crate::facts::schema::{BodyFacts, LoanInfo};
+use crate::facts::schema::{BodyFacts, EndPlace, LoanInfo};
 use crate::facts::value_flow::{Call, CallSlots, OperandEffect, Read, Site, Source};
 use crate::ref_flow::holder_branch_bodies;
 
@@ -146,13 +146,15 @@ fn add_lenders(out: &mut Vec<ResourceTy>, rd: &RefData) {
 /// Whether `a` and `b` describe the same loan of the same reference.
 fn same_loan(a: &RefData, b: &RefData) -> bool {
   a.local == b.local && a.lender == b.lender && a.assigned_at == b.assigned_at && a.loan_line == b.loan_line
-    && a.borrow_span == b.borrow_span && a.co_lenders == b.co_lenders
+    && a.borrow_span == b.borrow_span && a.indexed_span == b.indexed_span && a.co_lenders == b.co_lenders
 }
 
 /// `let w = <rhs>;` (or `w = <rhs>;`) with rhs a call, a method call, an
 /// index or a deref (see `ExprVisitor::note_derived`).
 #[derive(Debug, Clone)]
 pub struct Derived {
+  /// The acquisition event and the loans the indexed read carries.
+  pub indexed_copy: Option<IndexedCopy>,
   /// The lines rhs spans: the event that gives w its value is on one.
   pub lines: (usize, usize),
   /// The places rhs reads (`v` in `v.iter().copied().collect()`, `&vd`
@@ -167,12 +169,23 @@ pub struct Derived {
   pub dropped: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct IndexedCopy {
+  event: usize,
+  at: Location,
+  source: EndPlace,
+  destination: Option<EndPlace>,
+  loans: BTreeSet<usize>,
+  source_drop: BTreeSet<usize>,
+  destination_drop: BTreeSet<usize>,
+}
+
 /// A borrow a call may have stored behind one of its `&mut` arguments
 /// (see `ExprVisitor::stored_borrows`).
 #[derive(Debug, Clone)]
 pub struct StoredBorrow {
   /// The variable or field that may hold it (`v` in `keep(&mut v, &s)`).
-  pub holder: String,
+  pub holder: EndPlace,
   /// The line of the call.
   pub at: usize,
   /// The line the loan ends on.
@@ -184,6 +197,7 @@ pub struct StoredBorrow {
   pub id: usize,
   /// rustc's loans for the borrow (`mir_data::loans_issued_in`).
   pub loans: Vec<usize>,
+  pub returned_at: Location,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +219,8 @@ pub struct RefData {
   /// references borrowing the same variable on one line (`let a = &x;
   /// let b = &x;`) are otherwise indistinguishable (#233).
   pub borrow_span: Option<rustc_span::Span>,
+  /// The exact MIR fact record for a reference copied from an indexed place.
+  pub indexed_span: Option<rustc_span::Span>,
   /// For a reference that got its value from a call (`id(&p)`,
   /// `v.first()`), or took over such a reference's loan (see
   /// `ExprVisitor::ref_carriers`): the line that issued the loan it
@@ -947,7 +963,6 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // iterator (#900).
   pub for_loop_iter_loans: Vec<(String, usize, usize, bool)>,
   // MIR identity of the yielded value and the row where it is consumed.
-  pub for_loop_moved_bindings: BTreeMap<Local, (BTreeSet<usize>, usize)>,
   // `let r = loop { … break k; };` (#431): the loop's id, what its
   // `break` values go to (`r`) and how (move or copy). A `break` with a
   // value, in that loop, pairs the value with `r` the way `let r = k;`
@@ -1354,7 +1369,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       for_moved_holders: HashSet::new(),
       let_else_branches: BTreeSet::new(),
       for_loop_iter_loans: Vec::new(),
-      for_loop_moved_bindings: BTreeMap::new(),
       in_scope: Vec::new(),
       try_block: None,
       exit_frames: Vec::new(),
@@ -1894,7 +1908,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return;
     }
     self.retire_loan(&name, line_num);
-    self.borrow_map.insert(name.clone(), RefData { local: self.raps.local(&name), lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new(), through: Vec::new() });
+    self.borrow_map.insert(name.clone(), RefData { local: self.raps.local(&name), lender: lender.clone(), assigned_at: line_num, lifetime: line_num, ref_mutability: ref_mutability, aliasing: alia, static_lender: None, borrow_span: None, indexed_span: None, loan_line: None, co_lenders: Vec::new(), lender_muts: Vec::new(), through: Vec::new() });
   }
   /// A variable named `name` declared on `line` takes over the column
   /// of an earlier one of that name, which is out of scope by now
@@ -3531,6 +3545,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             aliasing,
             static_lender: None,
             borrow_span,
+            indexed_span: None,
             loan_line: None,
             co_lenders: Vec::new(),
             lender_muts: Vec::new(),
@@ -3902,6 +3917,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             && self.pattern_loans.values().any(|p| p.loan == *loan))));
     let of_ref_var = returned_pattern_loan || (to == ref_data.lender
       && ref_data.borrow_span.is_some_and(|sp| self.ref_var_borrows.contains(&sp)))
+      || ref_data.indexed_span.and_then(|span| self.body_facts?.indexed_reads.get(&span))
+        .and_then(|read| self.indexed_lender(read)).is_some_and(|(lender, slot)| slot && lender == to)
       || matches!((&from, &to), (ResourceTy::Value(h), ResourceTy::Value(l))
         if self.stored_ref_var_lends.contains(&(h.name().to_owned(), l.name().to_owned())));
     let ev = if ref_data.mut_of(&to) {
@@ -4018,8 +4035,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let mut stored_in = StoredIn::default();
     if is_reborrow && !ends_at_call && matches!(implicit, ImplicitRef::Receiver { .. }) {
       if let Some(stores) = self.emitting_expr.and_then(|call| self.body_facts?.argument_stores.get(&(call.span.with_parent(None), 0))) {
-        if let [(holder, _)] = stores.as_slice() {
-          stored_in.0 = Some(holder.clone());
+        if let [(holder, _, _)] = stores.as_slice() {
+          stored_in.0 = Some(holder.name.clone());
         }
       }
     }
@@ -5177,7 +5194,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Draw a call's store only when the actual MIR source operand carries
   /// the loan and the callee can write it through the destination operand.
   fn argument_stored_borrows(&mut self, arg: &'tcx Expr<'tcx>, from: &ResourceTy, line: usize, issued: Option<usize>)
-      -> Vec<(ResourceTy, ResourceTy, usize, usize)> {
+      -> Vec<(ResourceTy, ResourceTy, usize, usize, EndPlace, Location)> {
     let Some(facts) = self.body_facts else { return Vec::new() };
     let Some(site) = self.call_argument_site(arg) else { return Vec::new() };
     let Some(stores) = facts.argument_stores.get(&site) else { return Vec::new() };
@@ -5194,16 +5211,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return Vec::new();
     };
     let mut out = Vec::new();
-    for (holder, ids) in stores {
-      let Some(place) = self.raps.get(holder).map(|d| &d.rap) else { continue };
+    for (holder, ids, returned_at) in stores {
+      let Some(rap) = self.raps.get(&holder.name).map(|d| &d.rap) else { continue };
       for lender in &lenders {
         let ResourceTy::Value(l) = lender else { continue };
         if l.is_fn() { continue; }
         for loan in facts.loans.iter().filter(|loan| ids.contains(&loan.loan) && loan.lender == *l.name()) {
           if !from_call && issued != Some(loan.loan) { continue; }
           let Some(end) = loan.end_lines.last().copied().filter(|&end| end > line) else { continue };
-          let dest = ResourceTy::Index(place.clone(), holder.clone(), PlaceWrite::Update);
-          out.push((lender.clone(), dest, end, loan.loan));
+          let dest = ResourceTy::Index(rap.clone(), holder.name.clone(), PlaceWrite::Update);
+          out.push((lender.clone(), dest, end, loan.loan, holder.clone(), *returned_at));
         }
       }
     }
@@ -6772,12 +6789,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // `store(&mut r, b.as_str())`: the reference a call returns,
       // into b, may be stored in r; b stays borrowed while r is (#1124).
       let stored = self.argument_stored_borrows(arg, &from_ro, line_num, argument_loan.map(|loan| loan.loan));
-      for (from_ro, place, end_line, loan) in stored.iter().cloned() {
+      for (from_ro, place, end_line, loan, holder, returned_at) in stored.iter().cloned() {
         let mutable = arg_mut == Mutability::Mut;
         let id = *self.unique_id;
         let loans = vec![loan];
         self.stored_borrows.push(StoredBorrow {
-          holder: place.name().to_owned(), at: line_num, until: end_line, lender: from_ro.real_name(), is_mut: mutable, id, loans,
+          holder, at: line_num, until: end_line, lender: from_ro.real_name(), is_mut: mutable, id, loans, returned_at,
         });
         if of_ref_var {
           self.stored_ref_var_lends.insert((place.name().to_owned(), from_ro.real_name()));
@@ -7089,15 +7106,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         return (lender, aliasing, lenders);
       }
     }
-    // `let r = refs[0];` copies a reference out of a collection.
-    if let Some(mut lenders) = self.stored_ref_lenders(expr) {
-      lenders.retain(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)));
-      if lenders.is_empty() {
-        return (ResourceTy::Anonymous, VecDeque::new(), Vec::new());
-      }
-      let lender = lenders.remove(0);
+    if let Some(read) = self.indexed_read(expr) {
+      let lender = self.indexed_lender(read).map_or(ResourceTy::Anonymous, |(lender, _)| lender);
       let aliasing = get_aliasing_data(&lender, &self.borrow_map);
-      return (lender, aliasing, lenders);
+      return (lender, aliasing, Vec::new());
+    }
+    // An indexing expression can copy a reference with an unpictured origin.
+    if matches!(expr.kind, ExprKind::Index(..)) && self.tcx.typeck(expr.hir_id.owner).expr_ty(expr).is_ref() {
+      return (ResourceTy::Anonymous, VecDeque::new(), Vec::new());
     }
     let (lender, aliasing) = self.get_ref_data_single(expr);
     // A copy of a reference that borrows from several variables
@@ -7111,6 +7127,84 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       _ => Vec::new(),
     };
     (lender, aliasing, co_lenders)
+  }
+
+  fn draw_indexed_ref_copy(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>) {
+    use crate::svg_generator::hover_messages::{or_list, place_list, styled_name_html};
+    let line = span_to_line(&rhs.span, &self.tcx);
+    let id = *self.unique_id;
+    let holder = styled_name_html(&lhs.name());
+    let Some(read) = self.indexed_read(rhs) else {
+      self.add_ev(line, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+      return;
+    };
+    let origin = self.indexed_lender(read);
+    let lender_names = |ids: &BTreeSet<usize>| ids.iter().filter_map(|id| {
+      let loan = self.body_facts?.loans.iter().find(|l| l.loan == *id)?;
+      Some(self.raps.place(loan.lender_local?, &loan.lender)?.rap.name().clone())
+    }).collect::<BTreeSet<_>>();
+    let mut title = if read.through_element {
+      format!("{holder} copies the shared reference pointed to by the reference at the indexed place")
+    } else if let Some(source) = &read.source {
+      let source = styled_name_html(source);
+      format!("{holder} is a reference copied out of {source}. It holds a shared reference")
+    } else if read.trait_index {
+      format!("{holder} copies the shared reference stored at the place returned by indexing")
+    } else {
+      format!("{holder} copies the shared reference at the indexed place")
+    };
+    if let Some((lender, of_ref_var)) = &origin {
+      let lender = styled_name_html(&lender.name());
+      if *of_ref_var {
+        title.push_str(&format!(". {holder} points to the reference slot {lender}"));
+      } else {
+        title.push_str(&format!(". {holder} points to {lender}"));
+      }
+    } else if let Some(ids) = &read.candidates {
+      let names = lender_names(ids);
+      if names.len() == ids.len() && names.len() > 1 {
+        title.push_str(&format!(". It may point to {}", or_list(&names.into_iter().collect::<Vec<_>>())));
+      }
+    }
+    if let Some((source, ids)) = read.source.as_ref().zip(read.stored_referents.as_ref()) {
+      let stored = lender_names(ids);
+      if stored.len() > 1 && stored.len() == ids.len() {
+        let places = stored.iter().map(|p| Some(styled_name_html(p))).collect::<Vec<_>>();
+        title.push_str(&format!(". {} holds references to {}", styled_name_html(source), place_list(&places, "and")));
+      }
+    }
+    let restricted = lender_names(&read.restrictions);
+    if !restricted.is_empty() {
+      let places = restricted.iter().map(|p| Some(styled_name_html(p))).collect::<Vec<_>>();
+      title.push_str(&format!(". The borrow checker keeps {} borrowed while {holder} is in use", place_list(&places, "and")));
+    }
+    title.push('.');
+    if let ResourceTy::Value(dest) = &lhs {
+      self.row_layout.indexed_copy_holders.entry(*dest.hash()).or_default().extend(&read.restrictions);
+      if let Some(rd) = self.borrow_map.get_mut(dest.name()) {
+        rd.indexed_span = Some(rhs.span);
+      }
+      if let Some((container, source_drop)) = &read.container {
+        if !read.restrictions.is_empty() && container.name != *dest.name() && !dest.is_fn() {
+          self.derived.push(Derived {
+            indexed_copy: Some(IndexedCopy { event: id, at: read.at, source: container.clone(),
+              destination: read.destination.clone(), loans: read.restrictions.clone(), source_drop: source_drop.clone(), destination_drop: read.destination_drop.clone() }),
+            lines: (line, line),
+            srcs: Vec::new(),
+            dest: dest.name().clone(),
+            clone: false,
+            dropped: false,
+          });
+        }
+      }
+    }
+    if let Some((lender, of_ref_var)) = origin {
+      title.insert_str(0, &format!("Immutable borrow from {} to {holder}. ", styled_name_html(&lender.name())));
+      self.add_borrow_ev_of_ref_var(line, Evt::SBorrow, lhs, lender, false, of_ref_var);
+    } else {
+      self.add_ev(line, Evt::Bind, lhs, ResourceTy::Anonymous, false);
+    }
+    self.row_layout.aggregate_titles.insert(id, title);
   }
 
   /// Whether every variable `e` names has a column already.
@@ -7902,7 +7996,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           ref_mutability: is_mut,
           aliasing,
           static_lender: None,
-          borrow_span: None,
+          borrow_span: None, indexed_span: None,
           loan_line: None,
           co_lenders: lenders,
           lender_muts,
@@ -7965,7 +8059,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ref_mutability: is_mut,
       aliasing,
       static_lender: None,
-      borrow_span: None,
+      borrow_span: None, indexed_span: None,
       loan_line: None,
       co_lenders: lenders,
       lender_muts,
@@ -8279,6 +8373,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       aliasing,
       static_lender: None,
       borrow_span,
+      indexed_span: None,
       loan_line: None,
       co_lenders: lenders,
       lender_muts,
@@ -8789,7 +8884,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           ref_mutability: any_mut,
           aliasing,
           static_lender: None,
-          borrow_span: None,
+          borrow_span: None, indexed_span: None,
           loan_line: None,
           co_lenders: lenders[1..].to_vec(),
           lender_muts: if stored.iter().all(|s| s.exclusive == any_mut) { Vec::new() }
@@ -8900,7 +8995,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           ref_mutability,
           aliasing: VecDeque::new(),
           static_lender: None,
-          borrow_span: None,
+          borrow_span: None, indexed_span: None,
           loan_line: None,
           co_lenders: Vec::new(),
           lender_muts: Vec::new(),
@@ -11079,6 +11174,10 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
   }
 
   fn match_rhs_at(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
+  if lhs.is_ref() && !lhs.is_mutref() && self.indexed_read(rhs).is_some() {
+    self.draw_indexed_ref_copy(lhs, rhs);
+    return;
+  }
   // An expression of type `!` (`unreachable!()`, `panic!()`, `return`,
   // `continue`) never produces a value, so `lhs` gets nothing from it:
   // `_ => unreachable!()` in `let s = match … { … }` doesn't bind `s`
@@ -11499,7 +11598,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // (A reference copied out of a collection whose stored borrows are
     // tracked, `let r = refs[0];`, is the arm below, #349.)
     ExprKind::Index(recv, _, _) if matches!(lhs, ResourceTy::Value(_))
-      && !(lhs.is_ref() && !lhs.is_mutref() && self.stored_ref_lenders(rhs).is_some()) => {
+      && !(lhs.is_ref() && !lhs.is_mutref() && self.tcx.typeck(rhs.hir_id.owner).expr_ty(rhs).is_ref()) => {
       let line_num = span_to_line(&rhs.span, &self.tcx);
       let elem_ty = self.tcx.typeck(rhs.hir_id.owner).node_type(rhs.hir_id);
       let holder = expr_to_rap_name(recv, &self.tcx)
@@ -11775,43 +11874,9 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
     // the column of the place it captures (`p.name`), or of its
     // nearest enclosing place that has a column (#328).
     ExprKind::Closure(closure) => self.match_rhs_closure(lhs, rhs, closure),
-    // `let r = refs[0];`: a copy of a reference stored in a collection
-    // that holds borrows we track borrows what it borrows (#349).
-    ExprKind::Index(base, _, _) if lhs.is_ref() && !lhs.is_mutref() => {
-      let line_num = span_to_line(&rhs.span, &self.tcx);
-      let ResourceTy::Value(lhs_rap) = &lhs else { return };
-      if self.stored_ref_lenders(rhs).is_none() {
-        return;
-      }
-      let lenders: Vec<ResourceTy> = match self.borrow_map.get(lhs_rap.name()) {
-        Some(rd) => rd.all_lenders().into_iter()
-          .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_)))
-          .collect(),
-        None => return,
-      };
-      // No tracked borrow in the collection (`let s: &str = words[1];`
-      // with `words = vec!["a", "b"]`): s still starts here, bound to
-      // the reference it copied (#894).
-      if lenders.is_empty() {
-        self.add_ev(line_num, Evt::Bind, lhs, ResourceTy::Anonymous, false);
-        return;
-      }
-      let Some(coll) = expr_to_rap_name(base, &self.tcx) else { return };
-      let via = BorrowVia {
-        func: coll,
-        lenders: lenders.iter().map(|l| l.name()).collect(),
-        also_unnamed: false,
-        tie: ArgTie::default(),
-        carrier: ViaCarrier::Element,
-        passed_on: Vec::new(),
-      };
-      for lender in lenders {
-        let id = *self.unique_id;
-        self.add_external_event(line_num, ExternalEvent::StaticBorrow {
-          from: lender, to: lhs.clone(), is_partial: false, is_reborrow: false, break_alt: None, via: Some(via.clone()), id, of_ref_var: false,
-        });
-        *self.unique_id += 1;
-      }
+    // Layout follows the expression, and the copied slot comes from MIR.
+    ExprKind::Index(..) if lhs.is_ref() && !lhs.is_mutref() => {
+      self.draw_indexed_ref_copy(lhs, rhs);
     }
     _ => {
       warn!("unmatched rhs {:#?}", rhs);
@@ -11984,6 +12049,9 @@ fn note_derived(&mut self, lhs: &ResourceTy, rhs: &'tcx Expr<'tcx>) {
   }
   let typeck = self.tcx.typeck(rhs.hir_id.owner);
   let env = typing_env(self.tcx, rhs.hir_id.owner);
+  if matches!(rhs.kind, ExprKind::Index(..)) && typeck.expr_ty(rhs).is_ref() {
+    return; // Reference copies record their MIR source while emitting the event.
+  }
   /// The places an expression reads, outside closures: a local, or a
   /// field of one (`h.v`, not also `h`).
   struct Places<'a, 'tcx> { tcx: &'a TyCtxt<'tcx>, out: Vec<&'tcx Expr<'tcx>> }
@@ -12051,6 +12119,7 @@ fn note_derived(&mut self, lhs: &ResourceTy, rhs: &'tcx Expr<'tcx>) {
     at = lit.hir_id;
   }
   self.derived.push(Derived {
+    indexed_copy: None,
     lines: (span_to_line(&rhs.span, &self.tcx), span_end_line(&rhs.span, &self.tcx)),
     srcs, dest: dest.name().to_owned(), clone, dropped,
   });
@@ -12859,7 +12928,18 @@ pub fn print_out_of_scope(&mut self){
     // (lender, row, giver)
     let mut given_back: BTreeMap<usize, Vec<(String, usize, String)>> = BTreeMap::new();
     for (slot, loans) in slots.iter().zip(slot_loans.iter()) {
-      let lenders = lends_to(&slot.rd);
+      let indexed = slot.rd.indexed_span.and_then(|span| facts?.indexed_reads.get(&span));
+      let mut lenders = lends_to(&slot.rd);
+      if let (Some(read), Some(ix)) = (indexed, ix.as_ref()) {
+        // Extra restrictions on the copied region can survive even
+        // when the actual referent is known. Give those ends to the
+        // copied binding without drawing a second referent for it.
+        if !lenders.contains(&ResourceTy::Anonymous) && read.restrictions.iter().any(|id|
+          ix.facts.loans.iter().any(|l| l.loan == *id && !lenders.iter().any(|p| ix.lends(l, &p.real_name())))
+          && ix.end_holders(*id).iter().any(|(_, holder)| *holder == slot.key)) {
+          lenders.push(ResourceTy::Anonymous);
+        }
+      }
       let lender_names: Vec<String> = lenders.iter().map(|l| l.real_name()).collect();
       let mut ends = Vec::new();
       for (i, l) in lenders.iter().enumerate() {
@@ -12937,6 +13017,13 @@ pub fn print_out_of_scope(&mut self){
           mine = loans.iter().copied()
             .filter(|id| info(id).is_some_and(|f| !lenders.iter().any(|o| ix.lends(f, &o.real_name()))))
             .collect();
+        }
+        if let Some(read) = indexed {
+          let runtime_lender = self.indexed_lender(read).map(|(lender, _)| lender);
+          mine = read.restrictions.iter().copied().filter(|id| {
+            let named = info(id).is_some_and(|loan| runtime_lender.as_ref().is_some_and(|r| ix.lends(loan, &r.real_name())));
+            if matches!(l, ResourceTy::Anonymous) { !named } else { named }
+          }).collect();
         }
         if mine.is_empty() {
           // No loan the facts know of: the walk's line. (Also for a
@@ -13364,10 +13451,16 @@ pub fn print_out_of_scope(&mut self){
         };
         let item_storage = facts.and_then(|f| f.iterators.iter().find(|it|
           it.bindings.iter().any(|b| Some(b.local) == rd.local && loans.iter().any(|id| b.loans.contains(id)))));
-        let consumed_item = rd.local.and_then(|local| self.for_loop_moved_bindings.get(&local))
-          .filter(|(yielded, _)| loans.iter().any(|id| yielded.contains(id))).map(|(_, row)| *row);
+        let consumed_item = item_storage.and_then(|it| {
+          let handoffs: Vec<_> = it.bindings.iter().filter(|b| Some(b.local) == rd.local)
+            .flat_map(|b| &b.handoffs).filter(|h| loans.contains(&h.loan)).collect();
+          let first = handoffs.first()?;
+          (handoffs.iter().all(|h| h.occurrence == first.occurrence && h.row == first.row)
+            && loans.iter().all(|id| handoffs.iter().any(|h| h.loan == *id)))
+            .then_some((first.row, handoffs.iter().all(|h| h.next_on_all_paths)))
+        });
         let end = match (end, consumed_item) {
-          (End::Arrow(_) | End::Own(_) | End::LoopExit { .. }, Some(line)) => End::Arrow(line),
+          (End::Arrow(_) | End::Own(_) | End::LoopExit { .. }, Some((line, _))) => End::Arrow(line),
           (other, _) => other,
         };
         // An end past the reference's scope end (a copy of it outlives it,
@@ -13416,17 +13509,18 @@ pub fn print_out_of_scope(&mut self){
                   .filter(|loan| loan.projected.is_some()).map(|loan| matches!(loan.kind, "mut" | "unique")),
               _ => None,
             };
-            if consumed_item == Some(line) {
+            if let Some((_, next)) = consumed_item.filter(|(row, _)| *row == line) {
               self.add_borrow_end_ev(line, to_ro.clone(), end_from, &rd,
                 vec![crate::svg_generator::hover_messages::LOOP_ITERATOR_HOLDER.to_owned()]);
               if item_storage.is_some_and(|it| it.moves_references) {
                 self.row_layout.yielded_reference_ends.insert(id);
+                if next { self.row_layout.iterator_next_ends.insert(id); }
               } else if item_storage.is_some_and(|it| it.borrows_collection && loans.iter().all(|l| !it.opaque_item_loans.contains(l))) {
                 self.row_layout.collection_reborrow_ends.insert(id);
               }
             } else if let Some(mutable) = projected_kind {
               self.add_ev(line, if mutable { Evt::MDie } else { Evt::SDie }, lender.clone(), end_from, false);
-            } else if co && !self.stored_ref_var_lends.contains(&(k.clone(), lender.real_name())) {
+            } else if co && !matches!(lender, ResourceTy::Anonymous) && !self.stored_ref_var_lends.contains(&(k.clone(), lender.real_name())) {
               let evt = if rd.mut_of(&lender) { Evt::MDie } else { Evt::SDie };
               self.add_ev(line, evt, lender.clone(), end_from, false);
             } else {
@@ -13525,6 +13619,29 @@ pub fn print_out_of_scope(&mut self){
           let place = projected.map_or_else(|| hover::styled_name_html(&lender.name()), |(_, p)| hover::projected_place_html(p));
           for id in first_id..*self.unique_id {
             self.row_layout.aggregate_titles.insert(id, hover::conditional_aggregate_end(k, &place));
+          }
+        }
+        if let (End::Arrow(line), ResourceTy::Anonymous, Some(read), Some(ix)) =
+          (end, &lender, rd.indexed_span.and_then(|span| facts?.indexed_reads.get(&span)), ix.as_ref())
+        {
+          use crate::svg_generator::hover_messages as hover;
+          let clauses: BTreeSet<_> = loans.iter().filter_map(|id| {
+            if !ix.end_holders(*id).iter().any(|(row, holder)| *row == line && (*holder == k
+              || read.destination_drop.contains(id) && read.destination.as_ref().is_some_and(|dest| &dest.name == holder))) {
+              return None;
+            }
+            let loan = ix.facts.loans.iter().find(|l| l.loan == *id && l.source == "borrow")?;
+            let kind = hover::loan_kind_word(loan)?;
+            let rap = &self.raps.place(loan.lender_local?, &loan.lender)?.rap;
+            let place = hover::styled_name_html(rap.name());
+            let place = if rap.is_ref() && loan.through.is_none() { format!("the reference slot {place}") } else { place };
+            Some(hover::conditional_loan_end(k, &place, kind))
+          }).collect();
+          if !clauses.is_empty() {
+            let title = clauses.into_iter().collect::<Vec<_>>().join(". ");
+            for id in first_id..*self.unique_id {
+              self.row_layout.aggregate_titles.insert(id, title.clone());
+            }
           }
         }
         if !loans.is_empty() {
@@ -13679,7 +13796,7 @@ pub fn print_out_of_scope(&mut self){
     let raps = &self.raps;
     let hash_of = |name: &str| raps.get(name).map(|rd| *rd.rap.hash());
     for sb in self.stored_borrows.iter() {
-      let Some(hash) = hash_of(&sb.holder) else { continue };
+      let Some(hash) = hash_of(&sb.holder.name) else { continue };
       let list = stored_call_list(self.preprocessed_events, sb.id).unwrap_or(self.preprocessed_events);
       // The values made from others whose variable holds the call's
       // loan, by rustc's borrow checker: their type carries the loan's
@@ -13689,12 +13806,19 @@ pub fn print_out_of_scope(&mut self){
       let holding = if self.derived.is_empty() || sb.loans.is_empty() { BTreeSet::new() } else { self.names_holding_loans(&sb.loans) };
       // (A field `h.v` is held when its variable h is.)
       let derived: Vec<&Derived> = self.derived.iter()
+        .filter(|d| d.indexed_copy.as_ref().is_none_or(|copy| sb.loans.iter().any(|id| copy.loans.contains(id))))
         .filter(|d| holding.contains(d.dest.split('.').next().unwrap_or(&d.dest)) || (sb.loans.is_empty() && d.clone))
         .collect();
-      let mut walk = HolderWalk {
-        lender: sb.lender.clone(), hash_of: &hash_of, derived: &derived, seen: vec![sb.holder.clone()], holders: Vec::new(), hops: Vec::new(),
+      let dominates = |a: Location, b: Location| if a.block == b.block {
+        a.statement_index <= b.statement_index
+      } else {
+        self.mir_body.basic_blocks.dominators().dominates(a.block, b.block)
       };
-      walk.follow(list, &sb.holder, hash, sb.at, sb.until, false);
+      let mut walk = HolderWalk {
+        lender: sb.lender.clone(), hash_of: &hash_of, derived: &derived, loans: &sb.loans,
+        dominates: &dominates, seen: vec![sb.holder.name.clone()], holders: Vec::new(), hops: Vec::new(),
+      };
+      walk.follow(list, &sb.holder.name, hash, sb.at, Some((&sb.holder, sb.returned_at)), sb.until, false);
       if !sb.is_mut {
         sharers.extend(walk.holders);
       }
@@ -14067,6 +14191,8 @@ struct Hop<'e> {
   /// borrow (`let w: Vec<&String> = v.iter().copied().collect();`,
   /// #1015), also followed like a copy.
   derived: bool,
+  /// The indexed load's drawing event and MIR occurrence.
+  indexed_copy: Option<&'e IndexedCopy>,
   /// `dest`'s drop may use the borrow: it holds it until it is
   /// dropped, not until its last use.
   dropped: bool,
@@ -14090,7 +14216,7 @@ struct Hop<'e> {
 /// v.clone();`, `let w: Vec<&String> = v.iter().copied().collect();`) is
 /// a copy of it here: it holds copies of the references in v (#1003,
 /// #1015).
-fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize, hi: usize, arm_end: Option<usize>, derived: &[&Derived], out: &mut Vec<Hop<'e>>) {
+fn holder_hops<'e>(walk: &HolderWalk<'e>, list: &'e [(usize, ExternalEvent)], holder: &str, from: usize, origin: Option<(&EndPlace, Location)>, hi: usize, arm_end: Option<usize>, out: &mut Vec<Hop<'e>>) {
   for (line, ev) in list {
     // The event that gives a value made from the holder's to its
     // variable (the call's result moving to w, `let r = v[0];`'s copy).
@@ -14099,11 +14225,30 @@ fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize
       | ExternalEvent::MutableBorrow { to: ResourceTy::Value(d), .. } = ev
     {
       let mut found = false;
-      for dv in derived.iter().filter(|dv| dv.dest == *d.name() && dv.lines.0 <= *line && *line <= dv.lines.1) {
-        if *line <= from || *line > hi || d.is_fn() {
+      for dv in walk.derived.iter().filter(|dv| dv.dest == *d.name() && match &dv.indexed_copy {
+        Some(copy) => copy.event == ev.get_id(),
+        None => dv.lines.0 <= *line && *line <= dv.lines.1,
+      }) {
+        if *line > hi || d.is_fn() { continue; }
+        if let Some(copy) = &dv.indexed_copy {
+          let Some((place, at)) = origin else { continue };
+          let source = &copy.source;
+          if place.local != source.local || !(source.projection.starts_with(&place.projection)
+              || place.projection.starts_with(&source.projection)) || !(walk.dominates)(at, copy.at) {
+            continue;
+          }
+          found = true;
+          out.push(Hop {
+            line: *line, dest: Some(d.name().to_owned()), copy: true, clone: false, derived: true,
+            indexed_copy: Some(copy),
+            dropped: walk.loans.iter().any(|id| copy.destination_drop.contains(id)),
+            src_dropped: walk.loans.iter().any(|id| copy.source_drop.contains(id)),
+            list, arm_end,
+          });
           continue;
         }
-        for (src, src_dropped) in dv.srcs.iter() {
+        if *line <= from { continue; }
+        for (src, src_dropped) in &dv.srcs {
           // v itself, a value v is part of (`h.clone()` for holder
           // `h.v`: `h2.v`), or a part of v (`h.v.iter()` for holder h;
           // `h.v.clone()` isn't a clone of h).
@@ -14117,7 +14262,7 @@ fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize
           if !out.iter().any(|h| h.line == *line && h.dest.as_ref() == Some(&dest)) {
             out.push(Hop {
               line: *line, dest: Some(dest), copy: true, clone, derived: !clone,
-              dropped: dv.dropped, src_dropped: *src_dropped, list, arm_end,
+              indexed_copy: None, dropped: dv.dropped, src_dropped: *src_dropped, list, arm_end,
             });
           }
         }
@@ -14131,11 +14276,11 @@ fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize
         for (a, b) in branches.iter().enumerate() {
           if matches!(branch_type, BranchType::Loop(..)) {
             let mut inner = Vec::new();
-            holder_hops(&b.e_data, holder, from, hi, None, derived, &mut inner);
+            holder_hops(walk, &b.e_data, holder, from, origin, hi, None, &mut inner);
             out.extend(inner.into_iter().filter(|h| !h.copy).map(|h| Hop { dest: None, list, arm_end, ..h }));
           } else {
             let (_, end) = branch_type.get_start_end(a);
-            holder_hops(&b.e_data, holder, from, hi.min(end), Some(end), derived, out);
+            holder_hops(walk, &b.e_data, holder, from, origin, hi.min(end), Some(end), out);
           }
         }
         continue;
@@ -14167,7 +14312,7 @@ fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize
       ResourceTy::Value(d) if !d.is_fn() => Some(format!("{}{}", d.name(), rest)),
       _ => None,
     };
-    out.push(Hop { line: *line, dest, copy, clone: false, derived: false, dropped: false, src_dropped: false, list, arm_end });
+    out.push(Hop { line: *line, dest, copy, clone: false, derived: false, indexed_copy: None, dropped: false, src_dropped: false, list, arm_end });
   }
 }
 
@@ -14175,14 +14320,14 @@ fn holder_hops<'e>(list: &'e [(usize, ExternalEvent)], holder: &str, from: usize
 /// `events` (branches included) uses `holder` or the variable it is a
 /// field of: where it stops holding a borrow when nothing drops it
 /// later (a Copy value has no drop).
-fn last_use(events: &[(usize, ExternalEvent)], holder: &str, from: usize, hi: usize) -> Option<usize> {
+fn last_use(events: &[(usize, ExternalEvent)], holder: &str, from: usize, hi: usize, indexed_uses: &BTreeSet<usize>) -> Option<usize> {
   let base = holder.split('.').next().unwrap_or(holder);
   let named = |r: &ResourceTy| matches!(r, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))
     && r.real_name().split('.').next() == Some(base);
   let mut last = None;
   for (line, ev) in events {
     let found = match ev {
-      ExternalEvent::Branch { branches, .. } => branches.iter().filter_map(|b| last_use(&b.e_data, holder, from, hi)).max(),
+      ExternalEvent::Branch { branches, .. } => branches.iter().filter_map(|b| last_use(&b.e_data, holder, from, hi, indexed_uses)).max(),
       ExternalEvent::Bind { .. } | ExternalEvent::Copy { .. } | ExternalEvent::Move { .. }
       | ExternalEvent::StaticBorrow { .. } | ExternalEvent::MutableBorrow { .. }
       | ExternalEvent::PassByStaticReference { .. } | ExternalEvent::PassByMutableReference { .. }
@@ -14193,7 +14338,8 @@ fn last_use(events: &[(usize, ExternalEvent)], holder: &str, from: usize, hi: us
       }
       _ => None,
     };
-    last = last.max(found);
+    let indexed = (*line >= from && *line <= hi && indexed_uses.contains(&ev.get_id())).then_some(*line);
+    last = last.max(found).max(indexed);
   }
   last
 }
@@ -14207,6 +14353,8 @@ struct HolderWalk<'w> {
   /// The values made from others (`ExprVisitor::derived`) whose
   /// variable rustc says holds the borrow.
   derived: &'w [&'w Derived],
+  loans: &'w [usize],
+  dominates: &'w dyn Fn(Location, Location) -> bool,
   seen: Vec<String>,
   /// Each holder, as a sharer of the lender.
   holders: Vec<Sharer>,
@@ -14225,9 +14373,9 @@ impl HolderWalk<'_> {
   /// and a `Vec`'s drop doesn't use the references in it). A clone of a
   /// value whose own `Drop` may use them isn't trimmed (#1003), nor is
   /// a value made from one (#1015).
-  fn follow(&mut self, list: &[(usize, ExternalEvent)], holder: &str, hash: u64, from: usize, hi: usize, trim: bool) {
+  fn follow(&mut self, list: &[(usize, ExternalEvent)], holder: &str, hash: u64, from: usize, origin: Option<(&EndPlace, Location)>, hi: usize, trim: bool) {
     let mut hops = Vec::new();
-    holder_hops(list, holder, from, hi, None, self.derived, &mut hops);
+    holder_hops(self, list, holder, from, origin, hi, None, &mut hops);
     hops.sort_by_key(|h| h.line);
     // A move in `list` itself ends its hold; one in an arm only for the
     // rest of that arm.
@@ -14236,12 +14384,13 @@ impl HolderWalk<'_> {
     hops.retain(|h| h.line <= end);
     // (It still holds the value on the move's line.)
     let mut gaps: Vec<(usize, usize)> = hops.iter().filter(|h| !h.copy).filter_map(|h| h.arm_end.map(|e| (h.line + 1, e))).collect();
+    let indexed_uses = hops.iter().filter_map(|h| h.indexed_copy.map(|copy| copy.event)).collect();
     let to = if trim || hops.iter().any(|h| h.copy && !h.src_dropped && h.dest.is_some()) {
-      last_use(list, holder, from, end).unwrap_or(from)
+      last_use(list, holder, from, end, &indexed_uses).unwrap_or(from)
     } else {
       hi
     };
-    dead_arm_gaps(list, holder, from, to, &mut gaps);
+    dead_arm_gaps(list, holder, from, to, &indexed_uses, &mut gaps);
     self.holders.push(Sharer {
       name: holder.to_owned(), hash, from, to, moved: cut, lenders: vec![self.lender.clone()], from_kept_call: false, stored: true,
       gaps: gaps.into_iter().map(|(first, last)| ArmGap { first, last, arm: None }).collect(),
@@ -14254,7 +14403,10 @@ impl HolderWalk<'_> {
       self.seen.push(dest.clone());
       self.hops.push((dest.clone(), h.copy, holder.to_owned(), h.clone, h.derived));
       let hash = (self.hash_of)(&dest).unwrap_or(hash);
-      self.follow(h.list, &dest, hash, h.line, h.arm_end.map_or(hi, |e| e.min(hi)), trim || (h.copy && !h.dropped) || h.arm_end.is_some());
+      self.follow(h.list, &dest, hash, h.line,
+        h.indexed_copy.and_then(|copy| Some((copy.destination.as_ref()?, copy.at.successor_within_block()))),
+        h.arm_end.map_or(hi, |e| e.min(hi)),
+        if h.indexed_copy.is_some() && h.dropped { false } else { trim || (h.copy && !h.dropped) || h.arm_end.is_some() });
     }
   }
 }
@@ -14263,7 +14415,7 @@ impl HolderWalk<'_> {
 /// whose hold ends on `to`, in another arm, is dead in from its last use
 /// there on (#997): `keepv(&mut v, &s); if c { look(&s); } else {
 /// v.len(); }` leaves s unborrowed in the `if` arm, as rustc does.
-fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to: usize, out: &mut Vec<(usize, usize)>) {
+fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to: usize, indexed_uses: &BTreeSet<usize>, out: &mut Vec<(usize, usize)>) {
   for (_, ev) in list {
     let ExternalEvent::Branch { branches, branch_type, .. } = ev else { continue };
     if matches!(branch_type, BranchType::Loop(..)) {
@@ -14274,9 +14426,9 @@ fn dead_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, from: usize, to:
     for (i, b) in branches.iter().enumerate() {
       let (start, end) = ranges[i];
       if i == j {
-        dead_arm_gaps(&b.e_data, holder, from, to, out);
+        dead_arm_gaps(&b.e_data, holder, from, to, indexed_uses, out);
       } else if end > from {
-        let first = last_use(&b.e_data, holder, from, end).map_or(start.max(from + 1), |u| u + 1);
+        let first = last_use(&b.e_data, holder, from, end, indexed_uses).map_or(start.max(from + 1), |u| u + 1);
         if first <= end {
           out.push((first, end));
         }
@@ -14308,7 +14460,7 @@ fn ended_arm_gaps(list: &[(usize, ExternalEvent)], holder: &str, lenders: &[Stri
       }).min();
       if let Some((l, id)) = ended {
         let arm = b.source.filter(|_| layout.has_arm_point(id));
-        let first = if arm.is_none() && last_use(&b.e_data, holder, l - 1, l) == Some(l) { l + 1 } else { l };
+        let first = if arm.is_none() && last_use(&b.e_data, holder, l - 1, l, &BTreeSet::new()) == Some(l) { l + 1 } else { l };
         if first <= end {
           out.push(ArmGap { first, last: end, arm });
         }
