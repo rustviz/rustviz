@@ -10,6 +10,7 @@
 
 use super::{SharedReferenceJoin, SourceArm, SwitchEdge};
 use rustc_hir::def_id::DefId;
+use rustc_middle::mir::{Local, Location};
 use rustc_data_structures::fx::FxIndexMap;
 use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, JoinChange, Lent, PartialDrop, Parts, State};
 pub use super::schema::MixedInit;
@@ -226,7 +227,8 @@ struct BodyTable {
     uniform_option_refs: BTreeMap<String, bool>,
     /// Each loan's borrowed place (`s`, `p.a`, `*b`, `v[_]`).
     loans: BTreeMap<usize, LoanInfo>,
-    iterator_restrictions: BTreeSet<usize>,
+    iterator_restrictions: BTreeSet<(Local, usize)>,
+    collection_handoffs: BTreeMap<(Local, usize), Vec<(Location, Location)>>,
     drop_holders: BTreeMap<usize, BTreeSet<String>>,
     part_lenders: BTreeSet<String>,
     /// Columns with fields this body can't name (no columns of their own).
@@ -359,8 +361,18 @@ impl StateTable {
 
     /// These loans constrain iteration even if the current reference has
     /// moved out of storage or a conversion returned an unrelated referent.
-    pub fn iterator_restricts(&self, function: FunctionStart, loan: usize) -> bool {
-        self.bodies.get(&function.body).is_some_and(|b| b.iterator_restrictions.contains(&loan))
+    /// The table cell must identify the same storage on all its paths.
+    /// A handoff authorizes the post-move wording only on its own edge
+    /// and boundaries dominated by that edge.
+    pub fn collection_handoff(&self, function: FunctionStart, loan: &Lent) -> Option<(Local, bool)> {
+        let local = loan.iterator?;
+        let edges = self.bodies.get(&function.body)?.collection_handoffs.get(&(local, loan.loan))?;
+        Some((local, loan.iterator_handoff.is_some_and(|edge| edges.contains(&edge))))
+    }
+
+    pub fn iterator_restricts(&self, function: FunctionStart, loan: &Lent) -> bool {
+        loan.iterator.is_some_and(|local| self.bodies.get(&function.body)
+            .is_some_and(|b| b.iterator_restrictions.contains(&(local, loan.loan))))
     }
 
     pub fn has_part_loans(&self, function: FunctionStart, column: &str) -> bool {
@@ -1056,8 +1068,17 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     }).collect();
     let iterator_restrictions = b.iterators.iter().flat_map(|it|
         it.opaque_item_loans.iter().filter(|_| !it.identity).chain(it.bindings.iter().filter(|_| it.moves_references)
-            .flat_map(|binding| binding.loans.intersection(&it.loans)))).copied().collect();
-    BodyTable { iterator_restrictions, successor_counts, closure_captures: b.closure_captures.clone(), drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+            .flat_map(|binding| binding.loans.intersection(&it.loans))).map(|&loan| (it.storage, loan))).collect();
+    let mut collection_handoffs = BTreeMap::<_, Vec<_>>::new();
+    for it in b.iterators.iter().filter(|it| it.borrows_collection) {
+        for handoff in it.bindings.iter().flat_map(|binding| &binding.handoffs) {
+            if it.opaque_item_loans.contains(&handoff.loan) { continue; }
+            if let Some(to) = handoff.occurrence.successor {
+                collection_handoffs.entry((it.storage, handoff.loan)).or_default().push((handoff.occurrence.at, to));
+            }
+        }
+    }
+    BodyTable { iterator_restrictions, collection_handoffs, successor_counts, closure_captures: b.closure_captures.clone(), drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 fn body_joins(b: &BodyFacts) -> BodyJoins {
@@ -1122,6 +1143,7 @@ mod tests {
             returned_reference_loans: Default::default(),
             closure_result_loans: Default::default(),
             bindings: Default::default(),
+            indexed_reads: BTreeMap::new(),
             aggregate_loans: Default::default(),
             issued_operand_loans: Default::default(),
             returned_operand_loans: Default::default(),

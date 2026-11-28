@@ -9606,6 +9606,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
           // Emit the iterand event into the user's pattern binding.
           let to_rty = ResourceTy::Value(self.raps.get(&pat_name).unwrap().rap.to_owned());
+          let item_events = self.preprocessed_events.len();
+          let item_target = to_rty.clone();
           if head_is_iterator {
             // The iterator is moved into the loop; nothing is
             // moved into (or borrowed by) the loop variable.
@@ -9692,6 +9694,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               self.row_layout.aggregate_titles.insert(*self.unique_id, title);
             }
             self.add_ev(for_line, Evt::Bind, to_rty, ResourceTy::Anonymous, false);
+          }
+          // Where MIR proves the iterator carries the collection loan and
+          // the binding holds a yielded element, describe both on the
+          // borrow event. The item itself reaches just one element.
+          if storage.is_some_and(|it| it.borrows_collection && it.bindings.iter().any(|item|
+              Some(&item.local) == self.raps.bindings.declarations.get(&pat_hirid)
+              && !item.handoffs.is_empty() && item.loans.is_disjoint(&it.opaque_item_loans))) {
+            use crate::svg_generator::hover_messages::styled_name_html;
+            for (_, event) in &self.preprocessed_events[item_events..] {
+              let ExternalEvent::MutableBorrow { from, to, id, .. } = event else { continue };
+              if *to != item_target { continue; }
+              let name = styled_name_html(&from.real_name());
+              let place = if from.is_ref() { format!("the collection through {name}") } else { name.clone() };
+              let item = styled_name_html(&pat_name);
+              self.row_layout.aggregate_titles.insert(*id, format!(
+                "The `for` loop's iterator mutably borrows {place}. On each pass it yields a mutable reference to one element. {item} can read and write that element. The collection can't be accessed through {name} while the iterator's borrow is live"
+              ));
+            }
           }
         } else {
           // Composite patterns: bind every name in the pattern
@@ -9885,16 +9905,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let runs_to_the_end = (no_break && !body_returns(body_expr)) || reaches_end;
         let mut pat_decls = HashSet::new();
         collect_pat_bindings(user_pat, &self.tcx, &self.raps, &mut pat_decls);
-        let mut moved_decls = BTreeSet::new();
-        for item in storage.into_iter().flat_map(|it| &it.bindings) {
-          let Some(at) = item.consumed else { continue };
-          let Some(name) = self.raps.bindings.locals.get(&item.local) else { continue };
-          let Some(rd) = self.borrow_map.get(name) else { continue };
-          if matches!(rd.lender, ResourceTy::Anonymous) { continue; }
-          let line = span_to_line(&self.mir_body.source_info(at).span, &self.tcx);
-          self.for_loop_moved_bindings.insert(item.local, (item.loans.clone(), line));
-          moved_decls.insert(name.clone());
-        }
+        let moved_decls: BTreeSet<_> = storage.into_iter().flat_map(|it| &it.bindings)
+          .filter(|item| !item.handoffs.is_empty())
+          .filter_map(|item| self.raps.bindings.locals.get(&item.local).cloned())
+          .collect();
         #[expect(clippy::disallowed_methods, reason = "each binding's floor is raised on its own")]
         for decl in pat_decls.iter().filter(|d| runs_to_the_end && !moved_decls.contains(d.name())) {
           let lent = self.borrow_map.get(decl.name())
@@ -10048,7 +10062,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let Some(body) = self.body_facts else { return Vec::new() };
     let Some(it) = storage else { return Vec::new() };
     let Some(&local) = body.bindings.declarations.get(&id) else { return Vec::new() };
-    let Some(item) = it.bindings.iter().find(|b| b.local == local) else { return Vec::new() };
+    let mut items = it.bindings.iter().filter(|b| b.local == local);
+    let Some(item) = items.next() else { return Vec::new() };
+    if items.next().is_some() || !item.loans.is_disjoint(&it.opaque_item_loans) { return Vec::new(); }
     let loans: Vec<_> = body.loans.iter().filter(|l| item.loans.contains(&l.loan) && it.loans.contains(&l.loan)).collect();
     let mut endpoints = Vec::new();
     for loan in loans.iter().filter(|l| !loans.iter().any(|child| child.made_through.contains(&l.loan))) {
@@ -10083,9 +10099,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   fn iterator_write_roots(&self, storage: Option<&crate::facts::IteratorStorage>, id: HirId) -> Vec<ResourceAccessPoint> {
     let Some(it) = storage else { return Vec::new() };
-    let local = self.raps.bindings.declarations.get(&id);
-    let Some(binding) = it.bindings.iter().find(|b| Some(&b.local) == local) else { return Vec::new() };
-    if !binding.loans.is_disjoint(&it.opaque_item_loans) || it.identity && it.head.is_some() { return Vec::new(); }
+    if it.identity && it.head.is_some() { return Vec::new(); }
     self.iterator_item_lenders(Some(it), id).into_iter().filter_map(|p| p.extract_rap().cloned()).collect()
   }
 

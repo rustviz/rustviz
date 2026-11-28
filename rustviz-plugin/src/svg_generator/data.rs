@@ -1673,10 +1673,6 @@ pub enum ViaCarrier {
     /// The borrower is a reference element of the tuple the call
     /// returned (`pair(&s)` → `q.0`; #1341).
     TupleField,
-    /// The borrower is a reference copied out of a collection that
-    /// holds references (`let r = refs[0];`; #349). `func` names the
-    /// collection.
-    Element,
     /// The borrower is the receiver a `&mut self` method stored the
     /// borrow in (`refs.push(&s)`; #392). `func` names the method.
     StoredBy,
