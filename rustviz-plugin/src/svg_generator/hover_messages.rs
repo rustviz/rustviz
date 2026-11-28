@@ -4854,17 +4854,11 @@ pub fn state_mut_ref_partial_privilege(my_name: &String, pointee_copy: bool) -> 
 // r points to (`for e in self.items.iter()` with `self: &mut Self`;
 // #1060): the other fields can still be written through r.
 pub fn state_mut_ref_field_borrowed_by_loop_iterator(my_name: &String, place: &String, is_mut: bool) -> String {
-    if is_mut {
-        format!(
-            "{0} holds a mutable reference, but {1} is mutably borrowed by the `for` loop's iterator, so {1} can't be used until the loop ends",
-            styled_name_html(my_name), styled_name_html(place)
-        )
-    } else {
-        format!(
-            "{0} holds a mutable reference, but {1} is immutably borrowed by the `for` loop's iterator until the loop ends",
-            styled_name_html(my_name), styled_name_html(place)
-        )
-    }
+    let name = styled_name_html(my_name);
+    let place = styled_name_html(place);
+    let kind = if is_mut { "mutably" } else { "immutably" };
+    let access = if is_mut { format!(". {place} can't be used directly during that borrow") } else { String::new() };
+    format!("{name} holds a mutable reference, but {place} is {kind} borrowed by the `for` loop's iterator while it or a yielded reference keeps the borrow live{access}")
 }
 
 // The same while a reference variable borrows only that field
@@ -4904,7 +4898,7 @@ pub fn state_mut_ref_fields_borrowed_by_loop_iterator(my_name: &String, places: 
     if let [(place, is_mut)] = places {
         return state_mut_ref_field_borrowed_by_loop_iterator(my_name, place, *is_mut);
     }
-    fields_borrowed(my_name, places, "the `for` loop's iterator", "until the loop ends")
+    fields_borrowed(my_name, places, "the `for` loop's iterator", "while it or a yielded reference keeps the borrow live")
 }
 
 fn fields_borrowed(my_name: &String, places: &[(String, bool)], borrower: &str, until: &str) -> String {
