@@ -2023,7 +2023,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let inline_closure = inline_key.is_some();
     let key = inline_key.unwrap_or_else(|| fn_key(&name));
     self.add_rap_with_key(ResourceAccessPoint::Function(Function {
-      mir_result: false, mir_constructor: false, operator, call_receiver: None, inline_closure,
+      mir_result: false, mir_constructor: false, operator, call_receiver: None, receiver_has_empty_args: false, inline_closure,
       callable_result: false, result_path: Vec::new(), result_is_resource: false, result_try: None, name, hash: self.rap_hashes as u64,
       drops_arg: Default::default(), rc_call: None, cast_to: None, inside: None,
     }), key, self.current_scope, true);
@@ -4202,6 +4202,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           // The call's receiver, not an argument: the call dot says so.
           if let ResourceAccessPoint::Function(f) = &mut rap {
             f.call_receiver = Some(*mutable);
+            // FnMut takes the receiver and a tuple of the ordinary arguments.
+            f.receiver_has_empty_args = *mutable && invocations.iter().all(|at| {
+              let rustc_middle::mir::TerminatorKind::Call { args, .. } =
+                &self.mir_body[at.block].terminator().kind else { return false };
+              matches!(&args[..], [_, tuple] if tuple.node.ty(&self.mir_body.local_decls, self.tcx).is_unit())
+            });
           }
           ResourceTy::Value(rap)
         }) else { return };

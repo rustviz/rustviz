@@ -1051,11 +1051,11 @@ const BOOK: &[Snippet] = &[
         id: "c13_01_closure_param",
         must_contain: &[
             "Closure add_one is bound",
-            "L3 add_one is passed to add_one by shared reference; add_one may read it. The reference is the call's receiver. When the call returns, its receiver borrow ends",
+            "L3 Calling add_one borrows add_one by shared reference as the receiver. The call may read through it. When the call returns, its receiver borrow ends",
             "L3 y is initialized with the value add_one() returns",
             "y receives the value add_one() returns",
         ],
-        must_not_contain: &["add_one's resource is copied", "Copy of the value add_one() returns to y", "add_one is passed to add_one by shared reference. add_one may read it"],
+        must_not_contain: &["add_one's resource is copied", "Copy of the value add_one() returns to y", "add_one is passed to add_one by shared reference"],
         ..E
     },
     Snippet {
@@ -1079,9 +1079,12 @@ const BOOK: &[Snippet] = &[
         id: "c13_03_fnmut_counter",
         must_contain: &[
             "Closure capture (mutable borrow) from count to inc",
+            "L4 inc's value is mutably borrowed for the call inc(). inc can't be used while the borrow is live",
+            "L5 inc's value is mutably borrowed for the call inc(). inc can't be used while the borrow is live",
+            "inc is passed to the call inc() by mutable reference. The call may read or write it",
             "If inc holds a mutable borrow affecting count, that borrow ends here. It no longer restricts access to count",
         ],
-        must_not_contain: &["Return mutably borrowed resource from inc to count"],
+        must_not_contain: &["Return mutably borrowed resource from inc to count", "inc is passed to inc by mutable reference"],
         ..E
     },
     Snippet {
@@ -1101,11 +1104,11 @@ const BOOK: &[Snippet] = &[
         note: "the closure's capture of k when passed as an argument is missing (#298)",
         must_contain: &[
             "f acquires ownership from the caller",
-            "L2 f is passed to f by shared reference; f may read it. The reference is the call's receiver. When the call returns, its receiver borrow ends",
+            "L2 Calling f borrows f by shared reference as the receiver. The call may read through it. When the call returns, its receiver borrow ends",
             "f goes out of scope. Rust drops the callable value if its concrete type needs drop.",
             "r receives the value apply() returns",
         ],
-        must_not_contain: &["f is initialized with a copy of Anonymous resource", "f is the owner of the resource", "f goes out of scope. Its resource is dropped.", "f is passed to f by shared reference. f may read it"],
+        must_not_contain: &["f is initialized with a copy of Anonymous resource", "f is the owner of the resource", "f goes out of scope. Its resource is dropped.", "f is passed to f by shared reference"],
         ..E
     },
     Snippet {
@@ -1174,9 +1177,11 @@ const BOOK: &[Snippet] = &[
         id: "c13_12_closure_borrow_then_use",
         must_contain: &[
             "Closure capture (immutable borrow) from list to only_borrows",
+            "L5 Calling only_borrows borrows only_borrows by shared reference as the receiver. The call may read through it. list's resource is being shared by one or more variables. only_borrows holds a shared borrow. When the call returns, its receiver borrow ends",
             "If only_borrows holds a shared borrow affecting list, that borrow ends here. It no longer restricts access to list",
             "list goes out of scope. Its resource is dropped.",
         ],
+        must_not_contain: &["only_borrows is passed to only_borrows by shared reference"],
         ..E
     },
     // ─── Chapter 15: smart pointers ───────────────────────────────────

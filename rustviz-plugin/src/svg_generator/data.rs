@@ -535,6 +535,7 @@ pub struct Function {
     pub(crate) operator: bool,
     /// The call borrows its callable receiver. The flag is its mutability.
     pub(crate) call_receiver: Option<bool>,
+    pub(crate) receiver_has_empty_args: bool,
     pub(crate) inline_closure: bool,
     pub callable_result: bool,
     pub(crate) result_path: Vec<crate::facts::value_flow::ReturnPart>,
@@ -4481,7 +4482,7 @@ impl Event {
             Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), is, .. }
                 if f.call_receiver == Some(true) =>
             {
-                hover_messages::event_dot_mutable_callable_lend(&self.deref_name(my_name), &f.name, lender_holds_value(is))
+                hover_messages::event_dot_mutable_callable_lend(&self.deref_name(my_name), f, lender_holds_value(is))
             }
             Event::MutableLend{ to, is, of_ref_var, ..} => {
                 let holds_value = lender_holds_value(is);

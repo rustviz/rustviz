@@ -1988,10 +1988,15 @@ pub fn event_dot_mut_lend(my_name: &String, target_name: &String, holds_value: b
     )
 }
 
-pub(crate) fn event_dot_mutable_callable_lend(name: &str, callee: &str, holds_value: bool) -> String {
+fn mutable_receiver_call(f: &Function) -> String {
+    let callee = styled_name_html(&f.name);
+    if f.receiver_has_empty_args { format!("the call {callee}()") } else { format!("the call to {callee}") }
+}
+
+pub(crate) fn event_dot_mutable_callable_lend(name: &str, f: &Function, holds_value: bool) -> String {
     let name = styled_name_html(name);
-    let callee = styled_name_html(callee);
-    format!("{name}'s {} is mutably borrowed for this call to {callee}. {name} can't be used while the borrow is live", held(holds_value))
+    let call = mutable_receiver_call(f);
+    format!("{name}'s {} is mutably borrowed for {call}. {name} can't be used while the borrow is live", held(holds_value))
 }
 
 // Lender dot when the lender r is itself a reference (#313): `let r2 =
@@ -7018,11 +7023,7 @@ pub fn closure_receiver(from: &str, callee: &str, mutable: bool, staged: bool) -
     let mut title = if staged {
         format!("{from} is borrowed by {how} as the receiver before the arguments are evaluated. If they finish, {who} {access}")
     } else {
-        if mutable {
-            format!("{from} is passed to {who} by {how} as the receiver. The call {access}")
-        } else {
-            format!("{from} is passed to {who} by shared reference; {who} may read it. The reference is the call's receiver")
-        }
+        format!("Calling {who} borrows {from} by {how} as the receiver. The call {access}")
     };
     if mutable {
         title.push_str(&format!(". Other code can't use {from} while this mutable borrow is live"));
@@ -7588,11 +7589,12 @@ pub fn event_dot_field_lenders_end(my_name: &String, lenders: &[String]) -> Stri
 /// reference (`f(&s)`, `f(&mut s)`): `from_variable` is lent to
 /// `function`.
 pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, from_variable: &ResourceTy) -> String {
-    let styled_fn_name = styled_name_html(&function.name);
     let styled_from_name = styled_name_html(&from_variable.name());
     if function.call_receiver == Some(true) {
-        return format!("{styled_from_name} is passed to {styled_fn_name} by mutable reference as the receiver. The call may read or write through it");
+        let call = mutable_receiver_call(function);
+        return format!("{styled_from_name} is passed to {call} by mutable reference. The call may read or write it");
     }
+    let styled_fn_name = styled_name_html(&function.name);
     // `k[0].push('!')` with k an array of `&mut String` (#1319): push
     // writes through the reference in k[0], not through k's value.
     let styled_via = match external_event {

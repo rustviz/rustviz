@@ -13387,7 +13387,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f's resource",
             "f is the owner of the resource",
             "f goes out of scope. Its resource is dropped",
-            "f is passed to f by shared reference. f may read it",
+            "f is passed to f by shared reference",
             "pr's resource",
             "push's resource",
             "=Return immutably borrowed resource from g to f",
@@ -29480,9 +29480,9 @@ fn closure_receiver_and_result_are_separate() {
         (86, "next", "next acquires ownership of the resource c() returns"),
     ] {
         check_review_tip(&svg, &format!("c@L{row}:dot:"),
-            &["c's resource is mutably borrowed for this call to c", "c is passed to c by mutable reference as the receiver",
-                "The call may read or write through it", "c's resource is no longer mutably borrowed"],
-            &["c is moved into the call", "mutably borrowed by c;"]);
+            &["c's resource is mutably borrowed for the call c()", "c is passed to the call c() by mutable reference",
+                "The call may read or write it", "c's resource is no longer mutably borrowed"],
+            &["c is moved into the call", "c is passed to c", "mutably borrowed by c;"]);
         check_review_tip(&svg, &format!("c>{receiver}@L{row}:arrow:move"), &[received], &["Move from c to"]);
     }
     // The labeled block completes the let, and execution reaches drop(z).
@@ -49417,13 +49417,14 @@ fn p4_closure_receiver_and_result_are_separate() {
     let svg = run_with_local_backend("book/c13_01_closure_param").timeline_panel_string();
     let use_marks = drawn_clauses(&svg, "add_one", "3");
     let uses: Vec<_> = use_marks.iter().filter(|(_, _, tip)| {
-        tip.contains("add_one is passed to add_one by shared reference; add_one may read it. The reference is the call's receiver")
+        tip.contains("Calling add_one borrows add_one by shared reference as the receiver. The call may read through it")
     }).collect();
     // MIR borrows add_one for the receiver and initializes y directly
     // at the call's destination. There is no copy from the closure.
     assert_eq!(uses.len(), 1, "{use_marks:?}");
     let tips = timeline_tooltips(&svg);
-    assert_eq!(tips.iter().filter(|tip| tip.contains("add_one is passed to add_one by shared reference; add_one may read it. The reference is the call's receiver")).count(), 1);
+    assert_eq!(tips.iter().filter(|tip| tip.contains("Calling add_one borrows add_one by shared reference as the receiver")).count(), 1);
+    assert!(!tips.iter().any(|tip| tip.contains("add_one is passed to add_one by shared reference")));
     assert!(tips.iter().any(|tip| tip.contains("y is initialized with the value add_one() returns")));
     assert!(tips.iter().any(|tip| tip.contains("y receives the value add_one() returns")));
     assert!(!tips.iter().any(|tip| tip.contains("Copy of the value add_one() returns") || tip.contains("Copy from add_one to y")));
@@ -49756,7 +49757,8 @@ fn p4_closure_capture_transfer_and_fate() {
     ]));
     let svg = rv.timeline_panel_string();
     let tips = timeline_tooltips(&svg);
-    assert_eq!(tips.iter().filter(|t| t.contains("tick is passed to tick by mutable reference as the receiver")).count(), 1);
+    assert_eq!(tips.iter().filter(|t| t.contains("tick is passed to the call tick() by mutable reference")).count(), 1);
+    assert!(!tips.iter().any(|t| t.contains("tick is passed to tick by mutable reference")));
     assert!(tips.iter().any(|t| t.contains("held, which f captured, may be dropped during the call or moved out as the call's result")));
     assert!(tips.iter().any(|t| t.contains("if f still holds the closure") && t.contains("A consuming call takes the closure out of the binding") && t.contains("runtime drop flag")));
     assert!(tips.iter().any(|t| t == "result acquires ownership of the resource take() returns"));
@@ -49781,14 +49783,14 @@ fn p4_closure_review_shared_receiver_text() {
             assert!(tips.iter().any(|tip| tip.contains(&format!("f's {expected} {effect}"))), "{fixture}: {tips:?}");
             assert!(!tips.iter().any(|tip| tip.contains(&format!("f's {wrong} {effect}"))), "{fixture}");
         }
-        assert!(tips.iter().any(|tip| tip.contains("g is passed to g by shared reference; g may read it. The reference is the call's receiver")
+        assert!(tips.iter().any(|tip| tip.contains("Calling g borrows g by shared reference as the receiver")
             && tip.contains("Interior mutability lets the call change data reached through the receiver")));
         assert!(!tips.iter().any(|tip| tip.contains("g is read-only while the borrow is live")));
         assert!(!tips.iter().any(|tip| tip.contains("f is read-only while the borrow is live")));
     }
     let svg = run_with_local_backend("closure_value_not_resource").timeline_panel_string();
     let tip = tooltip_of_id(&svg, "f@L1:dot:").unwrap();
-    let call = tip.find("f is passed to f by shared reference; f may read it. The reference is the call's receiver").expect(&tip);
+    let call = tip.find("Calling f borrows f by shared reference as the receiver").expect(&tip);
     let scope = tip.find("f goes out of scope").expect(&tip);
     assert!(call < scope, "{tip}");
     assert!(!tip.contains("Its resource is dropped"), "{tip}");
@@ -49810,8 +49812,8 @@ fn p4_closure_review_unique_capture_and_branch_holder() {
     let svg = run_with_local_backend("closure_in_arm_nested_if_1528").timeline_panel_string();
     check_review_tip(&svg, "c2@L25:dot:",
         &["s's resource is being shared by one or more variables. c2 holds a shared borrow",
-            "c2 is passed to c2 by shared reference; c2 may read it. The reference is the call's receiver"],
-        &["c2 is passed to c2 by shared reference. c2 may read it"]);
+            "Calling c2 borrows c2 by shared reference as the receiver. The call may read through it"],
+        &["c2 is passed to c2 by shared reference"]);
 }
 
 #[test]
@@ -49820,7 +49822,7 @@ fn p4_closure_review_repeated_guard_and_staged_receivers() {
     // rustc builds two guard invocations, each borrowing f for Fn::call.
     let at_guard = drawn_clauses(&svg, "f", "11");
     assert_eq!(at_guard.iter().filter(|(_, _, tip)|
-        tip.contains("f is passed to f by shared reference; f may read it. The reference is the call's receiver")).count(), 1, "{at_guard:?}");
+        tip.contains("Calling f borrows f by shared reference as the receiver")).count(), 1, "{at_guard:?}");
     check_review_tip(&svg, "f@L19:dot:",
         &["f is borrowed by mutable reference as the receiver before the arguments are evaluated", "If they finish, f may read or write through it",
           "Other code can't use f while this mutable borrow is live"],
@@ -50188,6 +50190,10 @@ fn issue_1954_failed_guard_describes_call_without_assuming_arity_or_receiver_mut
     let svg = run_with_local_backend("rv3_1954_inline_calls").timeline_panel_string();
     // f(n) writes through its mutable capture into calls. If the pattern
     // fails, f is never called. The program checks both routes.
+    check_review_tip(&svg, "f@L19:dot:",
+        &["f's value is mutably borrowed for the call to f",
+            "f is passed to the call to f by mutable reference", "The call may read or write it"],
+        &["for the call f()", "f is passed to f by mutable reference"]);
     check_review_tip(&svg, "f@L20:dot:",
         &["f may have been borrowed for this call", "takes a mutable reference as its receiver",
             "matching goes on with the next pattern"],
