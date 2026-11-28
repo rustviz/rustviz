@@ -1234,7 +1234,6 @@ pub fn mutate_branch_lines(
     // As in `place_external_events`: the split line of a conditional over
     // several lines nested here, and the rows inserted before it (#1417).
     let mut split_rows: Option<(usize, usize)> = None;
-
     // mutate actual events
     let mut i: usize = 0;
     let size: usize = b_data.e_data.len();
@@ -1254,6 +1253,14 @@ pub fn mutate_branch_lines(
             Some((src, shift)) if src == line_num && !matches!(e, ExternalEvent::Branch { .. }) => *l += shift,
             _ => *l += extra_lines_here, // update starting line of event
         }
+        // Earlier events already have their displayed rows, including
+        // arrows laid out by the first member of a stack.
+        let release_row = matches!(e, ExternalEvent::Branch { .. }).then(|| e.get_id())
+            .filter(|fork| row_layout.end_before_fork.values().any(|id| id == fork))
+            .and_then(|fork| b_data.e_data[..i].iter().filter_map(|(row, event)| {
+                (row_layout.end_before_fork.get(&event.get_id()) == Some(&fork)).then_some(*row)
+            }).max());
+        let (l, e) = &mut b_data.e_data[i];
         match e {
             ExternalEvent::Branch {branches, split_point, merge_point, branch_type, live_vars, id, .. } => {
                 let gaps = OneLineArmGaps::of(branches, branch_type, *merge_point, line_num, live_vars, l_map, binding_columns, arrow_tracks, in_spread_arm, one_row_per_arm.contains(id), one_row_per_arm, row_layout);
@@ -1265,6 +1272,14 @@ pub fn mutate_branch_lines(
                         && (gaps.fork_above || (raised && branch_is_collapsed(line_num, *merge_point)))
                 }) {
                     let padding = (fork + 2).saturating_sub(*l);
+                    if padding > 0 {
+                        *l_map.entry(*l).or_insert(0) += padding;
+                        *l += padding;
+                        extra_lines += padding;
+                    }
+                }
+                if let Some(end) = release_row.filter(|_| gaps.fork_above) {
+                    let padding = (end + 1).saturating_sub(*l);
                     if padding > 0 {
                         *l_map.entry(*l).or_insert(0) += padding;
                         *l += padding;
@@ -2558,6 +2573,36 @@ mod tests {
         let mut insertions = HashMap::new();
         assert_eq!(place_arm(&mut outer, &mut insertions, 0), 0);
         assert_eq!(outer.e_data.last().unwrap().0, 9);
+    }
+
+    #[test]
+    fn stacked_release_stays_above_the_nested_fork() {
+        // The incoming arm evaluates an earlier operation, then releases
+        // a loan before the following conditional can choose either arm.
+        let end = ExternalEvent::StaticDie {
+            from: ResourceTy::Value(holder()), to: owner("to", 2), id: 2, slot: 2,
+            static_lender: None, still_borrowed_by: vec![], of_ref_var: false, exhaustion: vec![],
+        };
+        let branch = ExternalEvent::Branch {
+            body: rustc_hir::def_id::CRATE_DEF_ID.to_def_id(), join_id: None,
+            live_vars: HashSet::new(), skipped_holds: BTreeMap::new(), on_exhaustion: BTreeSet::new(),
+            branches: vec![arm(vec![], BTreeMap::new()), arm(vec![(6, copy(4))], BTreeMap::new())],
+            branch_type: BranchType::If(vec!["If".into(), "Else".into()], vec![(6, 6), (6, 6)]),
+            split_point: 6, merge_point: 6, maybe_init: HashSet::new(), loop_assigned: HashSet::new(),
+            maybe_held: HashSet::new(), id: 3,
+        };
+        let mut outer = arm(vec![(6, copy(1)), (6, end.clone()), (6, branch)],
+            BTreeMap::from([(6, vec![copy(1), end])]));
+        let mut layout = crate::event_order::RowLayout::default();
+        layout.end_before_fork.insert(2, 3);
+        layout.assignment_order.extend([(1, (1, 0)), (2, (1, 1))]);
+        let mut raised = HashSet::new();
+        mutate_branch_lines(&mut outer, &mut HashMap::new(), 0, (1, 1), &mut vec![], &mut HashMap::new(),
+            false, None, &BTreeSet::from([3]), &mut raised, &layout);
+        assert!(raised.contains(&3));
+        let release = outer.e_data.iter().find(|(_, event)| event.get_id() == 2).unwrap().0;
+        let fork = outer.e_data.iter().find(|(_, event)| event.get_id() == 3).unwrap().0 - 1;
+        assert!(release <= fork, "release row {release}, fork row {fork}");
     }
 
     #[test]

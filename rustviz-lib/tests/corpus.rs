@@ -27621,12 +27621,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the receiver where the block ends.
         must_contain: &[
             "c may have been moved: the block can end through a break that comes before c is moved, or by reaching its end after c is moved, so c can't be used after the block",
+            "c may have been moved out, so it can't be used here. On a path where it still holds the closure, c owns a closure which owns 1 resource via capture",
             "c goes out of scope. Its captured resource is dropped here if c still holds the closure (Rust tracks this with a runtime drop flag). A move takes the closure out of the binding.",
             "c2 was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, and execution reaches the end of c2's scope with the resource still held, it is dropped there.",
             "c2 goes out of scope. Its captured resource is dropped here if c2 still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
             "c3 goes out of scope. Its captured resource is dropped here if c3 still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
             "c4 goes out of scope. Its captured resource is dropped here if c4 still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
             "c5 may have been moved: the loop can end through a break that comes after c5 is moved, so c5 can't be used after the loop",
+            "c5 may have been moved out, so it can't be used here. On a path where it still holds the closure, c5 owns a closure which owns 1 resource via capture",
             "s4 acquires ownership of the resource c() returns, if the block ended with its last expression, c()",
             "t acquires ownership of the resource c2() returns",
             "t3 acquires ownership of the resource c3() returns",
@@ -35211,6 +35213,154 @@ fn progen_1906_failed_pattern_returns_only_the_lender() {
     check_review_tip(&svg, "o@L17:dot:", &["no longer mutably borrowed", "read-only while the borrow is live"], &["by first"]);
     assert!(!svg.contains("first>o@L17:arrow:mutable_die") && !svg.contains("first@L17:dot:mutable_die"));
     check_review_tip(&svg, "first@L21:dot:", &["first's mutable borrow ends"], &[]);
+}
+
+#[test]
+fn issue_1955_checked_and_runtime_drops() {
+    let svg = |n| run_with_local_backend(&format!("edition2024/rv3_1955_{n}")).timeline_panel_string();
+    // On the checked path the receiver is moved into into_a before
+    // the replacement store. The entire assignment is skipped at runtime.
+    check_review_tip(&svg("03"), "p2@L15:dot:move+acquire+skipped_assignment",
+        &["p2's resource is moved", "The assignment is skipped at runtime"], &["previous resource"]);
+    // The actual return drops both fields of p. The closing brace
+    // after the subsequent checked-only move has no runtime drop.
+    let early = svg("04");
+    for field in ["p.a", "p.b"] {
+        check_review_tip(&early, &format!("{field}@L10:dot:owner_go_out_of_scope"), &["Its resource is dropped"], &[]);
+        check_review_tip(&early, &format!("{field}@L12:dot:owner_go_out_of_scope"),
+            &["p's lexical scope ends here", "This path never runs. Rust's borrow checker still checks it."],
+            &["Its resource is dropped", "runtime drop flag"]);
+    }
+    // The initialized local is dropped on the normal edge of its arm.
+    // The irrefutable match cannot skip that drop.
+    assert_owner_title("edition2024/rv3_1955_05", "s3", 14, 15, Some("full_privilege"),
+        "s3 is the owner of the resource", "hasn't been assigned");
+    check_review_tip(&svg("05"), "s3@L15:dot:owner_go_out_of_scope", &["Its resource is dropped"], &["runtime drop flag"]);
+}
+
+#[test]
+fn issue_1955_moves_restrict_access_on_the_continuation() {
+    // Rustc rejects &s2 after the outer join and &tp after the inner
+    // join with E0382. Only the tuple's unmoved field can still be read.
+    assert_owner_title("edition2024/rv3_1955_12", "s2", 11, 13, Some("full_privilege_uninit"),
+        "s2's resource was moved out, so it can't be used here", "owner of the resource");
+    let svg = run_with_local_backend("edition2024/rv3_1955_13").timeline_panel_string();
+    check_review_tip(&svg, "tp@L18-19:branch_line:", &["tp.0 may have been moved out", "tp can't be used as a whole"],
+        &["tp is the owner of the resource"]);
+    check_review_tip(&svg, "tp@L20:branch_line:full_privilege/side1",
+        &["tp.0 may have been moved out", "tp can't be used as a whole"], &["tp is the owner of the resource"]);
+    check_review_tip(&svg, "tp@L20:dot:branch_join",
+        &["tp.0 may have been moved out", "tp can't be used as a whole"], &["tp isn't moved in any of the branches above"]);
+    assert_owner_title("edition2024/rv3_1955_13", "tp.1", 18, 21, Some("full_privilege"),
+        "tp.1 holds a copyable value", "was moved");
+
+    // The closure can be moved by apply. The MIR join is maybe moved
+    // through to the conditional scope drop, including before the let.
+    let closure = run_with_local_backend("edition2024/rv3_1955_closure_join").timeline_panel_string();
+    check_review_tip(&closure, "c@L10-14:line:full_privilege_uninit",
+        &["c may have been moved out, so it can't be used here", "owns 1 resource via capture"], &[]);
+    check_review_tip(&closure, "c@L14:dot:owner_go_out_of_scope",
+        &["if c still holds the closure", "runtime drop flag"], &[]);
+}
+
+#[test]
+fn issue_1955_loan_ends_follow_the_reaching_holder() {
+    let svg = |n| run_with_local_backend(&format!("edition2024/rv3_1955_{n}")).timeline_panel_string();
+    // NLL ends the original holder on the copy/reborrow. On a sibling
+    // edge where the transfer was skipped, that holder releases the loan.
+    for (case, handoff, lender, release) in [("01", 8, "s", 10), ("08", 19, "tp.0", 16)] {
+        let timeline = svg(case);
+        check_review_tip(&timeline, &format!("r@L{handoff}:dot:"),
+            &[&format!("The shared borrow of {lender} remains live")], &["no longer restricts access"]);
+        check_review_tip(&timeline, &format!("r@L{release}:dot:"),
+            &[&format!("r's shared borrow of {lender} ends. This borrow no longer restricts access to {lender}.")], &[]);
+    }
+    // The matched successor has installed x2. The failing successor
+    // releases the scrutinee loan without binding x2.
+    let pattern = svg("06");
+    check_review_tip(&pattern, "x2@L19:dot:mutable_die",
+        &["x2 holds a mutable reference to the payload of o.", "The mutable borrow of o ends. This borrow no longer restricts access to o."],
+        &["x2's mutable borrow of o ends"]);
+    check_review_tip(&pattern, "o@L20:dot:mutable_reacquire",
+        &["The mutable borrow of o ends. This borrow no longer restricts access to o."], &["by x2"]);
+    // The first call in the nested chain releases x2's loan before
+    // either successor. The second call's loan has its own two ends.
+    check_review_tip(&svg("09"), "x2>v@L21:arrow:static_die",
+        &["shared borrow of v ends. This borrow no longer restricts access to v."], &[]);
+
+    // In the outer failure arm the inner pattern's matched edge stores
+    // x2 and immediately ends its borrow. The inner failure has no x2.
+    let nested = svg("nested_let_else");
+    let ends: Vec<_> = rv_elements(&nested, "x2@L4:dot:").into_iter()
+        .filter(|(_, tip, ..)| tip.contains("x2's immutable borrow ends")).collect();
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert!(ends[0].0.contains("static_borrow") && ends[0].1.contains("only if the pattern matches"), "{ends:?}");
+    check_review_tip(&nested, "head@L12:dot:static_borrow",
+        &["only if the pattern matches", "head holds a shared reference into the matched value", "The shared borrow of v ends here"],
+        &["head's shared borrow of v ends"]);
+}
+
+#[test]
+fn issue_1955_handoff_and_release_tooltips() {
+    let copy = run_with_local_backend("edition2024/rv3_1955_01").timeline_panel_string();
+    check_review_tip(&copy, "s@L9:dot:",
+        &["r2 keeps s shared until println! returns", "s's resource is no longer immutably borrowed"],
+        &["still immutably borrowed by r and r2", "still immutably borrowed by r2"]);
+    check_review_tip(&copy, "r@L11:dot:branch_join",
+        &["r's borrow ended in each branch above", "None of the branches above assigned r. It still holds its shared reference"],
+        &[]);
+
+    let reborrow = run_with_local_backend("edition2024/rv3_1955_08").timeline_panel_string();
+    check_review_tip(&reborrow, "r@L19:dot:",
+        &["A shared reborrow through r creates the reference stored in h.r", "The shared borrow of tp.0 remains live"],
+        &["r's reference is copied"]);
+    check_review_tip(&reborrow, "r>tp.0@L16:arrow:static_die",
+        &["Ending the borrow doesn't move the resource"], &["Ending the borrow doesn't move the value"]);
+    check_review_tip(&reborrow, "h.r@L22:dot:",
+        &["h.r's reference is copied", "h.r's immutable borrow ends"], &[]);
+    check_review_tip(&reborrow, "h.r@L23:dot:branch_join", &["h.r's borrow ended in each branch above"], &[]);
+
+    let residual = run_with_local_backend("edition2024/rv3_1955_13").timeline_panel_string();
+    check_review_tip(&residual, "v@L15:dot:mutable_lend",
+        &["The mutable borrow of v ends. This borrow no longer restricts access to v.", "If the `?` here returns early",
+          "This effect occurs only if the `?` succeeds. v's resource is mutably borrowed by m"],
+        &["m's mutable borrow of v ends."]);
+
+    let parameter = run_with_local_backend("edition2024/progen_1906_1127_01_copied_parameter").timeline_panel_string();
+    check_review_tip(&parameter, "s2@L28:dot:static_lend+static_reacquire",
+        &["r3's shared borrow of s2 ends", "s2's resource is no longer immutably borrowed"], &["still immutably borrowed"]);
+}
+
+#[test]
+fn issue_1955_owner_continues_through_formatting_and_replacement() {
+    let svg = run_with_local_backend("edition2024/rv3_1955_07").timeline_panel_string();
+    for (row, end) in [(14, 15), (19, 20)] {
+        let join = rv_elements(&svg, &format!("o@L{row}:dot:branch_join"));
+        let outgoing = rv_elements(&svg, &format!("o@L{row}-{end}:line:full_privilege"));
+        assert!(matches!((join.as_slice(), outgoing.as_slice()),
+            ([(_, _, _, (dot, _))], [(_, title, _, (top, bottom))])
+                if (dot - top).abs() < 0.1 && top < bottom && title.contains("o is the owner of the resource")),
+            "{join:?} {outgoing:?}");
+    }
+}
+
+#[test]
+fn issue_1955_copied_holder_releases_on_both_sibling_arms() {
+    let svg = run_with_local_backend("edition2024/rv3_1955_sibling_holders").timeline_panel_string();
+    let mut releases = Vec::new();
+    for row in [9, 11] {
+        let id = format!("r2>s@L{row}:arrow:static_die");
+        check_review_tip(&svg, &id, &["The shared borrow of s ends. This borrow no longer restricts access to s."],
+            &["If r2 holds a shared borrow affecting s", "r's shared borrow of s ends"]);
+        let on_arm = rv_elements(&svg, &id);
+        assert_eq!(on_arm.len(), 1, "{on_arm:?}");
+        releases.push(on_arm[0].3);
+    }
+    assert!(releases[0].1 < releases[1].0, "{releases:?}");
+    let bypass = rv_elements(&svg, "r>s@");
+    assert_eq!(bypass.len(), 1, "{bypass:?}");
+    assert_eq!(bypass[0].0, "r>s@L13:arrow:static_die");
+    check_review_tip(&svg, "r@L7:dot:", &["r stops using its reference. The shared borrow of s remains live."], &[]);
 }
 
 /// Adjacent rows with the same facts share one SVG segment. A title pin
@@ -45149,7 +45299,7 @@ fn conditional_forks_use_their_own_init_state_1916() {
         // E0382 before each if when both paths still carry the maybe-move.
         ("geometry_1907/rv3_1907_2711_10_fork_without_dot", "s@L8:dot:branch#2", uncertain, live),
         // The write on the else path makes &s legal just before the inner if.
-        ("rv3_1916_same_row_assignment", "s@L8:dot:acquire+owner_drop_at_reassign+branch", live, uncertain),
+        ("rv3_1916_same_row_assignment", "s@L8:dot:acquire+skipped_assignment+branch", live, uncertain),
     ] {
         let svg = run_with_local_backend(name).timeline_panel_string();
         let elements = rv_elements(&svg, "s@L8:dot:");
@@ -45175,7 +45325,7 @@ fn skipped_labeled_block_assignment_uses_checked_wording_1909() {
 fn skipped_else_write_uses_checked_wording_1909() {
     let svg = run_with_local_backend("geometry_1907/rv3_1907_2711_10_fork_without_dot").timeline_panel_string();
     let elements = rv_elements(&svg, "s@L8:dot:");
-    let (_, tip, ..) = elements.iter().find(|(id, ..)| id.contains("owner_drop_at_reassign")).expect("skipped else write");
+    let (_, tip, ..) = elements.iter().find(|(id, ..)| id.contains("skipped_assignment")).expect("skipped else write");
     // Pre-elaboration MIR checks an assignment on the else edge.
     // Execution never takes the edge and drops no old value there.
     assert_review_title(tip,

@@ -132,6 +132,16 @@ impl ExprVisitor<'_, '_> {
             empty_payloads.contains(&(*loan, crate::facts::SwitchEdge { switch: fact.location, successor: to.block }))) {
             continue;
           }
+          // A let-else binding is drawn after its own fork, where the
+          // successful pattern installs the value. Its existing slot
+          // covers that release. A copy inside the fork would end a
+          // reference before its binding dot.
+          if giver.projection.is_empty() && site.path.iter().any(|(id, _)| {
+            self.let_else_branches.contains(id) && self.arm_bindings.get(id)
+              .is_some_and(|bindings| bindings.iter().any(|&(_, local)| local.index() == giver.local))
+          }) {
+            continue;
+          }
           let list = events_at(self.preprocessed_events, &site.path).unwrap();
           if list.iter().any(
             |(_, e)| matches!(e,ExternalEvent::OrAltBorrow { into,ro,end:true,.. } if into == r && Some(ro) == to.extract_rap()),

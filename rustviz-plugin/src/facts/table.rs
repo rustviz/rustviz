@@ -176,6 +176,7 @@ struct RowCells {
     continues_to: Option<usize>,
     cells: Cells,
     before: Option<Cells>,
+    before_scope_end: Cells,
     runtime_entry: Option<bool>,
     completed_bindings: Cells,
     block_end: bool,
@@ -520,12 +521,14 @@ impl StateTable {
         // that skip it (Q3), which come into the next row.
         let jumps = b.rows.get(&row).is_some_and(|rc| rc.jumps);
         let (&next, boundary) = b.rows.range(row + 1..).find(|(_, c)| c.before.is_some())?;
-        let mut cell = boundary.before.as_ref()?.get(column)?.clone();
+        let mut cell = boundary.before_scope_end.get(column)
+            .or_else(|| boundary.before.as_ref()?.get(column))?.clone();
+        let definitely_dropped = boundary.why.get(column).is_some_and(|events| events.iter().any(|(arm, why)|
+            arm.is_none() && matches!(why, Why::Dropped { local, how: "drops", early_exit: None, at_reassign: false, .. }
+                if *local == cell.local)));
         if let Some(here) = self.cell(function, column, row, row).filter(|here| !jumps && here.local == cell.local) {
             // Paths on which a block-local was never in scope can meet at
             // its StorageDead. Inside its scope the binding has its own state.
-            let definitely_dropped = boundary.why.get(column).is_some_and(|events| events.iter().any(|(_, why)|
-                matches!(why, Why::Dropped { how: "drops", early_exit: None, at_reassign: false, .. })));
             if (definitely_dropped && here.init == Init::Own) || here.why.iter().any(|w| matches!(w, Why::Assigned { .. }))
                 || (cell.cause == Some("unassigned") && !boundary.cells.contains_key(column)) {
                 return Some(here);
@@ -1078,6 +1081,8 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let mut rows = BTreeMap::new();
     for r in &b.rows {
         let mut rc = RowCells { snapshot: !r.after.state.is_empty() || !r.after.locals.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), runtime_entry: r.runtime_entry, completed_bindings: r.completed_bindings.iter().flat_map(cells_of).collect(), block_end: r.block_end, completed_let: r.completed_let, jumps: r.jumps, ..Default::default() };
+        rc.before_scope_end = r.before_scope_end.iter().filter_map(|(column, state)|
+            Some((column.clone(), cells_of(state).remove(column)?))).collect();
         for a in &r.arms {
             let exit = b.switches.binary_search_by_key(&a.edge, |e| e.edge).ok().map(|i| &b.switches[i]);
             let branch = exit.and_then(|e| e.branch);
@@ -1328,6 +1333,23 @@ mod tests {
     }
 
     fn start(index: usize) -> FunctionStart { FunctionStart { body: def(index), line: 1 } }
+
+    #[test]
+    fn a_drop_on_one_arm_does_not_initialize_the_incoming_column() {
+        let local = col("s").local;
+        let mut boundary = row(4, &[], &[], vec![(Some(0), Fact::Drop {
+            path: "s".into(), how: "drops", at_reassign: false, early_exit: None, also_on_exits: Vec::new(),
+        })]);
+        boundary.facts[0].place_local = Some(local);
+        let mut before = state(&[("s", "maybe")], &[]);
+        before.cause.insert("s".into(), "unassigned");
+        before.locals.insert("s".into(), Some(local));
+        boundary.before = Some(before);
+        let table = StateTable::from_facts(&CrateFacts {
+            version: 2, bodies: vec![body("main", 1, &["s"], vec![boundary])], errors: Vec::new(),
+        });
+        assert_eq!(table.segment_cell(start(1), "s", 3).unwrap().init, Init::Maybe);
+    }
 
     fn table() -> StateTable {
         let mut other = body("g", 1, &["s"], vec![row(2, &[("s", "moved")], &[], Vec::new())]);

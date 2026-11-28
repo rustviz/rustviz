@@ -553,7 +553,15 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
             out.push(("line-after-column-ends", d.describe()));
         }
         if d.has("branch_join") && says_maybe_moved(d) && continues && !inits && !elems_moved(d) {
-            out.push(("owner-after-maybe-moved-join", d.describe()));
+            // A partially moved aggregate can still carry its remaining
+            // fields. Its trunk must state the same whole-value restriction.
+            let whole_restricted = "can't be used as a whole";
+            let partial = d.tip.contains(whole_restricted)
+                && live.get(d.hash.as_str()).into_iter().flatten().filter(|s|
+                    !s.gray() && meets(s, d.x, d.y).1).all(|s| s.tip.contains(whole_restricted));
+            if !partial {
+                out.push(("owner-after-maybe-moved-join", d.describe()));
+            }
         }
         if let (Some(m), Some(r)) = (d.pos("move"), d.pos("owner_drop_at_reassign")) {
             let intervening_store = d.pos("acquire").is_some_and(|a| m < a && a < r)
@@ -814,6 +822,17 @@ mod unit {
         assert_eq!(invs(&dropped), vec!["drop-without-value"]);
         let on = ok.replace("y2=\"155\"", "y2=\"215\"");
         assert_eq!(invs(&on), vec!["line-after-column-ends"]);
+    }
+
+    #[test]
+    fn a_partial_join_requires_the_outgoing_trunk_to_show_the_restriction() {
+        let title = "p may be partially moved: p.0 may have been moved out, so p can't be used as a whole";
+        let outgoing = line("p", 1, 155, 215, "full_privilege");
+        let start = [header("p", 1), line("p", 1, 95, 155, "full_privilege"),
+            dot("p", 1, 95, "acquire", false, "init"), dot("p", 1, 155, "branch_join", false, title)].concat();
+        assert!(invs(&format!("{start}{outgoing}")).contains(&"owner-after-maybe-moved-join"));
+        let outgoing = outgoing.replace("/>", &format!(" data-tooltip-text=\"{title}\"/>"));
+        assert!(!invs(&format!("{start}{outgoing}")).contains(&"owner-after-maybe-moved-join"));
     }
 
     #[test]

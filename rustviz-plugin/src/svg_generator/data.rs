@@ -5190,6 +5190,21 @@ pub fn returned_closure(via: &Option<BorrowVia>) -> bool {
 }
 
 
+/// The incoming MIR edges can all have released an owner even if
+/// replay placed one of those releases inside a different leg.
+fn owner_state_at_join(is_ref: bool, state: State, join: Option<&crate::facts::table::JoinCell>) -> State {
+    use crate::facts::table::Init;
+    if !is_ref
+        && matches!(state, State::RevokedPrivilege { .. } | State::PartialPrivilege { .. })
+        && join.is_some_and(|join| !join.checked_only && join.cell.init == Init::Own
+            && join.cell.lent.is_empty() && join.cell.parts.is_none())
+    {
+        State::FullPrivilege { s: LineState::Full }
+    } else {
+        state
+    }
+}
+
 // fulfills the promise that we can support all the methods that a
 // frontend would need.
 impl Visualizable for VisualizationData {
@@ -5867,7 +5882,7 @@ impl Visualizable for VisualizationData {
             };
             states.push((previous_line, row, pre_event_state));
             match e {
-                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, id, .. } => {
+                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, id, join, .. } => {
                     let entry_state = previous_state.clone();
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
@@ -5924,7 +5939,7 @@ impl Visualizable for VisualizationData {
                     };
 
                     ending_states.sort(); // partial order of the ending states
-                    previous_state = convert_back(&ending_states.first().unwrap());
+                    previous_state = owner_state_at_join(is_ref, convert_back(&ending_states.first().unwrap()), join.as_deref());
                     // (Inside an arm, the arm's column goes on, dashed, to
                     // the arm's end from that join: it may have no value
                     // there, #1437.)
@@ -6056,7 +6071,7 @@ impl Visualizable for VisualizationData {
             e.note_access_before_end(&previous_state, self.is_mutref(hash));
             states.push((previous_line, row, previous_state.clone()));
             match e {
-                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, id, .. } => {
+                Event::Branch { branch_history, ty, split_point, merge_point, maybe_init, maybe_held, on_exhaustion, id, join, .. } => {
                     // Timeline is empty in the middle during a branch
                     states.push((*split_point, *merge_point, State::OutOfScope));
                     // State of each branch that reaches the merge; a
@@ -6112,7 +6127,7 @@ impl Visualizable for VisualizationData {
                     };
 
                     ending_states.sort(); // partial order of the ending states
-                    previous_state = convert_back(&ending_states.first().unwrap());
+                    previous_state = owner_state_at_join(is_ref, convert_back(&ending_states.first().unwrap()), join.as_deref());
                     if unassigned_on_some_path {
                         previous_state = State::OutOfScope;
                     }

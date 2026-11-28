@@ -1,6 +1,6 @@
 //! Several condition edges can enter one drawn arm. Find the loan boundary
 //! on each incoming history before attributing the end to a particular slot.
-use super::{ExprVisitor, Path};
+use super::{Boundary, ExprVisitor, Path};
 use crate::facts::{real_successor_blocks, Ev, Fact, SourceArm, SwitchEdge};
 use crate::svg_generator::data::{AltRuntime, ExternalEvent, ResourceTy};
 use crate::svg_generator::hover_messages::{break_alt_if_suffix, styled_name_html};
@@ -55,6 +55,14 @@ pub(super) fn call_title(holder: &str, lender: &str, kind: &str, exact: bool) ->
   text
 }
 
+pub(super) fn release_title(holder: Option<&str>, lender: &str, kind: &str) -> String {
+  let subject = match holder {
+    Some(holder) => format!("{}'s {kind} borrow", styled_name_html(holder)),
+    None => format!("The {kind} borrow"),
+  };
+  format!("{subject} of {lender} ends. This borrow no longer restricts access to {lender}.")
+}
+
 pub(super) struct ForkCases {
   pub text: String,
   pub calls: BTreeSet<Location>,
@@ -62,6 +70,51 @@ pub(super) struct ForkCases {
 }
 
 impl ExprVisitor<'_, '_> {
+  pub(super) fn edge_release_title(
+    &self, facts: &crate::facts::BodyFacts, event: &ExternalEvent, ends: &[Boundary<'_>],
+  ) -> Option<(String, Option<String>)> {
+    let first = ends.first()?;
+    if !matches!(event, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
+      || !ends.iter().all(|end| end.release && end.loan == first.loan)
+    {
+      return None;
+    }
+    let loan = facts.loans.iter().find(|l| l.loan == first.loan)?;
+    let kind = borrow_kind(loan.kind)?;
+    let lender = self.fork_lender(loan)?;
+    let (from, to) = super::endpoints(event);
+    let slot = from.extract_rap().and_then(|r| Some((r, r.ref_local()?)));
+    let holder = slot.filter(|&(_, local)| {
+      ends.iter().all(|end| end.fact.exact_end_places.iter().any(|p| p.local == local.index() && p.projection.is_empty()))
+    });
+    let payload = slot.and_then(|(r, local)| {
+      let (container_local, container, projected_kind) = crate::facts::call_wording::payload_borrow(
+        self.tcx, &self.bwf.body, local, &self.raps.bindings,
+      )?;
+      let mut inits = facts.rows.iter().flat_map(|row| &row.facts)
+        .filter(|ev| ev.place_local == Some(local) && matches!(ev.fact, Fact::Init { .. }));
+      let init = inits.next().filter(|_| inits.next().is_none())?;
+      (Some(container_local) == loan.lender_local
+        && ends.iter().all(|end| super::dominates(&self.bwf.body, init.location, end.fact.occurrence.at)
+          && end.fact.end_places.iter().any(|p| p.local == local.index() && p.projection.is_empty())))
+        .then(|| format!("{} holds a {projected_kind} reference to the payload of {}. ",
+        styled_name_html(r.name()), styled_name_html(&container)))
+    });
+    let named_holder = holder.filter(|_| payload.is_none()).map(|(r, _)| r.name().as_str());
+    let mut title = payload.unwrap_or_default();
+    title.push_str(&release_title(named_holder, &lender, kind));
+
+    let restored = to.extract_rap().filter(|rap| {
+      loan.lender_local.is_some_and(|local| self.raps.place(local, &loan.lender).is_some_and(|slot| &slot.rap == *rap))
+        && ends.iter().all(|end| facts.usable_after_release.contains(&(loan.loan, end.fact.occurrence)))
+    }).map(|rap| {
+      let noun = if rap.drops_nothing() { "value" } else { "resource" };
+      let adverb = if kind == "mutable" { "mutably" } else { "immutably" };
+      format!("{lender}'s {noun} is no longer {adverb} borrowed")
+    });
+    Some((title, restored))
+  }
+
   /// Match each drawn end to the normal return edge of the argument's
   /// MIR call. The bypass and return can share both endpoints and loan ID.
   pub(crate) fn describe_joined_argument_ends(&mut self) {
