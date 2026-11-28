@@ -19,6 +19,7 @@ use rustc_middle::mir::{
     StatementKind, TerminatorKind, UnwindAction, RETURN_PLACE,
 };
 use rustc_middle::ty::{TyCtxt, TyKind};
+use rustc_middle::mir::visit::{MutatingUseContext, PlaceContext, Visitor};
 use rustc_mir_dataflow::impls::{
     always_storage_live_locals, EverInitializedPlaces, MaybeBorrowedLocals, MaybeInitializedPlaces, MaybeStorageLive,
     MaybeUninitializedPlaces,
@@ -31,6 +32,31 @@ use std::collections::{BTreeMap, BTreeSet};
 
 type Origin = <RustcFacts as FactTypes>::Origin;
 type Point = <RustcFacts as FactTypes>::Point;
+
+#[derive(Clone, Copy)]
+enum TempDefinition<'a, 'tcx> {
+    Value(&'a Rvalue<'tcx>),
+    Box(Place<'tcx>),
+    Vec(Place<'tcx>),
+    VecBuffer,
+}
+
+/// A borrow or raw pointer can let other MIR change a temporary's contents
+/// without writing to its move path. A single definition alone then proves
+/// nothing about which value its destructor will see.
+#[derive(Default)]
+struct ExposedTemps(BTreeSet<Local>);
+
+impl<'tcx> Visitor<'tcx> for ExposedTemps {
+    fn visit_place(&mut self, place: &Place<'tcx>, context: PlaceContext, _: Location) {
+        if context.is_borrow() || context.is_address_of()
+            || matches!(context, PlaceContext::MutatingUse(MutatingUseContext::SetDiscriminant
+                | MutatingUseContext::AsmOutput | MutatingUseContext::Yield))
+        {
+            self.0.insert(place.local);
+        }
+    }
+}
 
 struct Cx<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
@@ -644,8 +670,41 @@ fn is_residual_conversion<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> bool
     })
 }
 
-fn after_call<'tcx>(body: &Body<'tcx>, loc: Location, predicate: impl Fn(&Operand<'tcx>) -> bool) -> bool {
-    preceding_call(body, loc, predicate).is_some()
+#[cfg(test)]
+#[test]
+fn skipped_macro_residual_keeps_its_expansion_identity() {
+    struct Check;
+    impl rustc_driver::Callbacks for Check {
+        fn config(&mut self, config: &mut rustc_interface::Config) {
+            config.override_queries = Some(rustc_utils::mir::borrowck_facts::override_queries);
+        }
+
+        fn after_analysis<'tcx>(&mut self, _: &rustc_interface::interface::Compiler, tcx: TyCtxt<'tcx>) -> rustc_driver::Compilation {
+            let id = tcx.hir_body_owners().find(|id| tcx.def_path_str(*id) == "expanded_residuals").unwrap();
+            let bwf = rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, id);
+            let facts = body_facts(tcx, bwf, "expanded_residuals".into());
+            let mut sites = bwf.body.basic_blocks.iter().filter_map(|data| {
+                let term = data.terminator();
+                let TerminatorKind::Call { func, .. } = &term.kind else { return None };
+                is_residual_conversion(tcx, func).then_some(term.source_info.span.with_parent(None))
+            }).collect::<Vec<_>>();
+            sites.sort_by_key(|site| site.lo());
+            let [skipped, live] = sites.as_slice() else { panic!("expected two residual conversions: {sites:?}") };
+            // Pre-elaboration MIR contains both calls; only the second is
+            // reachable after the unconditional break in the first block.
+            assert_eq!(skipped.source_callsite(), live.source_callsite());
+            assert_eq!(facts.skipped_residuals, BTreeSet::from([*skipped]));
+            assert!(facts.residual_drops.iter().any(|drop| drop.site == *live && drop.path.as_deref() == Some("owner")));
+            assert!(facts.residual_drops.iter().all(|drop| drop.site != *skipped));
+            rustc_driver::Compilation::Stop
+        }
+    }
+
+    let sysroot = std::process::Command::new("rustc").args(["--print", "sysroot"]).output().unwrap();
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/checked_only_macro_residual_1929.rs");
+    let args = ["rustc", path, "--sysroot", std::str::from_utf8(&sysroot.stdout).unwrap().trim(),
+        "--edition=2024", "--crate-type=lib", "-Awarnings", "-Zmir-opt-level=0", "-Zmaximal-hir-to-mir-coverage"].map(str::to_owned);
+    rustc_driver::run_compiler(&args, &mut Check);
 }
 
 impl BodyFacts {
@@ -706,7 +765,9 @@ pub(crate) fn dropped_on_residual<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, fa
     facts.rows.iter().flat_map(|row| &row.facts).any(|event| {
         event.drop_route != DropRoute::Unwind
             && matches!(&event.fact, Fact::TempDrop { place, .. } if *place == TransientPlace::new(tcx, a.0)) &&
-            after_call(body, event.occurrence.at, |f| is_residual_conversion(tcx, f))
+            preceding_call(body, event.occurrence.at, |f| is_residual_conversion(tcx, f)).is_some_and(|call|
+                !facts.skipped_residuals.contains(&body.source_info(call).span.with_parent(None))
+                    && !facts.skipped_closure_returns.contains_key(&call.block))
     })
 }
 
@@ -1710,6 +1771,7 @@ struct Flow<'a, 'mir, 'tcx> {
 /// Raw init state of one move path over a set of locations.
 struct InitState {
     may_init: bool,
+    part_may_init: bool,
     may_uninit: bool,
     ever_init: bool,
     /// Descendant paths that are maybe-uninit / definitely uninit.
@@ -1921,6 +1983,7 @@ impl Flow<'_, '_, '_> {
         let desc = descendants(self.md, mpi);
         let mut s = InitState {
             may_init: false,
+            part_may_init: false,
             may_uninit: false,
             ever_init: false,
             sub_maybe: Vec::new(),
@@ -1977,6 +2040,7 @@ impl Flow<'_, '_, '_> {
                 }
             }
         }
+        s.part_may_init = !sub_init.is_empty();
         for d in sub_uninit {
             let payload = self.md.move_paths[d].parent == Some(mpi)
                 && self.md.move_paths[d].place.projection.last() == Some(&ProjectionElem::Deref);
@@ -4569,28 +4633,54 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     };
     let mut scope_partials: BTreeMap<_, Vec<_>> = BTreeMap::new();
     let mut binding_sources = Vec::new();
-    // Resolve fields of a temporary tuple through the operands that built
-    // it. Follow only single definitions, including MIR's staging locals.
+    // Resolve staging locals through single definitions. A projected
+    // write is ambiguous except for rustc's initialization of a vec!
+    // buffer, which is only followed through its conversion to Vec.
     let mut definitions = BTreeMap::new();
+    let mut vec_payloads = BTreeMap::new();
+    let vec_buffers: std::collections::HashSet<_> = body.basic_blocks.iter().filter_map(|b| cx.r.vec_buffer(b.terminator())).collect();
+    let vec_conversion = tcx.get_diagnostic_item(rustc_span::Symbol::intern("box_assume_init_into_vec_unsafe"));
+    let box_new = tcx.get_diagnostic_item(rustc_span::sym::box_new);
     for data in body.basic_blocks.iter() {
         for st in &data.statements {
             if let StatementKind::Assign(asg) = &st.kind {
                 if !cx.names.locals.contains_key(&asg.0.local) {
+                    let dest = asg.0;
+                    if vec_buffers.contains(&Place::from(dest.local)) && dest.projection.first() == Some(&ProjectionElem::Deref) {
+                        let buffer = body.local_decls[dest.local].ty.boxed_ty().unwrap();
+                        let payload = match &asg.1 {
+                            Rvalue::Aggregate(kind, ops) if matches!(**kind, AggregateKind::Array(_))
+                                && matches!(buffer.kind(), TyKind::Adt(_, args)
+                                    if args.type_at(0) == dest.ty(&body.local_decls, tcx).ty) => Some(ops),
+                            _ => None,
+                        };
+                        vec_payloads.entry(dest.local).and_modify(|def| *def = None).or_insert(payload);
+                        continue;
+                    }
                     definitions.entry(asg.0.local).and_modify(|def| *def = None)
-                        .or_insert(asg.0.projection.is_empty().then_some(&asg.1));
+                        .or_insert(asg.0.projection.is_empty().then_some(TempDefinition::Value(&asg.1)));
                 }
             }
         }
-        if let TerminatorKind::Call { destination, .. } = data.terminator().kind {
-            definitions.insert(destination.local, None);
+        if let TerminatorKind::Call { func, args, destination, .. } = &data.terminator().kind {
+            let def = match (destination.as_local(), func.const_fn_def(), args.as_ref()) {
+                (Some(_), _, _) if vec_buffers.contains(destination) => Some(TempDefinition::VecBuffer),
+                (Some(_), Some((id, _)), [arg]) => match arg.node {
+                    Operand::Move(p) if Some(id) == box_new => Some(TempDefinition::Box(p)),
+                    Operand::Move(p) if Some(id) == vec_conversion => Some(TempDefinition::Vec(p)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            definitions.entry(destination.local).and_modify(|prev| *prev = None).or_insert(def);
         }
     }
     let source_place = |mut p: Place<'tcx>| {
         let mut seen = BTreeSet::new();
         while !cx.is_user(p) && seen.insert(p.local) {
             let (op, suffix) = match definitions.get(&p.local).copied().flatten()? {
-                Rvalue::Use(op) => (op, &p.projection[..]),
-                Rvalue::Aggregate(kind, ops) if matches!(**kind, AggregateKind::Tuple) => {
+                TempDefinition::Value(Rvalue::Use(op)) => (op, &p.projection[..]),
+                TempDefinition::Value(Rvalue::Aggregate(kind, ops)) if matches!(**kind, AggregateKind::Tuple) => {
                     let (ProjectionElem::Field(f, _), rest) = p.projection.split_first()? else { return None };
                     (ops.get(*f)?, rest)
                 }
@@ -4600,13 +4690,93 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         cx.is_user(p).then_some(p)
     };
-    let try_span = |at| {
-        let span = body.source_info(at).span;
-        (span.desugaring_kind() == Some(rustc_span::DesugaringKind::QuestionMark))
-            .then(|| span.source_callsite())
+    let mut exposed = ExposedTemps::default();
+    exposed.visit_body(body);
+    let vec_elements = |mut buffer: Place<'tcx>| {
+        let mut seen = BTreeSet::new();
+        while let Some(local) = buffer.as_local().filter(|&l| seen.insert(l) && !exposed.0.contains(&l)) {
+            match definitions.get(&local).copied().flatten()? {
+                TempDefinition::VecBuffer => return vec_payloads.get(&local).copied().flatten(),
+                TempDefinition::Value(Rvalue::Use(Operand::Move(source))) => buffer = *source,
+                _ => return None,
+            }
+        }
+        None
     };
+    let staged_sources = |place: Place<'tcx>| {
+        let mut work = vec![(place, ResidualStaging::Operand)];
+        let mut seen = std::collections::HashSet::new();
+        let mut sources = Vec::new();
+        while let Some((p, staging)) = work.pop() {
+            if !seen.insert((p, staging)) || !ty_info(p.ty(&body.local_decls, tcx).ty).1 { continue; }
+            if cx.is_user(p) {
+                if column_projection(body, p, 0) { sources.push((p, staging)); }
+                continue;
+            }
+            if exposed.0.contains(&p.local) { continue; }
+            let Some(def) = definitions.get(&p.local).copied().flatten() else { continue };
+            let mut follow = |op: &Operand<'tcx>, suffix, staging| {
+                if let Operand::Move(source) = op {
+                    work.push((source.project_deeper(suffix, tcx), staging));
+                }
+            };
+            match def {
+                TempDefinition::Value(Rvalue::Use(op)) => follow(op, p.projection, staging),
+                TempDefinition::Value(Rvalue::Repeat(op, len))
+                    if p.projection.is_empty() && len.try_to_target_usize(tcx) == Some(1) =>
+                {
+                    follow(op, &[], ResidualStaging::Constructed);
+                }
+                TempDefinition::Value(Rvalue::Aggregate(kind, ops)) => {
+                    let mut projection = &p.projection[..];
+                    match **kind {
+                        AggregateKind::Tuple | AggregateKind::Array(_) => {}
+                        AggregateKind::Adt(did, variant, ..) => {
+                            let adt = tcx.adt_def(did);
+                            if adt.is_union() || adt.has_dtor(tcx) { continue; }
+                            if !projection.is_empty() && adt.is_enum() {
+                                let [ProjectionElem::Downcast(_, v), rest @ ..] = projection else { continue };
+                                if *v != variant { continue; }
+                                projection = rest;
+                            }
+                        }
+                        _ => continue,
+                    }
+                    match projection {
+                        [] => ops.iter().for_each(|op| follow(op, &[], ResidualStaging::Constructed)),
+                        [ProjectionElem::Field(field, _), rest @ ..] => {
+                            if let Some(op) = ops.get(*field) { follow(op, rest, staging); }
+                        }
+                        _ => {}
+                    }
+                }
+                TempDefinition::Box(source) if p.projection.is_empty() => work.push((source, ResidualStaging::Constructed)),
+                TempDefinition::Vec(buffer) if p.projection.is_empty() => {
+                    if let Some(ops) = vec_elements(buffer) {
+                        ops.iter().for_each(|op| follow(op, &[], ResidualStaging::Constructed));
+                    }
+                }
+                _ => {}
+            }
+        }
+        sources
+    };
+    let residual_site = |at: Location| {
+        let span = body.source_info(at).span;
+        if !span.is_desugaring(rustc_span::DesugaringKind::QuestionMark) { return None; }
+        let is_conversion = |loc: Location| loc == body.terminator_loc(loc.block)
+            && matches!(&body[loc.block].terminator().kind, TerminatorKind::Call { func, .. }
+                if is_residual_conversion(tcx, func));
+        let call = if is_conversion(at) { at } else {
+            preceding_call(body, at, |f| is_residual_conversion(tcx, f))?
+        };
+        Some((call, body.source_info(call).span.with_parent(None)))
+    };
+    let try_span = |at| residual_site(at).map(|(_, site)| site.source_callsite());
+    let residual_runs = |call: Location| executes_at(call.block) && !skipped_closure_returns.contains_key(&call.block);
     let mut residual_drops = Vec::new();
-    let mut record_residual = |rt: &mut Flow<'_, '_, 'tcx>, place: Place<'tcx>, site, at, after| {
+    let mut record_residual = |rt: &mut Flow<'_, '_, 'tcx>, place: Place<'tcx>, site, at, after,
+        flagged: &dyn Fn(Place<'tcx>) -> bool| {
         let LookupResult::Exact(root) = rt_md.rev_lookup.find(place.as_ref()) else { return };
         let at: Vec<_> = runtime_locations(at).collect();
         if at.is_empty() { return; }
@@ -4616,16 +4786,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let how = rest_how(rt, &at, after, root);
         residual_drops.push(ResidualDrop {
             local: place.local, site, path: cx.is_user(place).then(|| cx.name(place)).flatten(),
-            how, only_assigned: only_assigned(root), staged: false,
+            how, only_assigned: only_assigned(root), flag: flagged(place), staged: None,
         });
         if !cx.is_user(place) {
             // Some arguments already own the moved operand when a later
             // argument's question mark exits. The staged value's drop
             // is described on the source column.
-            if how == "drops" && matches!(definitions.get(&place.local).copied().flatten(), Some(Rvalue::Use(Operand::Move(_)))) {
-                if let Some(source) = source_place(place).filter(|p| column_projection(body, *p, 0)) {
+            if how == "drops" {
+                for (source, staging) in staged_sources(place) {
                     residual_drops.push(ResidualDrop {
-                        local: source.local, site, path: cx.name(source), how, only_assigned: false, staged: true,
+                        local: source.local, site, path: cx.name(source), how, only_assigned: false, flag: false, staged: Some(staging),
                     });
                 }
             }
@@ -4652,7 +4822,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
                 LookupResult::Parent(None) => continue,
             };
-            residual_drops.push(ResidualDrop { local: place.local, site, path: Some(path.clone()), how: field_how, only_assigned, staged: false });
+            residual_drops.push(ResidualDrop { local: place.local, site, path: Some(path.clone()), how: field_how, only_assigned, flag: flagged(*field), staged: None });
         }
     };
     let scope_site = |at| try_span(at).unwrap_or_else(|| cx.r.exit_span(at));
@@ -4716,7 +4886,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }).collect();
     let mut record_scope = |rt: &mut Flow<'_, '_, 'tcx>, local: Local, loc: Location,
                             sites: &[Location], after: bool, site: Option<Span>, storage: bool| {
-        let legs: Vec<_> = leg_entries.iter().filter(|(bb, _)| dom.dominates(*bb, loc.block)).map(|(_, span)| *span).collect();
+        let legs: Vec<_> = leg_entries.iter().filter(|(bb, _)| dom.is_reachable(loc.block) && dom.dominates(*bb, loc.block)).map(|(_, span)| *span).collect();
         let boundary = cx.r.line_hi(cx.r.span_of(loc));
         let row = site.map_or(boundary, |span| cx.r.line_lo(span));
         let mut parts = match rt_md.rev_lookup.find(Place::from(local).as_ref()) {
@@ -5211,12 +5381,19 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     }
                 }
                 if !at_reassign {
-                    if let Some(site) = exit.and_then(try_span) {
-                        record_residual(&mut rt, *place, site, loc, false);
+                    drop_init.seek_before_primary_effect(loc);
+                    drop_uninit.seek_before_primary_effect(loc);
+                    // An untracked field is dropped with its parent and
+                    // shares the parent's flag when that drop is guarded.
+                    let flagged = |p: Place<'tcx>| matches!(drop_md.rev_lookup.find(p.as_ref()),
+                        LookupResult::Exact(path) | LookupResult::Parent(Some(path))
+                        if drop_init.get().contains(path) && drop_uninit.get().contains(path));
+                    if let Some((_, site)) = exit.and_then(residual_site).filter(|(call, _)| residual_runs(*call)) {
+                        record_residual(&mut rt, *place, site, loc, false, &flagged);
                     }
                     for (_, at) in shared {
-                        if let Some(site) = try_span(*at) {
-                            record_residual(&mut rt, *place, site, *at, true);
+                        if let Some((_, site)) = residual_site(*at).filter(|(call, _)| residual_runs(*call)) {
+                            record_residual(&mut rt, *place, site, *at, true, &flagged);
                         }
                     }
                 }
@@ -5623,6 +5800,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             // fields' history says.
             if !declared(place.local) {
                 continue;
+            }
+            if runtime.is_some() && rt_here.as_ref().is_some_and(|r| r.may_uninit && !r.may_init && !r.part_may_init) {
+                st.runtime_empty.insert((place.local, name.clone()));
             }
             if !rt_exits.is_empty() && place.ty(&body.local_decls, tcx).ty.needs_drop(tcx, typing_env) {
                 if let Some((all, unwind)) = next_assignment(*place, rt_exits, after) {
@@ -6831,12 +7011,23 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         });
     }
 
+    // A residual site can be lowered more than once. Suppress its drop
+    // wording only when none of the checked copies can execute.
+    let mut residual_sites = BTreeMap::<_, bool>::new();
+    for &bb in &checked {
+        let TerminatorKind::Call { func, .. } = &body[bb].terminator().kind else { continue };
+        if is_residual_conversion(tcx, func) {
+            if let Some((call, site)) = residual_site(body.terminator_loc(bb)) {
+                *residual_sites.entry(site).or_default() |= residual_runs(call);
+            }
+        }
+    }
     // Read the MIR continuation before its first store or drop.
     let mut joins = rustc_data_structures::fx::FxIndexMap::default();
     let boundaries = super::control::conditional_joins(tcx, body, &cx.rows, &branch_spans.conditionals,
         &checked, &cx.names.bindings, &switches);
     for (id, at) in boundaries.iter().copied() {
-        if !runs.contains(&at.block) { continue; }
+        if !checked.contains(&at.block) { continue; }
         let span = tcx.hir_span(id);
         let mut preds: Vec<_> = if at.statement_index == 0 {
             body.basic_blocks.predecessors()[at.block].iter()
@@ -6858,9 +7049,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let incoming: Vec<_> = preds.iter().copied().filter(|&from| edge_runs(from)).collect();
         // Runtime dataflow reads every executable copy of an edge's source;
         // a constant condition or range can leave a checked edge dead.
-        let edge_executes = |from: Location| edge_runs(from) && executes_at(from.block);
-        let runtime_incoming: Vec<_> = incoming.iter().copied().flat_map(runtime_locations).collect();
-        if incoming.is_empty() { continue; }
+        let executes = &executes;
+        let runtime_rows = &runtime_rows;
+        let runtime_edge = |from: Location| runtime_locations(from).filter(move |&copy|
+            runtime_rows.real_succs(copy).into_iter().any(|to| executes.contains(&to.block)
+                && original_location(to) == at));
+        let edge_executes = |from| runtime_edge(from).next().is_some();
+        let runtime_incoming: Vec<_> = incoming.iter().copied().flat_map(runtime_edge).collect();
+        let checked_only = runtime_incoming.is_empty();
+        if preds.is_empty() { continue; }
         let completed_local = body.basic_blocks[at.block].statements.get(at.statement_index).and_then(|first| {
             let StatementKind::FakeRead(read) = &first.kind else { return None };
             let (rustc_middle::mir::FakeReadCause::ForLet(_), place) = &**read else { return None };
@@ -6911,10 +7108,41 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         let unshared = preds.len() == block_pred_count;
         let mut state = if unshared {
-            state_at(&[at], false, false, None, None)
+            state_at(&[at], false, false, checked_only.then_some(&[][..]), None)
         } else {
             state_at(&preds, true, false, Some(&runtime_incoming), None)
         };
+        // A nested join can exist only on a skipped edge. Its enclosing
+        // continuation can still run. Follow MIR jumps across bookkeeping
+        // only, so state at the continuation cannot describe a later move.
+        let mut empty_at_runtime = BTreeSet::new();
+        if checked_only {
+            let mut next = at;
+            let mut seen = BTreeSet::new();
+            while seen.insert(next) {
+                let runtime: Vec<_> = runtime_locations(next).collect();
+                if !runtime.is_empty() {
+                    empty_at_runtime = state_at(&[at], false, false, Some(&runtime), None).runtime_empty
+                        .into_iter().filter_map(|(local, name)|
+                            (state.locals.get(&name) == Some(&Some(local))).then_some(name))
+                        .collect();
+                    break;
+                }
+                let data = &body[next.block];
+                if !data.statements[next.statement_index..].iter().all(|st| match &st.kind {
+                    StatementKind::StorageLive(l) | StatementKind::StorageDead(l) =>
+                        !body.local_decls[*l].is_user_variable(),
+                    StatementKind::Assign(a) => a.0.as_local().is_some_and(|l| !body.local_decls[l].is_user_variable())
+                        && matches!(&a.1, Rvalue::Use(Operand::Constant(c)) if c.ty().is_unit()),
+                    StatementKind::Nop => true,
+                    _ => false,
+                }) {
+                    break;
+                }
+                let TerminatorKind::Goto { target } = data.terminator().kind else { break };
+                next = target.start_location();
+            }
+        }
 
         let tests: Vec<_> = match tcx.hir_node(id) {
             rustc_hir::Node::Expr(e) => match e.kind {
@@ -6977,7 +7205,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let if_edges = preds.len() >= 2 && preds.iter().all(|p| body.source_info(*p).span == span);
         let edge_states: Vec<_> = preds.iter().map(|&from| {
             let executable = edge_executes(from);
-            let runtime: Vec<Location> = if executable { runtime_locations(from).collect() } else { Vec::new() };
+            let runtime: Vec<Location> = runtime_edge(from).collect();
             // A sole checked predecessor includes its normal return effect
             // at the destination (a Call initializes its result there).
             let mut edge_state = if unshared && preds.len() == 1 {
@@ -7108,7 +7336,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             s.source_info.span == span.shrink_to_hi() && matches!(&s.kind, StatementKind::Assign(a)
                 if a.0.ty(&body.local_decls, tcx).ty.is_unit()))).peekable();
         let dead_implicit_else = implicit_else.peek().is_some() && implicit_else.all(|&p| !edge_runs(p));
-        joins.insert(id, Join { at, state, incoming: edge_states, changes, assignments, unchanged_shared_refs, dead_implicit_else });
+        joins.insert(id, Join { at, state, incoming: edge_states, checked_only, empty_at_runtime, changes, assignments, unchanged_shared_refs, dead_implicit_else });
     }
     // NLL may have already released the old value at a later reassignment.
     // Find the stores that actually reach the write, stopping on each path
@@ -7291,6 +7519,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         scope_ends,
         value_flow,
         residual_drops,
+        skipped_residuals: residual_sites.into_iter().filter_map(|(site, runs)| (!runs).then_some(site)).collect(),
         short_call_borrows,
         drop_holders,
         reassign_drop_loans,

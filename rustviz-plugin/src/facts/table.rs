@@ -135,6 +135,8 @@ pub struct JoinCell {
     pub maybe_empty_box: bool,
     /// The same shared reference value is present at entry and at the join.
     pub shared_ref_unchanged: Option<SharedReferenceJoin>,
+    pub checked_only: bool,
+    pub empty_at_runtime: bool,
 }
 
 type Cells = BTreeMap<String, Cell>;
@@ -240,13 +242,19 @@ struct ArmBoundaryCells {
 }
 
 type ScopePartials = BTreeMap<(Option<(rustc_span::BytePos, rustc_span::BytePos)>, rustc_middle::mir::Local, String), Option<PartialDrop>>;
-type TryDrops = BTreeMap<(rustc_middle::mir::Local, rustc_span::BytePos, rustc_span::BytePos, Option<String>), Option<(&'static str, bool)>>;
+type TryDropKey = (rustc_middle::mir::Local, rustc_span::Span, Option<String>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TryDrop {
+    pub how: &'static str,
+    pub only_assigned: bool,
+    pub flag: bool,
+}
 
 #[derive(Debug, Default)]
 struct DropWording {
     scope_partials: BTreeMap<usize, ScopePartials>,
-    try_drops: TryDrops,
-    staged_try_drops: TryDrops,
+    try_drops: BTreeMap<TryDropKey, Option<TryDrop>>,
 }
 
 impl DropWording {
@@ -267,9 +275,9 @@ impl DropWording {
                 record(parts, (site.map(|s| (s.lo(), s.hi())), *local, name.clone()), partial.clone());
             }
         }
-        for drop in &body.residual_drops {
-            let map = if drop.staged { &mut wording.staged_try_drops } else { &mut wording.try_drops };
-            record(map, (drop.local, drop.site.lo(), drop.site.hi(), drop.path.clone()), (drop.how, drop.only_assigned));
+        for drop in body.residual_drops.iter().filter(|drop| drop.staged.is_none()) {
+            let key = (drop.local, drop.site, drop.path.clone());
+            record(&mut wording.try_drops, key, TryDrop { how: drop.how, only_assigned: drop.only_assigned, flag: drop.flag });
         }
         wording
     }
@@ -610,11 +618,10 @@ impl StateTable {
 
     /// A drop on the residual edge of this compiler span, scoped to the
     /// exact local even when different bindings share a column.
-    pub fn try_drop(&self, function: FunctionStart, column: &str, local: rustc_middle::mir::Local, span: rustc_span::Span) -> Option<(&'static str, bool)> {
+    pub fn try_drop(&self, function: FunctionStart, column: &str, local: rustc_middle::mir::Local, span: rustc_span::Span) -> Option<TryDrop> {
         let wording = self.drop_wording.get(&function.body)?;
-        let key = (local, span.lo(), span.hi(), Some(column.to_owned()));
-        wording.staged_try_drops.get(&key).or_else(|| wording.try_drops.get(&key))
-            .or_else(|| wording.try_drops.get(&(local, span.lo(), span.hi(), None))).copied().flatten()
+        let key = (local, span, Some(column.to_owned()));
+        wording.try_drops.get(&key).or_else(|| wording.try_drops.get(&(local, span, None))).copied().flatten()
     }
 
     pub fn partial_drop(&self, function: FunctionStart, column: &str, row: usize, local: rustc_middle::mir::Local, site: Option<rustc_span::Span>) -> Option<&PartialDrop> {
@@ -1059,7 +1066,8 @@ fn body_joins(b: &BodyFacts) -> BodyJoins {
             let change = join.changes.get(&name).copied().unwrap_or_default();
             let maybe_empty_box = join.state.maybe_empty_box.contains(&name);
             let shared_ref_unchanged = cell.local.and_then(|local| join.unchanged_shared_refs.get(&local).copied());
-            (name, JoinCell { cell, change, maybe_empty_box, shared_ref_unchanged })
+            let empty_at_runtime = join.empty_at_runtime.contains(&name);
+            (name, JoinCell { cell, change, maybe_empty_box, shared_ref_unchanged, checked_only: join.checked_only, empty_at_runtime })
         }).collect();
         (id, places)
     }).collect();
@@ -1102,6 +1110,7 @@ mod tests {
             scope_ends: Default::default(),
             value_flow: Default::default(),
             residual_drops: Vec::new(),
+            skipped_residuals: BTreeSet::new(),
             short_call_borrows: Default::default(),
             drop_holders: Default::default(),
             reassign_drop_loans: Default::default(),

@@ -1292,18 +1292,27 @@ pub fn try_drop_with_other_events(drop_text: &str) -> Option<String> {
 // The same for a variable that holds a value on some paths only (moved,
 // or given one, in some branches above, #1194): its drop flag decides
 // whether the early return drops it.
-pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str, only_assigned: Option<bool>) -> String {
+pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str, only_assigned: bool, flag: bool) -> String {
     let name = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
-    let condition = if only_assigned == Some(true) {
+    let condition = if only_assigned {
         "the branch that ran assigned it".to_owned()
     } else {
         format!("{name} still holds it")
     };
-    let flag = if only_assigned.is_some() { " (Rust tracks this with a runtime drop flag)" } else { "" };
+    let flag = if flag { " (Rust tracks this with a runtime drop flag)" } else { "" };
     format!(
         "If the `?` here returns early, {name}'s resource{holds} is dropped{rest} if {condition}{flag}. \
          If the `?` succeeds, nothing happens to {name} here.",
+    )
+}
+
+pub fn event_dot_staged_drop_if_try_returns(my_name: &String, note: &str) -> String {
+    let name = styled_name_html(my_name);
+    let (holds, rest) = split_drop_note(note);
+    format!(
+        "If the `?` here returns early, it drops the value{holds} moved from {name} into the temporary{rest}. \
+         If the `?` succeeds, that value isn't dropped by the `?`."
     )
 }
 

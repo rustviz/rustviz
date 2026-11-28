@@ -13,6 +13,7 @@ use crate::expr_visitor_utils::*;
 use crate::svg_generator::data::*;
 use rustc_middle::mir::Local;
 use rustc_middle::ty::adjustment::*;
+use rustc_span::Span;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 
@@ -2675,10 +2676,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // rustc lowers the residual arm to either a return or a break to the
     // exact enclosing try block. The operand move above happens in both cases.
     let ExprKind::Match(_, arms, _) = try_expr.kind else { return };
-    let block = arms.iter().find_map(|arm| match arm.body.kind {
-      ExprKind::Break(dest, _) => dest.target_id.ok(),
+    let Some((block, span)) = arms.iter().find_map(|arm| match arm.body.kind {
+      ExprKind::Break(dest, Some(call)) => Some((dest.target_id.ok(), call.span.with_parent(None))),
+      ExprKind::Ret(Some(call)) => Some((None, call.span.with_parent(None))),
       _ => None,
-    });
+    }) else { return };
+    if self.body_facts.is_some_and(|facts| facts.skipped_residuals.contains(&span)) {
+      return;
+    }
     let (locals_from, tuples_from, iterators_from) = if let Some(id) = block {
       let Some(scope) = self.try_block.filter(|s| s.id == id) else { return };
       (scope.locals, scope.tuples, scope.iterators)
@@ -2719,19 +2724,48 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       if rap.drops_nothing() {
         continue;
       }
-      let span = try_expr.span.source_callsite();
-      let dup = self.preprocessed_events.iter().any(|(_, e)|
-        matches!(e, ExternalEvent::OwnerDropIfTryReturns { ro, span: site, .. } if *ro == rap && *site == span));
-      if dup {
-        continue;
+      // A call argument can be evaluated before the `?` even if its
+      // transfer is drawn later by the call visitor.
+      let staged_operand = self.body_facts.zip(rap.owner_local()).is_some_and(|(facts, local)| {
+        facts.residual_drops.iter().any(|drop| drop.site == span && drop.local == local
+          && drop.path.as_ref() == Some(rap.name()) && drop.staged == Some(crate::facts::ResidualStaging::Operand))
+      });
+      if staged_operand {
+        self.note_try_drop(line, rap.clone(), span, true);
       }
-      let id = *self.unique_id;
-      *self.unique_id += 1;
-      self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro: rap, span, id });
+      self.note_try_drop(line, rap, span, false);
     }
     while let Some(t) = tuples.pop() {
       self.drop_tuple_if_try_returns(&t, line);
     }
+    // The temporary can outlive the binding that supplied its value,
+    // or that binding can now hold a different value.
+    if let Some(facts) = self.body_facts {
+      for drop in facts.residual_drops.iter().filter(|drop|
+        drop.staged == Some(crate::facts::ResidualStaging::Constructed) && drop.site == span)
+      {
+        let Some(rd) = drop.path.as_ref().and_then(|path| self.raps.place(drop.local, path)) else { continue };
+        let ro = rd.rap.clone();
+        if facts.residual_drops.iter().any(|current| current.staged.is_none() && current.site == span
+          && current.local == drop.local && current.path == drop.path && current.how != "nothing_to_drop")
+        {
+          self.note_try_drop(line, ro.clone(), span, false);
+        }
+        self.note_try_drop(line, ro, span, true);
+      }
+    }
+  }
+
+  fn note_try_drop(&mut self, line: usize, ro: ResourceAccessPoint, span: Span, staged: bool) {
+    if self.preprocessed_events.iter().any(|(_, event)| matches!(event,
+      ExternalEvent::OwnerDropIfTryReturns { ro: existing, span: site, staged: was_staged, .. }
+      if *existing == ro && *site == span && *was_staged == staged))
+    {
+      return;
+    }
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    self.add_external_event(line, ExternalEvent::OwnerDropIfTryReturns { ro, span, staged, id });
   }
 
   /// The drop of the live tuple scrutinee `t` if the `?` on `line`
@@ -3655,7 +3689,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let drop = match e {
           ExternalEvent::TemporaryDrop { ro, id, .. } if !this.exit_drops.contains(id) => Some((ro, *id, None)),
           ExternalEvent::GoOutOfScope { ro, id, exit_site, .. } => Some((ro, *id, *exit_site)),
-          ExternalEvent::OwnerDropIfTryReturns { ro, id, span } => Some((ro, *id, Some(*span))),
+          ExternalEvent::OwnerDropIfTryReturns { ro, id, span, .. } => Some((ro, *id, Some(*span))),
           _ => None,
         };
         if let Some((ro, id, site)) = drop {

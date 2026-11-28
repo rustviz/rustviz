@@ -32,6 +32,10 @@ struct PendingDot {
     /// set for a lend to a function (`f(&s)`), so the call's own line
     /// ("f reads from s") can go right after it.
     lines: Vec<(Option<usize>, String)>,
+    /// The temporary already received the value before its residual drop.
+    staged_drop_lines: Vec<(Option<usize>, String)>,
+    /// A binding can hold a replacement when its earlier value is dropped.
+    replacement_drop_lines: Vec<(Option<usize>, String)>,
     /// Some event here drops a resource: draw the drop triangle.
     drop: bool,
     /// An event dot is drawn here (not just a function call).
@@ -137,7 +141,8 @@ impl DotLayer {
         let i = *self.at.entry((hash, x, y)).or_insert_with(|| {
             dots.push(PendingDot {
                 hash, x, y, owner_key, is_member,
-                lines: Vec::new(), drop: false, event: false, call: false, never_initialized: false,
+                lines: Vec::new(), staged_drop_lines: Vec::new(), replacement_drop_lines: Vec::new(),
+                drop: false, event: false, call: false, never_initialized: false,
                 var: column.name.clone(), row, events: Vec::new(), notes: Vec::new(),
             });
             dots.len() - 1
@@ -392,8 +397,13 @@ fn render_pending_dot(dot: &PendingDot, registry: &Handlebars) -> String {
         } else {
             format!("A preceding closure call never returns, so {name} is never initialized and has no value to drop")
         }
-    } else {
+    } else if dot.staged_drop_lines.is_empty() && dot.replacement_drop_lines.is_empty() {
         with_approx_notes(merged_dot_title(&dot.lines), &dot.notes)
+    } else {
+        let mut lines = dot.lines.clone();
+        lines.extend(dot.staged_drop_lines.iter().cloned());
+        lines.extend(dot.replacement_drop_lines.iter().cloned());
+        with_approx_notes(merged_dot_title(&lines), &dot.notes)
     };
     let (cx, cy) = (dot.x, dot.y);
     let kind = if dot.event { rv_attrs::DOT } else { rv_attrs::CALL };
@@ -1617,17 +1627,41 @@ fn render_branch_dots(
             mixed.may_hold_value && !is_branch_temp_col(rap)));
         // The irrefutable-pattern join already explains which arm ran.
         let runtime_assigned = join.map(|j| &j.cell).filter(|c| c.always_assigned && !branch_history.iter().any(|b| b.imaginary.is_some()));
-        let title = if field_initialized {
+        let title = if let Some(j) = join.filter(|j| j.checked_only
+            && (j.cell.init == Init::Maybe || j.change.wrote || j.change.moved || field_initialized))
+        {
+            let name = styled_name_html(rap.name());
+            let reassign = if rap.is_mut() { " until it's assigned again" } else { "" };
+            let checked = match j.cell.init {
+                Init::Maybe if matches!(j.cell.cause, Some("moved" | "imaginary")) =>
+                    format!("{}{reassign}", hover_messages::event_dot_borrowck_maybe_moved(rap.name())),
+                Init::Maybe => format!("The borrow checker can't prove that {name} holds a value here, so {name} can't be used here{reassign}"),
+                Init::Own => format!("The borrow checker treats {name} as initialized here"),
+                Init::Partly => format!("The borrow checker treats {name} as partly moved here"),
+                Init::Moved => format!("The borrow checker treats {name} as moved here, so {name} can't be used here{reassign}"),
+                Init::Unassigned => format!("The borrow checker treats {name} as uninitialized here"),
+            };
+            let mut title = format!("{checked}. This join is skipped at runtime.");
+            if j.cell.init == Init::Own {
+                if j.change.writes_on_all_paths {
+                    title.push_str(&format!(" Every checked path to this join assigns {name}."));
+                } else if !j.change.moved {
+                    title.push_str(&format!(" The branches reaching this join don't move {name}."));
+                }
+            }
+            if j.empty_at_runtime {
+                title.push_str(&format!(" No resource remains in {name} on the paths that run."));
+            }
+            Some(title)
+        } else if field_initialized {
             let kind = if rap.is_mutref() { "a mutable" } else { "an immutable" };
             Some(format!("{} holds {kind} reference after the short-circuit expression.", styled_name_html(rap.name())))
         } else if imaginary_join.is_some() {
             imaginary_join
         } else if let Some(cell) = runtime_assigned {
             Some(hover_messages::event_dot_runtime_assigned(rap.name(), !rap.drops_nothing(), rap.is_mut(), cell.reassigned, &rap.drop_note()))
-        } else if join.is_some_and(|j| j.cell.partial_without_drop) {
-            Some(format!("{}. No resource remains in {} on the paths that run.",
-                hover_messages::event_dot_borrowck_maybe_moved(rap.name()), styled_name_html(rap.name())))
-        } else if join.is_some_and(|j| j.cell.borrowck_maybe && j.cell.init == Init::Moved && !staged) {
+        } else if join.is_some_and(|j| j.cell.partial_without_drop
+            || j.cell.borrowck_maybe && j.cell.init == Init::Moved && !staged) {
             // Every path that runs moved it; the checker also counts a
             // path (a dead branch) that kept it. The dot is drawn
             // because that branch's line still reaches the join.
@@ -2489,19 +2523,24 @@ fn render_dot(
                     let cx = timeline_data.x_val;
                     let cy = event_y;
                     let try_drop = match event {
-                        Event::OwnerDropIfTryReturns { local: Some(local), span, .. } =>
+                        Event::OwnerDropIfTryReturns { local: Some(local), span, staged: false, .. } =>
                             visualization_data.fn_source_lines.get(hash).and_then(|&function|
                                 visualization_data.state_table.try_drop(function, &name, *local, *span)),
                         _ => None,
                     };
-                    if matches!(try_drop, Some(("nothing_to_drop", _))) {
+                    if try_drop.as_ref().is_some_and(|drop| drop.how == "nothing_to_drop") {
                         continue;
                     }
+                    let staged_drop = matches!(event, Event::OwnerDropIfTryReturns { staged: true, .. });
+                    let has_staged_drop = matches!(event, Event::OwnerDropIfTryReturns { span, staged: false, .. }
+                        if history.iter().any(|(_, other)| matches!(other,
+                            Event::OwnerDropIfTryReturns { span: site, staged: true, .. } if span == site)));
+                    if has_staged_drop && try_drop.is_none() { continue; }
                     let try_variant_drop = (|| {
-                        let Event::OwnerDropIfTryReturns { local: Some(local), span, .. } = event else { return None; };
+                        let Event::OwnerDropIfTryReturns { local: Some(local), span, staged: false, .. } = event else { return None; };
                         let function = *visualization_data.fn_source_lines.get(hash)?;
                         let row = rv_attrs::line_of(*line_number, &visualization_data.row_lines)?;
-                        visualization_data.state_table.partial_drop(function, &name, row, *local, Some(*span))
+                        visualization_data.state_table.partial_drop(function, &name, row, *local, Some(span.source_callsite()))
                             .filter(|split| !split.variant_drops.is_empty() && split.drops_resource)
                     })();
                     // A reassignment, or the drop at a `?`'s early return,
@@ -2525,7 +2564,9 @@ fn render_dot(
                     let conditional_drop = matches!(event, Event::OwnerDropAtReassign { .. }).then(||
                         visualization_data.fn_source_lines.get(hash).zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines))
                             .and_then(|(&f, src)| visualization_data.state_table.conditional_reassignment_drop(f, &name, src))).flatten();
-                    let mut title = if matches!(event, Event::OwnerDropAtReassign { payload: true, parts: None, maybe_moved: false, maybe_init: None, contents_gone: false, .. }) {
+                    let mut title = if staged_drop {
+                        hover_messages::event_dot_staged_drop_if_try_returns(&name, &note)
+                    } else if matches!(event, Event::OwnerDropAtReassign { payload: true, parts: None, maybe_moved: false, maybe_init: None, contents_gone: false, .. }) {
                         hover_messages::event_dot_replace_at_place(&name)
                     } else if box_paths {
                         // A Box whose contents were moved out, given a
@@ -2662,10 +2703,10 @@ fn render_dot(
                     } else if matches!(event, Event::OwnerDropIfTryReturns { .. })
                         && visualization_data.timelines[hash].resource_access_point.box_contents_moved() {
                         hover_messages::event_dot_box_drop_if_try_returns(&name)
-                    } else if let Some(("drops_if_init", only_assigned)) = try_drop {
-                        hover_messages::event_dot_owner_drop_if_try_returns_maybe(&name, &note, Some(only_assigned))
+                    } else if let Some(drop) = try_drop.as_ref().filter(|drop| drop.how == "drops_if_init") {
+                        hover_messages::event_dot_owner_drop_if_try_returns_maybe(&name, &note, drop.only_assigned, drop.flag)
                     } else if matches!(event, Event::OwnerDropIfTryReturns { .. }) && try_drop.is_none() {
-                        hover_messages::event_dot_owner_drop_if_try_returns_maybe(&name, &note, None)
+                        hover_messages::event_dot_owner_drop_if_try_returns_maybe(&name, &note, false, false)
                     } else if let Event::OwnerDropUnlessReturned { is_break } = event {
                         // A ManuallyDrop has nothing to drop either (#1137).
                         let value = visualization_data.timelines[hash].resource_access_point.drops_nothing();
@@ -2682,6 +2723,9 @@ fn render_dot(
                         hover_messages::event_dot_owner_drop_at_reassign(&name, &note)
                     };
                     if let Event::OwnerDropIfTryReturns { span, .. } = event {
+                        if has_staged_drop {
+                            title = hover_messages::try_drop_with_other_events(&title).unwrap_or(title);
+                        }
                         let sites: BTreeSet<_> = history.iter().filter_map(|(r, e)| match e {
                             Event::OwnerDropIfTryReturns { span, .. } if r == line_number => Some(span.lo()),
                             _ => None,
@@ -2720,6 +2764,18 @@ fn render_dot(
                     // so, no drop triangle (#1138).
                     let drops_nothing = matches!(event, Event::OwnerDropAtReassign { parts: Some(p), .. }
                         if p.dropped.is_empty() && p.maybe_moved.is_empty());
+                    if staged_drop || has_staged_drop {
+                        // The source column explains the staged drop. A
+                        // triangle there belongs to the binding's own drop.
+                        let dot = dots.entry(*hash as u64, cx, cy, *line_number, timeline_data);
+                        if staged_drop {
+                            dot.staged_drop_lines.push((None, title));
+                        } else {
+                            dot.replacement_drop_lines.push((None, title));
+                        }
+                        dots.add_event(*hash as u64, cx, cy, timeline_data, String::new(), has_staged_drop, None, rv_attrs::event_name(event), *line_number);
+                        continue;
+                    }
                     if drops_nothing {
                         data.title = title;
                     } else {
