@@ -9199,9 +9199,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       for to in lenders {
         let id = *self.unique_id;
         *self.unique_id += 1;
-        if let Some(payload) = self.raps.pattern_local(&name, arm.pat)
+        if let Some((_, parent, kind)) = self.raps.pattern_local(&name, arm.pat)
           .and_then(|l| crate::facts::call_wording::payload_borrow(self.tcx, self.mir_body, l, &self.raps.bindings)) {
-          self.row_layout.pattern_payloads.insert(id, payload);
+          self.row_layout.pattern_payloads.insert(id, (parent, kind));
         }
         let mut ext_ev = self.ext_ev_of_evt(e.clone(), to, from.clone(), id, false);
         if slot_loan.is_some() {

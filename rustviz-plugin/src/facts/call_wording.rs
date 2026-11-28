@@ -203,7 +203,7 @@ pub(crate) fn payload_borrow<'tcx>(
     body: &Body<'tcx>,
     local: Local,
     bindings: &BodyBindings,
-) -> Option<(String, &'static str)> {
+) -> Option<(Local, String, &'static str)> {
     let mut defs = body
         .basic_blocks
         .iter()
@@ -242,5 +242,5 @@ pub(crate) fn payload_borrow<'tcx>(
         rustc_middle::mir::BorrowKind::Mut { .. } => "mutable",
         _ => return None,
     };
-    Some((parent, kind))
+    Some((p.local, parent, kind))
 }

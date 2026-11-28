@@ -1284,6 +1284,10 @@ pub struct Row {
     /// Used for the straight segment that meets it, including at CFG joins.
     #[serde(skip)]
     pub before: Option<State>,
+    /// Incoming states for scoped columns, restricted to MIR entries on
+    /// which their storage may be live. Each state describes one column.
+    #[serde(skip)]
+    pub(crate) before_scope_end: BTreeMap<String, State>,
     /// Whether any of this row's forward incoming edges can execute.
     #[serde(skip)]
     pub runtime_entry: Option<bool>,

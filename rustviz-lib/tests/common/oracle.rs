@@ -1196,7 +1196,7 @@ fn claims(pts: &Points, d: &Drawing, skips: &mut Skips) -> Vec<Claim> {
                     // title explains why borrowck rejects a read (Q5).
                     if PARTLY_MOVED.iter().any(|m| s.tip.contains(m)) {
                         Drawn::PartlyMoved
-                    } else if s.tip.contains("may have been moved out") || s.tip.contains("value was moved out") || s.tip.contains(IMAGINARY_MOVE) {
+                    } else if s.tip.contains("may have been moved out") || s.tip.contains("was moved out, so it can't be used here") || s.tip.contains(IMAGINARY_MOVE) {
                         Drawn::Moved
                     } else {
                         Drawn::Unassigned

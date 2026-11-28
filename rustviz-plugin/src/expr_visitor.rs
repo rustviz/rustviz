@@ -459,6 +459,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub end_loans: BTreeMap<usize, Vec<usize>>,
   /// Renderer event to the precise loan issued while evaluating an aggregate.
   pub aggregate_issues: BTreeMap<usize, usize>,
+  pub(crate) shared_aggregate_reborrows: BTreeMap<rustc_middle::mir::Location, (usize, String)>,
   /// Renderer event to the MIR write that delivered the result.
   pub closure_result_arrivals: BTreeMap<usize, rustc_middle::mir::Location>,
   /// Operand arrows whose loan need not have been taken on the path to its end.
@@ -1249,6 +1250,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       emitting_expr: None,
       end_loans: BTreeMap::new(),
       aggregate_issues: BTreeMap::new(),
+      shared_aggregate_reborrows: BTreeMap::new(),
       closure_result_arrivals: BTreeMap::new(),
       conditional_aggregate_ends: Vec::new(),
       row_layout: Default::default(),
@@ -9523,14 +9525,20 @@ pub(crate) fn scope_event(&mut self, ro: ResourceAccessPoint, layout_end: usize,
         } else {
             crate::facts::ScopeEnd::across(candidates)
         };
-        if let Some(end) = end {
-            line = if self.dead_ends.contains_key(&layout_end) { layout_end } else { end.boundary };
-            exit_site = end.site;
-            self.row_layout.scope_ends.insert(id, end);
-        } else if ends.is_empty() && facts.scope_ends.unreached_boundaries.contains(&local) {
+        // A destructor reached only through an early exit belongs to
+        // that exit. At the checked-only lexical boundary, keep just
+        // the scope marker. Storage-only and empty ends can still
+        // explain what happened to the binding on its actual exit.
+        let early_drop = end.as_ref().is_some_and(|end| end.site.is_some() && matches!(end.effect,
+            crate::facts::ScopeDrop::Whole | crate::facts::ScopeDrop::Remaining | crate::facts::ScopeDrop::Conditional));
+        if (ends.is_empty() || early_drop) && facts.scope_ends.unreached_boundaries.contains(&local) {
             let boundary = facts.scope_ends.boundaries[&local].source_callsite();
             line = self.tcx.sess.source_map().lookup_char_pos(boundary.hi()).line;
             self.row_layout.unreachable_scope_ends.insert(id, true);
+        } else if let Some(end) = end {
+            line = if self.dead_ends.contains_key(&layout_end) { layout_end } else { end.boundary };
+            exit_site = end.site;
+            self.row_layout.scope_ends.insert(id, end);
         } else if !self.dead_ends.contains_key(&layout_end) {
             let calls = facts.scope_ends.terminal_calls.get(&local)?;
             let mut reachable = calls.iter().filter(|(site, _)| leg.is_none_or(|span| span.contains(*site)));
@@ -12062,6 +12070,22 @@ pub fn match_rhs_path(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
       }
       if self.ref_into_holder_value(&lhs, &rhs_rap, rhs, line_num) {
         return;
+      }
+      if matches!(evt, Evt::Copy) && lhs.is_ref() && lhs.extract_rap().is_some_and(|r| r.is_member()) {
+        if let Some((loan, _)) = self.operand_loan(rhs) {
+          let reborrow = loan.issue.filter(|&at| self.bwf.body[at.block].statements.get(at.statement_index)
+            .is_some_and(|st| matches!(&st.kind, rustc_middle::mir::StatementKind::Assign(pair)
+              if matches!(pair.1, rustc_middle::mir::Rvalue::Ref(_, rustc_middle::mir::BorrowKind::Shared, place)
+                if Some(place.local) == rhs_rap.ref_local()
+                  && place.projection.as_slice() == [rustc_middle::mir::ProjectionElem::Deref]))));
+          if let Some(at) = reborrow.filter(|_| !loan.made_through.is_empty()) {
+            use crate::svg_generator::hover_messages::styled_name_html;
+            let holder = styled_name_html(rhs_rap.name());
+            let field = styled_name_html(&lhs.name());
+            let title = format!("A shared reborrow through {holder} creates the reference stored in {field}. The borrowed place stays where it is.");
+            self.shared_aggregate_reborrows.insert(at, (*self.unique_id, title));
+          }
+        }
       }
       self.add_ev(line_num, evt, lhs, ResourceTy::Value(rhs_rap), false);
     }

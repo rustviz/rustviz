@@ -6322,6 +6322,38 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }).collect();
     let iterator_move_edges: Vec<_> = item_moves.iter().flat_map(|(&(storage, _), &at)|
         cx.r.real_succs(at).into_iter().map(move |to| (storage, at, to))).collect();
+    let mut entries: BTreeMap<usize, BTreeSet<Location>> = BTreeMap::new();
+    let start = Location::START;
+    entries.entry(cx.row_of(start)).or_default().insert(start);
+    for (&from, &row) in &cx.rows.row {
+        if !runs.contains(&from.block) { continue; }
+        for to in cx.r.real_succs(from) {
+            if let Some(&next) = cx.rows.row.get(&to) {
+                if next > row && !cx.rows.exit_only.contains(&to) && !cx.rows.early_exit.contains_key(&to)
+                    && !cx.rows.shared_exits.get(&to).is_some_and(|sites| drop_route(to, sites) == DropRoute::ExitOnly) {
+                    entries.entry(next).or_default().insert(to);
+                }
+            }
+        }
+    }
+    // A source row can join the end of a local's scope with a path
+    // that bypassed its declaration. Only exclude entry locations where
+    // MIR proves its storage dead. A location with both incoming paths
+    // retains both in the initialization dataflow.
+    let mut scoped_entries = BTreeMap::new();
+    for (&line, entries) in &entries {
+        for ev in evs.get(&line).into_iter().flatten() {
+            let Fact::Drop { path, how: "drops", early_exit: None, at_reassign: false, .. } = &ev.fact else { continue };
+            let Some(local) = ev.place_local.filter(|_| ev.drop_route == DropRoute::Normal) else { continue };
+            let active: Vec<_> = entries.iter().copied().filter(|&at| {
+                storage.seek_before_primary_effect(at);
+                storage.get().contains(local)
+            }).collect();
+            if !active.is_empty() && active.len() < entries.len() {
+                scoped_entries.entry(line).or_insert_with(BTreeMap::new).insert((local, path.clone()), active);
+            }
+        }
+    }
     // A reborrow does not prevent writing a new reference into an
     // unborrowed slot. Stop the backward slice at the actual MIR writes
     // or at the issue of this loan, keeping the two generations distinct.
@@ -7457,20 +7489,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
     }
-    let mut entries: BTreeMap<usize, BTreeSet<Location>> = BTreeMap::new();
-    let start = Location::START;
-    entries.entry(cx.row_of(start)).or_default().insert(start);
-    for (&from, &row) in &cx.rows.row {
-        if !runs.contains(&from.block) { continue; }
-        for to in cx.r.real_succs(from) {
-            if let Some(&next) = cx.rows.row.get(&to) {
-                if next > row && !cx.rows.exit_only.contains(&to) && !cx.rows.early_exit.contains_key(&to)
-                    && !cx.rows.shared_exits.get(&to).is_some_and(|sites| drop_route(to, sites) == DropRoute::ExitOnly) {
-                    entries.entry(next).or_default().insert(to);
-                }
-            }
-        }
-    }
     let mut out_rows: Vec<Row> = Vec::new();
     let mut lines: BTreeSet<usize> = cx.rows.row.values().copied().collect();
     lines.extend(evs.keys().copied());
@@ -7509,6 +7527,20 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             row.completed_let = true;
         }
         row.before = entries.get(&line).map(|locs| state_at(&locs.iter().copied().collect::<Vec<_>>(), false, false, None, None, None));
+        if let Some(before) = &row.before {
+            for ((local, column), points) in scoped_entries.remove(&line).into_iter().flatten() {
+                if before.locals.get(&column) != Some(&Some(local))
+                    || before.cause.get(&column) != Some(&"unassigned")
+                    || row.after.locals.contains_key(&column)
+                {
+                    continue;
+                }
+                let scoped = state_at(&points, false, false, None, None, None);
+                if scoped.locals.get(&column) == Some(&Some(local)) {
+                    row.before_scope_end.insert(column, scoped);
+                }
+            }
+        }
         if let Some(specs) = cx.rows.arms.get(&line) {
             let nested: BTreeSet<_> = specs.iter().filter_map(|s| s.parent).collect();
             for (i, s) in specs.iter().enumerate() {
