@@ -1895,7 +1895,16 @@ fn render_branch_dots(
             // Like a column after a plain move, it just ends with
             // the arms; the scope-end dot says why nothing is
             // dropped there (`all_moved_at_end`).
-            None
+            let checked_leg = branch_history.iter().enumerate().any(|(arm, b)| !b.diverges
+                && seg_drawn(rap, &arm_end_state(rap, b, branch_history, ty))
+                && visualization_data.row_layout.unreachable_arms.contains(&(event.get_id(), arm)));
+            join.filter(|j| checked_leg && !j.checked_only && j.cell.init == Init::Moved).map(|j| {
+                let mut title = format!("{} has been moved on every runtime path that reaches this join.", styled_name_html(rap.name()));
+                if j.checked_path_owns {
+                    title.push_str(" The borrow checker also considers a path reaching this join that still owns it.");
+                }
+                title
+            })
         } else if let Some(timing) = rap.is_closure().then(|| branch_history.iter()
             .filter(|b| b.diverges && b.imaginary.is_none())
             .flat_map(|b| &b.e_data)
@@ -7384,10 +7393,11 @@ fn dot_and_bar_hits(drawn: &[Drawn], dots: &DotLayer, clearance: MarkClearance) 
 /// few px). A shaft: `shaft_on_leg`. The
 /// `arrow-along-leg` check in `rustviz-lib/tests/common/geometry.rs`.
 fn on_legs(drawn: &[Drawn], legs: &[Piece]) -> Vec<usize> {
-    leg_hits(drawn, legs).into_iter().map(|(i, _)| i).collect()
+    leg_hits(drawn, legs).into_iter().map(|(i, _, _, _)| i).collect()
 }
 
-fn leg_hits(drawn: &[Drawn], legs: &[Piece]) -> Vec<(usize, usize)> {
+/// The arrow, stroke, and whether the head and shaft each lie along it.
+fn leg_hits(drawn: &[Drawn], legs: &[Piece]) -> Vec<(usize, usize, bool, bool)> {
     let mut out = Vec::new();
     for (i, d) in drawn.iter().enumerate().filter(|(_, d)| d.logo.is_none()) {
         let pts = d.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(d.tri.iter().copied());
@@ -7401,7 +7411,7 @@ fn leg_hits(drawn: &[Drawn], legs: &[Piece]) -> Vec<(usize, usize)> {
                 && samples(&[(p, q)]).into_iter().filter(|&c| inside_tri(&d.tri, c) > -1.0).count() > 6;
             let shaft = d.pieces.iter().any(|&piece| shaft_on_leg(piece, (p, q)));
             if head || shaft {
-                out.push((i, mark));
+                out.push((i, mark, head, shaft));
             }
         }
     }
@@ -9591,6 +9601,7 @@ fn repair_arrow_routes(
     let mut keys = BTreeSet::new();
     if matches!(repair, RouteRepair::Legs | RouteRepair::Dots) {
         keys.extend(on_legs(&drawn, &dots.legs).into_iter().map(|i| drawn[i].key));
+        keys.extend(on_cols(&drawn, &dots.cols).into_iter().map(|i| drawn[i].key));
     }
     if repair == RouteRepair::Dots {
         keys.extend(dot_and_bar_hits(&drawn, dots, clearance).into_iter()
@@ -9695,7 +9706,7 @@ fn repair_arrow_routes(
     for key in keys {
         let loops: BTreeSet<_> = drawn.iter().filter(|a| runs_past_ends(a, &dots.lanes.ends)).map(|a| a.key).collect();
         let obstructed = |hit: &RouteHit| {
-            matches!(hit, RouteHit::Leg(k, _) | RouteHit::Gutter(k) if *k == key)
+            matches!(hit, RouteHit::Leg(k, _) | RouteHit::Column(k, _) | RouteHit::Gutter(k) if *k == key)
                 || (repair == RouteRepair::Dots && matches!(hit, RouteHit::Dot(k, _) if *k == key))
                 || (repair == RouteRepair::Heads
                     && matches!(hit, RouteHit::Arrow((a, _), (b, _), ArrowMarkHit::Head) if *a == key || *b == key))
@@ -9836,6 +9847,7 @@ enum RouteHit {
     StopBar(ArrowKey, usize),
     Leg(ArrowKey, usize),
     Column(ArrowKey, usize),
+    ColumnShaft(ArrowKey, usize),
     Bracket(ArrowKey, usize),
 }
 
@@ -9870,8 +9882,11 @@ fn route_hits(drawn: &[Drawn], dots: &DotLayer, clearance: MarkClearance) -> BTr
         .map(|(i, j)| RouteHit::EndToEnd(drawn[i].key, drawn[j].key)));
     hits.extend(dot_and_bar_hits(drawn, dots, clearance).into_iter()
         .map(|(i, bar, m)| if bar { RouteHit::StopBar(drawn[i].key, m) } else { RouteHit::Dot(drawn[i].key, m) }));
-    hits.extend(leg_hits(drawn, &dots.legs).into_iter().map(|(i, m)| RouteHit::Leg(drawn[i].key, m)));
-    hits.extend(leg_hits(drawn, &dots.cols).into_iter().map(|(i, m)| RouteHit::Column(drawn[i].key, m)));
+    hits.extend(leg_hits(drawn, &dots.legs).into_iter().map(|(i, m, _, _)| RouteHit::Leg(drawn[i].key, m)));
+    for (i, column, head, shaft) in leg_hits(drawn, &dots.cols) {
+        if head { hits.insert(RouteHit::Column(drawn[i].key, column)); }
+        if shaft { hits.insert(RouteHit::ColumnShaft(drawn[i].key, column)); }
+    }
     for (i, a) in drawn.iter().enumerate().filter(|(_, a)| a.logo.is_none()) {
         for b in drawn[i + 1..].iter().filter(|b| b.logo.is_none()) {
             let (lo, hi) = (a.key.min(b.key), a.key.max(b.key));
@@ -10206,6 +10221,15 @@ struct BranchSeg {
     rows: (usize, usize),
 }
 
+/// The snapshot before the test only describes the connectors into an arm.
+fn describe_maybe_entry(segs: &mut [BranchSeg], connectors: usize, unassigned: &str, title: &str) {
+    for seg in &mut segs[..connectors] {
+        if let Some(suffix) = seg.title.strip_prefix(unassigned) {
+            seg.title = format!("{title}{suffix}");
+        }
+    }
+}
+
 /// Which part of an arm's strip a segment is.
 #[derive(Clone, Copy, PartialEq)]
 enum Leg {
@@ -10378,7 +10402,20 @@ fn render_branches(
             // Each leg can have a different entry state when the discriminant
             // proves that a variant cannot hold its sibling's reference.
             let parent_active = branch.entry_state.as_ref().map(branch_entry_state).unwrap_or_else(|| parent_active.clone());
-            let leading_state = arm_entry_state(&parent_active, is_active);
+            let mut leading_state = arm_entry_state(&parent_active, is_active);
+            // A diverging leg can drop a value only on the paths that
+            // assigned it. Join that leg to the fork at the maybe-held
+            // state recorded before the conditional's MIR test.
+            let maybe_entry = (branch.imaginary.is_none() && !rap.is_ref() && !seg_drawn(rap, &leading_state)
+                && branch.states.first().is_some_and(|(_, _, state)|
+                    matches!(state, State::FullPrivilege { s: LineState::Uninit })))
+                .then(|| {
+                    let function = *visualization_data.fn_source_lines.get(hash)?;
+                    visualization_data.state_table.branch_entry_cell(function, rap.name(), branch.source?.branch)
+                }).flatten().filter(|cell| cell.init == Init::Maybe);
+            if maybe_entry.is_some() {
+                leading_state = State::FullPrivilege { s: LineState::Uninit };
+            }
             let explain_drop_loan = |seg: &mut BranchSeg, joining| {
                 if !rap.is_ref() && matches!(seg.state, State::PartialPrivilege { s: LineState::Full }
                     | State::FullPrivilege { s: LineState::Full })
@@ -10513,6 +10550,7 @@ fn render_branches(
                     );
                 }
             }
+            let connectors = segs.len();
             // A reference declared before the conditional whose borrow
             // ends in this arm (`end_outer_borrows_in_arms`): the
             // dashed rest of the arm is "no value" only in the sense
@@ -10580,7 +10618,8 @@ fn render_branches(
                 // (A one-line arm's own cell is its state after its code: from its
                 // last dot on.)
                 let last_event = branch.e_data.iter().map(|(l, _)| *l).max().unwrap_or(0);
-                let pieces = leg_table_pieces(rap, visualization_data, &state, *top, bot, own, *split_point, (i, &arm_sources, *merge_point, last_event), &arm_path);
+                let pieces = leg_table_pieces(rap, visualization_data, &state, *top, bot, own, *split_point,
+                    (i, &arm_sources, *merge_point, last_event), &arm_path, maybe_entry.is_some());
                 if pieces.is_empty() {
                     push_seg_if_renderable(
                         &mut segs, rap,
@@ -10623,6 +10662,11 @@ fn render_branches(
                     }
                 }
                 if segs.len() > n { ended_title(&mut segs, bot); }
+            }
+            if let Some(cell) = maybe_entry {
+                let title = hover_messages::state_maybe_init(rap.name(), cell);
+                let unassigned = hover_messages::state_uninitialized(rap.name());
+                describe_maybe_entry(&mut segs, connectors, &unassigned, &title);
             }
             // The split diagonal alone can reach the exit row of a
             // diverging arm (#1295, #1876). A dot ending the value will
@@ -11183,8 +11227,10 @@ fn leg_table_pieces(
     split: usize,
     arm: (usize, &[Option<crate::facts::SourceArm>], usize, usize),
     path: &[(usize, usize)],
+    read_dashed: bool,
 ) -> Vec<(usize, usize, State, Option<String>, bool)> {
     let lined = match state {
+        State::FullPrivilege { s: LineState::Uninit } => read_dashed,
         State::FullPrivilege { s } | State::PartialPrivilege { s } => !matches!(s, LineState::Gray | LineState::Uninit),
         State::RevokedPrivilege { .. } => true,
         _ => false,
@@ -11221,12 +11267,25 @@ fn leg_table_pieces(
         }
         let one_line = leg_one_line_arm_cell(rap, visualization_data, w[0], own, split, arm);
         let from_arm = one_line.is_some();
+        let entry = (!rap.is_ref() && rap.is_member() && w[0] == own.0 && w[0] > split)
+            .then(|| {
+                let table = &visualization_data.state_table;
+                let function = *visualization_data.fn_source_lines.get(rap.hash())?;
+                let source = rv_attrs::line_of(w[0], rl)?;
+                let source_arm = arm.1.get(arm.0).copied().flatten()?;
+                let cell = table.before_arm_code(function, rap.name(), source_arm, source)?;
+                if cell.init != Init::Own || cell.lent.is_empty() { return None; }
+                let (st, borrow, _) = owner_loan_title(rap, visualization_data, function, cell, state, w[0], false);
+                let value = owner_value_title(rap, visualization_data, function, cell, Some(w[0]));
+                Some((st, format!("{value}. {borrow}")))
+            }).flatten();
         let (st, title, table) = match (one_line, leg_table_row(rap, visualization_data, w[0], own, split)) {
             // A one-line conditional's arm: its own cell (design Q1).
             (Some(cell), _) => match one_line_arm_piece(state, rap, visualization_data, w[0], cell, path) {
                 Some((st, t)) => (st, t, true),
                 None => (state.clone(), None, true),
             },
+            (None, _) if let Some((st, title)) = entry => (st, Some(title), true),
             (None, None) => (state.clone(), None, false),
             (None, Some(at)) => match leg_lent_state(state, rap, visualization_data, at, path) {
                 Some((st, t)) => (st, t, true),
@@ -12020,13 +12079,20 @@ fn render_timeline(
             if matches!(state, State::OutOfScope | State::ResourceMoved { dropped_by_hand: true, .. }) {
                 continue;
             }
-            // An owner line normally ends at its move dot. Moving just a
-            // Box's payload leaves the Box itself until its scope-end dot.
-            if matches!(state, State::ResourceMoved { .. }) && !(
-                !history.iter().any(|(_, e)| matches!(e, Event::Branch { .. }))
-                && history.iter().filter(|(l, _)| l == seg_start).all(|(_, e)| matches!(e, Event::Move { .. }))
-                && history.iter().any(|(l, e)| l == seg_end && matches!(e, Event::OwnerGoOutOfScope { early: None, .. }))
-            ) { continue; }
+            if matches!(state, State::ResourceMoved { .. }) {
+                // The allocation-only segment connects a payload move to
+                // the allocation's scope drop. The move can share its
+                // dot with a borrow and release earlier in the statement.
+                // At a branch join or a replacement, the corresponding
+                // arm or store supplies its own connector.
+                let connects_drop = history.iter().any(|(l, e)| l == seg_start && matches!(e, Event::Move { .. }))
+                    && history.iter().any(|(l, e)| l == seg_end && matches!(e, Event::OwnerGoOutOfScope { early: None, .. }))
+                    && !history.iter().any(|(l, e)| seg_start <= l && l <= seg_end && matches!(e, Event::Branch { .. }));
+                if !connects_drop || !visualization_data.fn_source_lines.get(hash)
+                    .is_some_and(|&function| visualization_data.state_table.is_box(function, rap.name())) {
+                    continue;
+                }
+            }
             bounds.extend(seg_start + 1..*seg_end);
         } else {
             if rap.is_closure() {
@@ -13956,6 +14022,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn maybe_at_the_fork_preserves_an_arm_rows_unassigned_title() {
+        let unassigned = hover_messages::state_uninitialized(&"s".to_owned());
+        let mut segs = [
+            BranchSeg {
+                p1: (0.0, 0.0), p2: (10.0, 30.0), rows: (2, 2),
+                state: State::FullPrivilege { s: LineState::Uninit },
+                title: unassigned.clone(), inactive_arm: None, own_row: false,
+            },
+            BranchSeg {
+                p1: (10.0, 30.0), p2: (10.0, 60.0), rows: (3, 4),
+                state: State::FullPrivilege { s: LineState::Uninit },
+                title: unassigned.clone(), inactive_arm: None, own_row: false,
+            },
+        ];
+        let maybe = "s may have no value here: it was assigned in only some of the branches above";
+        describe_maybe_entry(&mut segs, 1, &unassigned, maybe);
+        assert_eq!(segs[0].title, maybe);
+        assert_eq!(segs[1].title, unassigned);
+    }
+
+    #[test]
     fn checked_reassignment_does_not_hide_an_executing_acquisition() {
         let s = styled_name_html("s");
         let acquire = format!("{s} acquires ownership of a resource");
@@ -14162,6 +14249,27 @@ mod tests {
         let after = route_hits(&[head, Drawn { arcs, ..shaft }], &dots, MarkClearance::DotGap);
         assert!(!after.is_subset(&before));
         assert_eq!(single_route_blocker(&before, &after, (2, 2)), Some((1, 1)));
+    }
+
+    #[test]
+    fn a_repair_cannot_trade_a_column_head_overlap_for_a_shaft_overlap() {
+        let key = (1, 1);
+        let dots = DotLayer { cols: vec![((40.0, 8.0), (40.0, 58.0))], ..Default::default() };
+        let head_overlap = Drawn {
+            key,
+            tri: vec![(34.0, 25.0), (46.0, 25.0), (40.0, 38.0)],
+            ..Default::default()
+        };
+        let shaft_overlap = Drawn {
+            key,
+            pieces: vec![((40.0, 15.0), (40.0, 35.0)), ((40.0, 35.0), (60.0, 35.0))],
+            tri: vec![(60.0, 29.0), (60.0, 41.0), (73.0, 35.0)],
+            ..Default::default()
+        };
+        let before = route_hits(&[head_overlap], &dots, MarkClearance::DotGap);
+        let after = route_hits(&[shaft_overlap], &dots, MarkClearance::DotGap);
+        assert_eq!(before, BTreeSet::from([RouteHit::Column(key, 0)]));
+        assert!(!after.is_subset(&before), "the candidate introduces a shaft overlap");
     }
 
     #[test]

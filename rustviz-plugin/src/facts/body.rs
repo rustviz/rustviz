@@ -6813,14 +6813,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         if !e.end_places.contains(place) { return None; }
         super::control::entered(&switches, SwitchEdge { switch: e.location, successor: e.occurrence.successor?.block })
     }).collect();
-    let arm_edges: Vec<_> = switches.iter().filter_map(|exit| {
+    let entry_edges = switches.iter().filter_map(|exit| {
         let arm = super::SourceArm { branch: exit.branch?, index: exit.arm? };
         let edge = exit.edge;
-        ((!drop_holders_at_reassign.is_empty() || fieldless_arms.contains(&arm)) && executed_successors(edge.switch).contains(&edge.successor.start_location()))
+        executed_successors(edge.switch).contains(&edge.successor.start_location())
             .then_some((arm, edge.successor))
-    }).collect();
+    });
+    let arm_edges: Vec<_> = entry_edges.clone().filter(|(arm, _)|
+        !drop_holders_at_reassign.is_empty() || fieldless_arms.contains(arm)).collect();
     let mut arm_entries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, BTreeSet<_>>>::default();
-    for (arm, block) in &arm_edges {
+    for (arm, block) in entry_edges {
         arm_entries.entry(arm.branch).or_default().entry(arm.index).or_default().insert(block.start_location());
     }
     for (branch, arms) in arm_entries {
@@ -6834,6 +6836,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     == Some(super::SourceArm { branch, index: arm })
             }) {
                 let entries: Vec<_> = entries.into_iter().collect();
+                // The switch can enter through StorageDead statements for
+                // the test. The first substantive instruction bounds the
+                // connector where we can still show the arm's entry state.
+                boundaries.entry_row = entries.iter().map(|entry| {
+                    let block = &body[entry.block];
+                    let statement_index = block.statements.iter().position(|st| !matches!(
+                        st.kind, StatementKind::StorageLive(_) | StatementKind::StorageDead(_) | StatementKind::Nop
+                    )).unwrap_or(block.statements.len());
+                    cx.row_of(Location { block: entry.block, statement_index })
+                }).min();
                 boundaries.entry = Some(state_at(&entries, false, false, None, None));
             }
         }

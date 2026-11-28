@@ -566,6 +566,8 @@ pub struct LoopChange {
 
 #[derive(Default)]
 pub struct ArmBoundaries {
+    /// The first source row of any MIR entry used for this snapshot.
+    pub entry_row: Option<usize>,
     pub entry: Option<State>,
     pub join: Option<State>,
 }
