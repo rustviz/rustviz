@@ -342,7 +342,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if !self.tail_plain.contains(&e.hir_id) || self.tcx.hir_enclosing_body_owner(e.hir_id) != owner || !self.tcx.def_kind(owner).is_fn_like() {
       return;
     }
-    let Some(returned) = crate::facts::call_wording::return_origins(self.tcx, self.mir_body, Some(e.span)) else { return };
+    let Some(returned) = crate::facts::call_relationships::return_arguments(self.tcx, self.mir_body, Some(e.span)) else { return };
     let sig = self.tcx.liberate_late_bound_regions(owner.to_def_id(), self.tcx.fn_sig(owner).instantiate_identity().skip_norm_wip());
     let ty::Ref(result, ..) = sig.output().kind() else { return };
     let name = result.to_string();
@@ -5255,7 +5255,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           }
         };
         self.add_fn(fn_name.clone());
-        self.closure_call_events(expr, fn_expr);
+        self.closure_call_events(expr, fn_expr, &fn_name);
         let defer = args.iter().skip(1).any(|a| holds_try(a));
         let manually_takes = self.facts.is_some_and(|b| b.take_calls.contains(&expr.span.with_parent(None)));
         self.visit_call_args(args, &fn_name, defer, manually_takes, |_| {});

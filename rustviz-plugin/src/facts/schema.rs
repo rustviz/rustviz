@@ -137,6 +137,9 @@ pub struct BodyFacts {
     /// joined to its store by the normal MIR successor, before row layout.
     #[serde(skip)]
     pub(crate) writes: BTreeMap<rustc_span::Span, Vec<AssignmentWrite>>,
+    /// Resolved invocations and environment construction at distinct MIR sites.
+    #[serde(skip_serializing_if = "super::call_relationships::CallRelationships::is_empty")]
+    pub(crate) call_relationships: super::call_relationships::CallRelationships,
     /// Mutable call operands whose own loan ends on the normal return edge.
     #[serde(skip)]
     pub short_call_borrows: BTreeSet<(rustc_span::Span, usize)>,
@@ -1173,11 +1176,11 @@ pub struct Row {
 }
 
 /// Coordinates in borrowck MIR, serialized independently of rustc's debug format.
-fn location<S: serde::Serializer>(loc: &Location, s: S) -> Result<S::Ok, S::Error> {
+pub(super) fn location<S: serde::Serializer>(loc: &Location, s: S) -> Result<S::Ok, S::Error> {
     (loc.block.index(), loc.statement_index).serialize(s)
 }
 
-fn optional_location<S: serde::Serializer>(loc: &Option<Location>, s: S) -> Result<S::Ok, S::Error> {
+pub(super) fn optional_location<S: serde::Serializer>(loc: &Option<Location>, s: S) -> Result<S::Ok, S::Error> {
     loc.map(|l| (l.block.index(), l.statement_index)).serialize(s)
 }
 

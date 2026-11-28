@@ -5471,9 +5471,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure capture (immutable borrow) from b to f",
             "If f holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
             "b₂ goes out of scope. Its resource is dropped.",
-            // fnonce_shadowed
-            "t acquires ownership of the resource g() returns",
-            "g₂ is moved into the call (an FnOnce closure can only be called once). b, which g₂ captured, is moved out of the closure as the call's result",
+            // fnonce_shadowed: MIR passes g₂ by value and puts b in the result.
+            "t acquires ownership of the resource g₂() returns",
+            "g₂ is moved into the call (FnOnce::call_once takes its receiver by value). After the move, g₂ cannot be called again unless it is reinitialized. b, which g₂ captured, is moved out of the closure as the call's result",
             // closure_arg
             "Move from h₂ into the closure passed to apply",
             "h₂ goes out of scope. No resource is dropped.",
@@ -5484,6 +5484,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m goes out of scope. No resource is dropped.",
             "Move from g to t",
             "Move from g₂ to t",
+            "Move of the result of g() to t",
+            "an FnOnce closure can only be called once",
+            "g₂'s resource is moved",
             "g's resource is moved",
             "g₂'s resource is moved",
             "Move from h into the closure passed to apply",
@@ -7270,7 +7273,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `f()` is `FnOnce::call_once(f)`: f is moved into the call, the
         // body drops `s`, and so f has nothing to drop at its scope end.
         must_contain: &[
-            "f is moved into the call (an FnOnce closure can only be called once). \
+            "f is moved into the call (FnOnce::call_once takes its receiver by value). After the move, f cannot be called again unless it is reinitialized. \
              s, which f captured, is dropped during the call",
             "f goes out of scope. No resource is dropped.",
         ],
@@ -7284,14 +7287,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `t` owns it: f drops nothing and the call doesn't drop it.
         must_contain: &[
             "t acquires ownership of the resource f() returns",
-            "f is moved into the call (an FnOnce closure can only be called once). \
+            "f is moved into the call (FnOnce::call_once takes its receiver by value). After the move, f cannot be called again unless it is reinitialized. \
              s, which f captured, is moved out of the closure as the call's result",
             "f goes out of scope. No resource is dropped.",
             "t goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "f goes out of scope. Its 1 captured resource is dropped.",
-            "f is moved into the call (an FnOnce closure can only be called once). \
+            "f is moved into the call (FnOnce::call_once takes its receiver by value). After the move, f cannot be called again unless it is reinitialized. \
              s, which f captured, is dropped during the call",
         ],
     },
@@ -7300,7 +7303,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Called on one path only: f is maybe-moved, so a drop flag
         // decides at scope end whether its capture is dropped.
         must_contain: &[
-            "f is moved into the call (an FnOnce closure can only be called once). \
+            "f is moved into the call (FnOnce::call_once takes its receiver by value). After the move, f cannot be called again unless it is reinitialized. \
              s, which f captured, is dropped during the call",
             "f goes out of scope. Its captured resource is dropped here if f still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
         ],
@@ -7315,8 +7318,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // that the call uses it up), `b` is only read so it's dropped
         // with the closure's environment, and the Copy `n` isn't listed.
         must_contain: &[
-            "f is moved into the call (an FnOnce closure can only be called once). \
-             a, which f captured, is moved on or dropped by the call. \
+            "f is moved into the call (FnOnce::call_once takes its receiver by value). After the move, f cannot be called again unless it is reinitialized. \
+             a, which f captured, is transferred out of the closure during the call. \
              b, which f captured, is dropped during the call",
             "f goes out of scope. No resource is dropped.",
         ],
@@ -7328,7 +7331,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "fnonce_call_copy_result",
         // The call's i32 result is a new value, not a copy out of `g`.
         must_contain: &[
-            "g is moved into the call (an FnOnce closure can only be called once). \
+            "g is moved into the call (FnOnce::call_once takes its receiver by value). After the move, g cannot be called again unless it is reinitialized. \
              v, which g captured, is dropped during the call",
             "g goes out of scope. No resource is dropped.",
         ],
@@ -7358,7 +7361,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f goes out of scope. Its 1 captured resource is dropped.",
         ],
         must_not_contain: &[
-            "f is moved into the call (an FnOnce closure can only be called once)",
+            "f is moved into the call (FnOnce::call_once takes its receiver by value). After the move, f cannot be called again unless it is reinitialized.",
             "f goes out of scope. No resource is dropped.",
         ],
     },
@@ -8070,10 +8073,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "shadow_closure_fate",
         must_contain: &[
-            "g2 is moved into the call (an FnOnce closure can only be called once). u₂, which g2 captured, is dropped during the call",
+            "g2 is moved into the call (FnOnce::call_once takes its receiver by value). After the move, g2 cannot be called again unless it is reinitialized. u₂, which g2 captured, is dropped during the call",
         ],
         must_not_contain: &[
-            "g2 is moved into the call (an FnOnce closure can only be called once). u, which g2 captured, is dropped during the call",
+            "g2 is moved into the call (FnOnce::call_once takes its receiver by value). After the move, g2 cannot be called again unless it is reinitialized. u, which g2 captured, is dropped during the call",
         ],
     },
     // ─── Or-pattern arms (#503) ──────────────────────────────────────
@@ -12002,9 +12005,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "closure_field_call",
         must_contain: &[
-            "n is bound to a copyable value",
+            "n is initialized with the value w.f() returns",
+            "n receives the value w.f() returns",
             "Move from t to adder",
-            "m is bound to a copyable value",
+            "m is initialized with the value adder(t)() returns",
+            "m receives the value adder(t)() returns",
             "A temporary holds the value that adder returns. Rust drops it as soon as its statement (or enclosing expression) is done",
             "t goes out of scope. No resource is dropped.",
             // The closure in w.f holds its borrow of s until `(w.f)()`
@@ -12014,6 +12019,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "=w.f holds a copyable value",
+            "=n is bound to a copyable value",
+            "=m is bound to a copyable value",
         ],
     },
     // #704: `let h = g;` copies (g captures only `&s`, so it's Copy) or
@@ -12073,7 +12080,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "closure_field_call_once",
         must_contain: &[
-            "h.f is moved into the call (an FnOnce closure can only be called once). u, which h.f captured, is moved out of the closure as the call's result",
+            "h.f is moved into the call (FnOnce::call_once takes its receiver by value). After the move, h.f cannot be called again unless it is reinitialized. u, which h.f captured, is moved out of the closure as the call's result",
             "h goes out of scope. h.f was moved out earlier, so no resource is dropped.",
             "h.f goes out of scope. No resource is dropped.",
             "e goes out of scope. Its resource is dropped.",
@@ -13344,7 +13351,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "own owns a closure which owns 1 resource via capture",
             "own goes out of scope. Its 1 captured resource is dropped.",
-            "eat is moved into the call (an FnOnce closure can only be called once). u, which eat captured, is dropped during the call",
+            "eat is moved into the call (FnOnce::call_once takes its receiver by value). After the move, eat cannot be called again unless it is reinitialized. u, which eat captured, is dropped during the call",
             "t's resource is captured (moved) by closure own",
         ],
         must_not_contain: &[
@@ -13358,6 +13365,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "closure_value_not_resource",
         must_contain: &[
+            // The MIR borrows the generic callable. Its type does not
+            // establish whether the callable holds any resource.
             "f's value is captured (immutably borrowed) by closure g",
             "f's value is being shared by one or more variables",
             "f's value is no longer immutably borrowed",
@@ -13369,6 +13378,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             "f's resource",
+            "f is the owner of the resource",
+            "f goes out of scope. Its resource is dropped",
+            "f is passed to f by shared reference",
             "pr's resource",
             "push's resource",
             "=Return immutably borrowed resource from g to f",
@@ -13620,24 +13632,6 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     // #813: a closure that owns a std lock is a resource on every host
     // (`needs_drop` is false for RwLock<i32> on macOS and for Mutex<i32> on
     // Linux), like the lock itself.
-    TooltipExpect {
-        name: "closure_rwlock_795",
-        must_contain: &[
-            "f's resource is immutably borrowed by apply; f is read-only while the borrow is live",
-            "f's resource is no longer immutably borrowed",
-            "f's resource is moved",
-        ],
-        must_not_contain: &["f's value is immutably borrowed", "f's value is no longer", "f's value is moved"],
-    },
-    TooltipExpect {
-        name: "closure_mutex_795",
-        must_contain: &[
-            "f's resource is immutably borrowed by apply; f is read-only while the borrow is live",
-            "f's resource is no longer immutably borrowed",
-            "f's resource is moved",
-        ],
-        must_not_contain: &["f's value is immutably borrowed", "f's value is no longer", "f's value is moved"],
-    },
     // #812: passing a `&mut` reference variable `r` to a function (or
     // calling a `&mut self` method on it) reads and writes the value r
     // points to, not r itself; "writes to r" read like r was reassigned.
@@ -20988,15 +20982,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // copied" and drew "Copy from f to _x": a closure that owns a
         // String is not Copy, and it is never copied.
         must_contain: &[
-            "f is moved into the call (an FnOnce closure can only be called once). \
+            "f is moved into the call (FnOnce::call_once takes its receiver by value). After the move, f cannot be called again unless it is reinitialized. \
              s, which f captured, is dropped during the call",
             "_x receives a Some value holding the value f() returns",
-            "g is moved into the call (an FnOnce closure can only be called once). \
+            "g is moved into the call (FnOnce::call_once takes its receiver by value). After the move, g cannot be called again unless it is reinitialized. \
              t, which g captured, is dropped during the call",
             "z receives a Some value holding the value h() returns",
-            "k is moved into the call (an FnOnce closure can only be called once). \
+            "k is moved into the call (FnOnce::call_once takes its receiver by value). After the move, k cannot be called again unless it is reinitialized. \
              w, which k captured, is dropped during the call",
-            "m is moved into the call (an FnOnce closure can only be called once). \
+            "m is moved into the call (FnOnce::call_once takes its receiver by value). After the move, m cannot be called again unless it is reinitialized. \
              q, which m captured, is dropped during the call",
             "The caller receives a Some value holding the value m() returns",
         ],
@@ -21280,7 +21274,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // above: maybe-called, which the dot can't say either way). k is
         // an Fn closure (it only reads q), so its dot stays.
         must_contain: &[
-            "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
+            "If g() returns Ok, u acquires ownership of the value inside it. Otherwise the `?` exits early.",
+            "f is moved into the call (FnOnce::call_once takes its receiver by value). After the move, f cannot be called again unless it is reinitialized. s, which f captured, is dropped during the call",
             "If the `?` here returns early, k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
             "h goes out of scope. Its captured resource is dropped here if h still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
             // m, called in an `if` above the `?`, may still hold w: the
@@ -21288,6 +21283,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the `?` here returns early, m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to m here.",
         ],
         must_not_contain: &[
+            "Move of the result of g() to u",
             "returns early, f's resource is dropped",
             "returns early, g's resource is dropped",
             "returns early, h's resource is dropped",
@@ -28985,11 +28981,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "The call to c is skipped at runtime",
             "c goes out of scope. Its 1 captured resource is dropped. Rust tracks this with a runtime drop flag.",
-            "c is moved into the call (an FnOnce closure can only be called once). s, which c captured, is moved out of the closure as the call's result",
+            "c is moved into the call (FnOnce::call_once takes its receiver by value). After the move, c cannot be called again unless it is reinitialized. s, which c captured, is moved out of the closure as the call's result",
             "z acquires ownership of a Some value holding the resource c() returns, when the block ends with break 'blk Some(c())",
             "c was consumed on every path that completes the block at runtime. The borrow checker rejects uses of c after the block",
             "c is moved into a temporary before evaluating the call arguments on the branch that exits here",
-            "c is moved before the arguments are evaluated. If they finish, c is moved into the call (an FnOnce closure can only be called once). If the call starts, s, which c captured, is moved out of the closure as the call's result",
+            "c is moved before the arguments are evaluated. If they finish, c is moved into the call (FnOnce::call_once takes its receiver by value). After the move, c cannot be called again unless it is reinitialized. If the call starts, s, which c captured, is moved out of the closure as the call's result",
         ],
         must_not_contain: &[
             "c isn't moved in any of the branches above",
@@ -29005,7 +29001,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // String needs drop. Plain does not, even though the Result that
         // holds it can also contain a String in its Err variant.
         must_contain: &[
-            "c is moved into the call (an FnOnce closure can only be called once). s, which c captured, is dropped during the call",
+            "c is moved into the call (FnOnce::call_once takes its receiver by value). After the move, c cannot be called again unless it is reinitialized. s, which c captured, is dropped during the call",
             "z.0 acquires ownership of the resource c() returns",
             "z.value acquires ownership of the resource c() returns",
             "z acquires ownership of an array with the resource c() returns at index 0",
@@ -48519,5 +48515,232 @@ fn dashed_leg_of_an_assigned_variable_is_not_called_empty_yet() {
     let svg = run_with_local_backend("known_bugs/1587_loop_two_conditionals").timeline_panel_string();
     for row in ["s@L12:branch_line", "s@L13-14:branch_line", "s@L15:branch_line"] {
         check_review_tip(&svg, row, &["can't prove that"], &["no value yet"]);
+    }
+}
+
+#[test]
+fn p4_closure_receiver_and_result_are_separate() {
+    let svg = run_with_local_backend("book/c13_01_closure_param").timeline_panel_string();
+    let use_marks = drawn_clauses(&svg, "add_one", "3");
+    let uses: Vec<_> = use_marks.iter().filter(|(_, _, tip)| {
+        tip.contains("Calling add_one borrows add_one by shared reference as the receiver. The call may read through it")
+    }).collect();
+    // MIR borrows add_one for the receiver and initializes y directly
+    // at the call's destination. There is no copy from the closure.
+    assert_eq!(uses.len(), 1, "{use_marks:?}");
+    let tips = timeline_tooltips(&svg);
+    assert_eq!(tips.iter().filter(|tip| tip.contains("Calling add_one borrows add_one by shared reference as the receiver")).count(), 1);
+    assert!(!tips.iter().any(|tip| tip.contains("add_one is passed to add_one by shared reference")));
+    assert!(tips.iter().any(|tip| tip.contains("y is initialized with the value add_one() returns")));
+    assert!(tips.iter().any(|tip| tip.contains("y receives the value add_one() returns")));
+    assert!(!tips.iter().any(|tip| tip.contains("Copy of the value add_one() returns") || tip.contains("Copy from add_one to y")));
+}
+
+#[test]
+fn p4_call_return_sources_follow_mir_places() {
+    use serde_json::json;
+    let call = |body: &serde_json::Value, callee: &str| {
+        body["call_relationships"]["calls"].as_array().expect("missing MIR calls")
+            .iter().find(|call| call["callee"] == callee).unwrap().clone()
+    };
+    let rv = run_with_local_backend("rv3_call_relationships");
+    let facts = rv.facts().unwrap();
+    let main = fact_body(facts, "main");
+    // MIR reborrows through several aliases of pair.left. The caller's
+    // borrow of pair is still governed by field's input/output lifetime.
+    assert_eq!(call(main, "field")["return_sources"], json!([
+        {"kind": "input", "index": 0, "projection": ["deref", {"field": 0}]}
+    ]));
+    // A callee can repoint the reference stored behind the mutable slot.
+    // MIR does not prove which reference the subsequent load will read.
+    let read = fact_body(facts, "loaded_after_call");
+    assert_eq!(call(read, "read_slot")["return_sources"], json!([{"kind": "unknown"}]));
+    let literal = fact_body(facts, "literal_forward");
+    assert_eq!(call(literal, "literal_choice")["return_sources"], json!([
+        {"kind": "input", "index": 1, "projection": []}
+    ]));
+    let erased = fact_body(facts, "erased");
+    let erased_calls = erased["call_relationships"]["calls"].as_array().unwrap();
+    assert_eq!(erased_calls.len(), 1);
+    assert_eq!(erased_calls[0]["kind"], "fn_once");
+    assert!(erased_calls[0]["return_sources"].is_null());
+    assert_eq!(erased_calls[0]["capture_fates"], json!([]));
+
+    let rv = run_with_local_backend("book/c10_07_longest_inner_scope");
+    let longest = call(fact_body(rv.facts().unwrap(), "main"), "longest");
+    assert_eq!(longest["return_sources"], json!([
+        {"kind": "input", "index": 0, "projection": []},
+        {"kind": "input", "index": 1, "projection": []}
+    ]));
+    let svg = rv.timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    for lender in ["string1", "string2"] {
+        assert!(tips.iter().any(|tip| tip.contains(&format!("borrow from {lender} to result"))
+            && tip.contains("has return paths from both tied inputs")
+            && tip.contains("At the caller, both stay borrowed while result is in use")));
+    }
+}
+
+#[test]
+fn p4_closure_capture_transfer_and_fate() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_call_relationships");
+    let facts = rv.facts().unwrap();
+    let main = &fact_body(facts, "main")["call_relationships"];
+    let captures = main["captures"].as_array().expect("missing closure captures");
+    for (name, transfer) in [("offset", "copy"), ("count", "mutable"), ("captured", "move")] {
+        let capture = captures.iter().find(|c| c["source"] == name).unwrap();
+        assert_eq!(capture["transfer"], transfer);
+        assert_eq!(capture["issue"].is_array(), transfer == "mutable");
+    }
+    let calls = main["calls"].as_array().unwrap();
+    for (row, kind) in [(32, "fn"), (35, "fn_mut"), (38, "fn_once")] {
+        assert_eq!(calls.iter().filter(|c| c["row"] == row && c["kind"] == kind).count(), 1);
+    }
+    let take = calls.iter().find(|c| c["kind"] == "fn_once").unwrap();
+    assert_eq!(take["return_sources"], json!([{"kind": "capture", "field": 0, "projection": []}]));
+    assert_eq!(take["capture_fates"], json!([["returned"]]));
+
+    // One MIR branch moves held into the result. The other passes held
+    // to mem::drop before making a fresh String. Both reach the return.
+    let alternatives = fact_body(facts, "alternatives");
+    let calls = alternatives["call_relationships"]["calls"].as_array().unwrap();
+    let f = calls.iter().find(|c| c["kind"] == "fn_once").unwrap();
+    assert_eq!(f["capture_fates"][1], json!(["dropped", "returned"]));
+    assert_eq!(f["return_sources"], json!([
+        {"kind": "capture", "field": 1, "projection": []}, {"kind": "unknown"}
+    ]));
+    let svg = rv.timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    assert_eq!(tips.iter().filter(|t| t.contains("tick is passed to the call tick() by mutable reference")).count(), 1);
+    assert!(!tips.iter().any(|t| t.contains("tick is passed to tick by mutable reference")));
+    assert!(tips.iter().any(|t| t.contains("held, which f captured, may be dropped during the call or moved out as the call's result")));
+    assert!(tips.iter().any(|t| t.contains("if f still holds the closure") && t.contains("A consuming call takes the closure out of the binding") && t.contains("runtime drop flag")));
+    assert!(tips.iter().any(|t| t == "result acquires ownership of the resource take() returns"));
+    assert!(!tips.iter().any(|t| t == "Move of the result of take() to result"));
+    assert!(!tips.iter().any(|t| t == "Move from take to result"));
+    assert!(!tips.iter().any(|t| t == "Move from f to the caller"));
+}
+
+#[test]
+fn p4_closure_review_shared_receiver_text() {
+    // Concrete closures use the shared receiver to update their Mutex
+    // or RwLock capture. The generic apply(&pr) owns only a reference in
+    // this program. The call finishes before apply's parameter leaves scope.
+    for (fixture, needs_drop) in [
+        ("closure_mutex_795", std::mem::needs_drop::<std::sync::Mutex<i32>>()),
+        ("closure_rwlock_795", std::mem::needs_drop::<std::sync::RwLock<i32>>()),
+    ] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let tips = timeline_tooltips(&svg);
+        let (expected, wrong) = if needs_drop { ("resource", "value") } else { ("value", "resource") };
+        for effect in ["is immutably borrowed by apply", "is no longer immutably borrowed", "is moved"] {
+            assert!(tips.iter().any(|tip| tip.contains(&format!("f's {expected} {effect}"))), "{fixture}: {tips:?}");
+            assert!(!tips.iter().any(|tip| tip.contains(&format!("f's {wrong} {effect}"))), "{fixture}");
+        }
+        assert!(tips.iter().any(|tip| tip.contains("Calling g borrows g by shared reference as the receiver")
+            && tip.contains("Interior mutability lets the call change data reached through the receiver")));
+        assert!(!tips.iter().any(|tip| tip.contains("g is read-only while the borrow is live")));
+        assert!(!tips.iter().any(|tip| tip.contains("f is read-only while the borrow is live")));
+    }
+    let svg = run_with_local_backend("closure_value_not_resource").timeline_panel_string();
+    let tip = tooltip_of_id(&svg, "f@L1:dot:").unwrap();
+    let call = tip.find("Calling f borrows f by shared reference as the receiver").expect(&tip);
+    let scope = tip.find("f goes out of scope").expect(&tip);
+    assert!(call < scope, "{tip}");
+    assert!(!tip.contains("Its resource is dropped"), "{tip}");
+}
+
+#[test]
+fn p4_closure_review_unique_capture_and_branch_holder() {
+    // A unique capture permits *r += 1 in the closure. Rustc rejects
+    // borrowing r independently before the last call to that closure.
+    let svg = run_with_local_backend("rv3_issues/1627_closure_unique_capture_of_mut_ref").timeline_panel_string();
+    check_review_tip(&svg, "r@L4:dot:mutable_lend",
+        &["f captures r by unique immutable borrow", "can write through r", "other code cannot use r while the capture is live"],
+        &["r is read-only", "captured (immutably borrowed)"]);
+    check_review_tip(&svg, "f>r@L8:arrow:mutable_die",
+        &["f's unique immutable borrow of the reference slot r ends. This borrow no longer restricts access to the reference slot r"],
+        &["f's shared borrow", "f's mutable borrow"]);
+
+    // On the other edge of the Some test, c2's call still uses its loan of s.
+    let svg = run_with_local_backend("closure_in_arm_nested_if_1528").timeline_panel_string();
+    check_review_tip(&svg, "c2@L25:dot:",
+        &["s's resource is being shared by one or more variables. c2 holds a shared borrow"],
+        &["c2 is passed to c2 by shared reference"]);
+}
+
+#[test]
+fn p4_closure_review_repeated_guard_and_staged_receivers() {
+    let svg = run_with_local_backend("rv3_closure_review").timeline_panel_string();
+    // rustc builds two guard invocations, each borrowing f for Fn::call.
+    let at_guard = drawn_clauses(&svg, "f", "11");
+    assert_eq!(at_guard.iter().filter(|(_, _, tip)|
+        tip.contains("Calling f borrows f by shared reference as the receiver")).count(), 1, "{at_guard:?}");
+    check_review_tip(&svg, "f@L19:dot:",
+        &["f is borrowed by mutable reference as the receiver before the arguments are evaluated", "If they finish, f may read or write through it",
+          "Other code can't use f while this mutable borrow is live"],
+        &["f is passed to f by mutable reference"]);
+    // A break from argument evaluation drops the staged move of the
+    // environment before the call. A runtime flag governs the original slot.
+    check_review_tip(&svg, "f@L33:dot:owner_go_out_of_scope",
+        &["Its captured resource is dropped here if f still holds the closure", "runtime drop flag", "A move takes the closure out of the binding"],
+        &["only if no branch above called it", "A consuming call takes the closure out of the binding"]);
+}
+
+#[test]
+fn p4_closure_review_capture_fates() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_closure_review");
+    let facts = rv.facts().unwrap();
+    let fates = |name| {
+        fact_body(facts, name)["call_relationships"]["calls"].as_array().unwrap().iter()
+            .find(|c| c["kind"] == "fn_once").unwrap()["capture_fates"].clone()
+    };
+    assert_eq!(fates("mutate_then_return"), json!([["returned"]]));
+    assert_eq!(fates("return_or_loop")[1], json!(["returned", "no_exit"]));
+    assert_eq!(fates("finish_with_token")[0], json!(["scope_end"]));
+    assert_eq!(fates("return_or_transfer")[1], json!(["returned", "transferred"]));
+    let svg = rv.timeline_panel_string();
+    check_review_tip(&svg, "f@L38:dot:closure_call",
+        &["The value held in f's capture of text is moved out of the closure as the call's result"],
+        &["an FnOnce closure can only be called once"]);
+    check_review_tip(&svg, "f@L47:dot:closure_call",
+        &["If the call returns, held, which f captured, is moved out of the closure as the call's result"],
+        &[". held, which f captured, is moved out"]);
+    check_review_tip(&svg, "f@L63:dot:closure_call",
+        &["token, which f captured, is kept until it goes out of scope (it has nothing to drop)"],
+        &["token, which f captured, is consumed during the call"]);
+    check_review_tip(&svg, "f@L75:dot:closure_call",
+        &["held, which f captured, may be moved out as the call's result or transferred out of the closure during the call"],
+        &["held, which f captured, is moved out"]);
+}
+
+#[test]
+fn p4_closure_review_return_provenance() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_closure_review");
+    let facts = rv.facts().unwrap();
+    let sources = |name| {
+        fact_body(facts, "main")["call_relationships"]["calls"].as_array().unwrap().iter()
+            .find(|c| c["callee"] == name).unwrap()["return_sources"].clone()
+    };
+    assert_eq!(sources("read_pair"), json!([{"kind": "unknown"}]));
+    assert_eq!(sources("read_raw_slot"), json!([{"kind": "unknown"}]));
+}
+
+#[test]
+fn p4_closure_review_string_provenance_at_join() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_closure_return_join");
+    let calls = fact_body(rv.facts().unwrap(), "main")["call_relationships"]["calls"].as_array().unwrap();
+    // The two join predecessors are a compiler-resolved String deref
+    // and a copy of other. Only the first follows String storage.
+    for name in ["string_first", "string_second"] {
+        let sources = &calls.iter().find(|c| c["callee"] == name).unwrap()["return_sources"];
+        assert_eq!(*sources, json!([
+            {"kind": "input", "index": 1, "projection": [], "string_contents": true},
+            {"kind": "input", "index": 2, "projection": []}
+        ]), "{name}");
     }
 }

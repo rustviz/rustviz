@@ -1565,28 +1565,15 @@ impl DeepPlace {
         self.elem.clone().unwrap_or_else(|| name.to_owned())
     }
 }
-/// Where a value an `FnOnce` closure captured by value ends up when
-/// the closure is called, from the closure body's MIR (#271).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum CapturedEnd {
-    /// The body doesn't move it on, or passes it to `drop`: it is
-    /// dropped during the call.
-    Dropped,
-    /// The body returns it: it leaves the closure as the call's result.
-    Returned,
-    /// The body moves it somewhere else, or only on some paths: all we
-    /// can say is that the call uses it up.
-    Moved,
-}
-
 /// A by-value capture of an `FnOnce` closure that needs accounting for
 /// at its call: the captured place's name, what happens to it, and
 /// whether its type has drop glue.
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct CapturedFate {
     pub name: String,
-    pub end: CapturedEnd,
+    pub outcomes: std::collections::BTreeSet<crate::facts::call_relationships::CaptureFate>,
     pub needs_drop: bool,
+    pub borrowed: bool,
 }
 
 /// A borrow that reaches a variable through the reference a call

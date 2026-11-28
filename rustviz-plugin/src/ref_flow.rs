@@ -858,14 +858,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // A single aggregate argument holds all its borrows, not one of them.
     tie.holds_all = tie.tied.len() == 1 && holds_all_literal;
     if tie.tied.len() >= 2 {
-      if let Some(id) = callee.and_then(|d| d.as_local()).filter(|id| self.tcx.hir_maybe_body_owned_by(*id).is_some()) {
-        let body = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(self.tcx, id).body;
-        if body.return_ty().is_ref() {
-          let origins = crate::facts::call_wording::return_origins(self.tcx, body, None);
-          tie.returns_alternatives = origins.is_some_and(|args| args.len() == tie.tied.len() &&
-            tie.tied.iter().all(|i| body.args_iter().nth(*i).is_some_and(|l| args.contains(&Some(l)))));
-        }
-      }
+      use crate::facts::call_relationships::{CallKind, ReturnSource};
+      tie.returns_alternatives = self.call_relationship(call)
+        .filter(|record| record.kind == CallKind::Direct)
+        .and_then(|record| record.return_sources.as_ref())
+        .and_then(|sources| sources.iter().map(|source| match source {
+          ReturnSource::Input { index, .. } => Some(*index),
+          _ => None,
+        }).collect::<Option<std::collections::BTreeSet<_>>>())
+        .is_some_and(|inputs| inputs.into_iter().eq(tie.tied.iter().copied()));
     }
     if multiple_lenders && tie.stored_in.is_empty() {
       if let [index] = tie.tied.as_slice() {

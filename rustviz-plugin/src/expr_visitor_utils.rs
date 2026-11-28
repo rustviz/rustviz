@@ -1783,7 +1783,25 @@ pub fn rc_call_of_expr(call: &Expr, tcx: &TyCtxt) -> Option<RcCall> {
 
 /// The function RAP for `call`'s result, with `Rc` clone / downgrade
 /// calls marked as such.
-pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt) -> ResourceAccessPoint {
+pub fn fn_result_rap(call: &Expr, rap: ResourceAccessPoint, tcx: &TyCtxt, raps: &BodyRaps) -> ResourceAccessPoint {
+  let mut rap = rap;
+  if let ResourceAccessPoint::Function(f) = &mut rap {
+    let typeck = tcx.typeck(call.hir_id.owner);
+    f.callable_result = crate::facts::call_relationships::kind(*tcx, typeck.type_dependent_def_id(call.hir_id)).is_callable();
+    if f.callable_result {
+      if let ExprKind::Call(callee, _) = call.kind {
+        if let ExprKind::Path(qpath) = callee.kind {
+          if let rustc_hir::def::Res::Local(id) = typeck.qpath_res(&qpath, callee.hir_id) {
+            // The result begins at a function icon, but the callee is
+            // still this particular closure binding (including shadows).
+            if let Some(binding) = raps.binding(id) {
+              f.name.clone_from(binding.rap.name());
+            }
+          }
+        }
+      }
+    }
+  }
   let rap = match rc_call_of_expr(call, tcx) {
     Some(rc_call) => rap.with_rc_call(rc_call),
     None => rap,
@@ -1874,13 +1892,16 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> ResourceTy {
     // from_expansion). Both situations should fall back to Anonymous
     // rather than crash, mirroring the Path / Field arms above.
     ExprKind::Call(fn_expr, _) => {
-      hirid_to_var_name(fn_expr.hir_id, tcx)
-        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
+      // A call through a local (`f(1)` with `f` a closure or fn
+      // pointer) yields the call's result, not `f`'s own value: name
+      // the call's Function RAP, never the variable (#254, #299).
+      let key = hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n));
+      key.and_then(|n| raps.get(&n).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx, raps)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::MethodCall(name_and_generic_args, ..) => {
       hirid_to_var_name(name_and_generic_args.hir_id, &tcx)
-        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx)))
+        .and_then(|n| raps.get(&fn_key(&n)).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx, raps)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }
     ExprKind::Block(b, _) => {
@@ -2084,148 +2105,6 @@ pub fn find_lender(rhs: &Expr, tcx: &TyCtxt, raps: &BodyRaps, borrow_map: &HashM
   _ => ResourceTy::Anonymous,
   }
 }
-/// Where each value an `FnOnce` closure captured by value ends up when
-/// the closure is called (#271), read from the closure body's MIR.
-/// `body` is the closure's own MIR, whose first argument (`_1`) is the
-/// closure value itself, passed by value because the closure is
-/// `FnOnce`; its fields are the captures, in the order of
-/// `closure_min_captures_flattened`. Entry `i` describes capture `i`:
-///
-/// * `Returned`: the body's only use of it is to return it.
-/// * `Dropped`: the body passes it to `mem::drop`, or never moves it
-///   out, so it is dropped with the rest of the closure's environment
-///   when the call ends.
-/// * `Moved`: it is moved somewhere else, or moved on only some paths
-///   (the body has a branch), so all that can be said is that the call
-///   uses it up.
-pub fn closure_capture_ends<'tcx>(
-  tcx: TyCtxt<'tcx>,
-  body: &rustc_middle::mir::Body<'tcx>,
-  n_captures: usize,
-) -> Vec<crate::svg_generator::data::CapturedEnd> {
-  use crate::svg_generator::data::CapturedEnd;
-  use rustc_middle::mir::{Local, Operand, Place, PlaceElem, Rvalue, StatementKind, TerminatorKind, RETURN_PLACE};
-
-  let all_moved = || vec![CapturedEnd::Moved; n_captures];
-  let env = Local::from_u32(1);
-  // Not an owned environment: not a by-value `FnOnce` body.
-  if body.arg_count < 1 || body.local_decls[env].ty.is_ref() {
-    return all_moved();
-  }
-  // The capture a whole-field place stands for.
-  fn field_of(place: &Place<'_>, env: Local) -> Option<(usize, bool)> {
-    if place.local != env {
-      return None;
-    }
-    match place.projection.first() {
-      Some(PlaceElem::Field(f, _)) => Some((f.index(), place.projection.len() == 1)),
-      _ => None,
-    }
-  }
-  // Locals holding a captured value moved out of the environment
-  // (`_3 = move (_1.0)`), and which capture, to a fixpoint.
-  let mut alias: HashMap<Local, usize> = HashMap::new();
-  loop {
-    let before = alias.len();
-    for bb in body.basic_blocks.iter() {
-      for st in &bb.statements {
-        if let StatementKind::Assign(asg) = &st.kind {
-          let (dest, rv) = &**asg;
-          if let Rvalue::Use(Operand::Move(src)) = rv {
-          if dest.projection.is_empty() && dest.local != RETURN_PLACE {
-            let i = match field_of(src, env) {
-              Some((i, true)) => Some(i),
-              _ if src.projection.is_empty() => alias.get(&src.local).copied(),
-              _ => None,
-            };
-            if let Some(i) = i {
-              alias.insert(dest.local, i);
-            }
-          }
-          }
-        }
-      }
-    }
-    if alias.len() == before {
-      break;
-    }
-  }
-  // Which capture a moved operand carries, and whether it moved only
-  // part of it.
-  let carried = |op: &Operand<'tcx>| -> Option<(usize, bool)> {
-    let Operand::Move(p) = op else { return None };
-    match field_of(p, env) {
-      Some(x) => Some(x),
-      None if p.projection.is_empty() => alias.get(&p.local).map(|i| (*i, true)),
-      None => alias.get(&p.local).map(|i| (*i, false)),
-    }
-  };
-  let mut ends: Vec<Option<CapturedEnd>> = vec![None; n_captures];
-  let mut mark = |i: usize, e: CapturedEnd| {
-    if let Some(slot) = ends.get_mut(i) {
-      *slot = Some(match slot { None => e, Some(old) if *old == e => e, Some(_) => CapturedEnd::Moved });
-    }
-  };
-  let mut has_branch = false;
-  for bb in body.basic_blocks.iter() {
-    for st in &bb.statements {
-      let StatementKind::Assign(asg) = &st.kind else { continue };
-      let (dest, rv) = &**asg;
-      if let Rvalue::Use(op) = rv {
-        if let Some((i, whole)) = carried(op) {
-          if dest.projection.is_empty() && dest.local != RETURN_PLACE {
-            continue; // an alias, followed above
-          }
-          if whole && dest.local == RETURN_PLACE && dest.projection.is_empty() {
-            mark(i, CapturedEnd::Returned);
-          } else {
-            mark(i, CapturedEnd::Moved);
-          }
-        }
-        continue;
-      }
-      let ops: Vec<&Operand<'tcx>> = match rv {
-        Rvalue::Repeat(o, _) | Rvalue::Cast(_, o, _) | Rvalue::UnaryOp(_, o) => vec![o],
-        Rvalue::BinaryOp(_, ab) => vec![&ab.0, &ab.1],
-        Rvalue::Aggregate(_, ops) => ops.iter().collect(),
-        _ => vec![],
-      };
-      for o in ops {
-        if let Some((i, _)) = carried(o) {
-          mark(i, CapturedEnd::Moved);
-        }
-      }
-    }
-    match &bb.terminator().kind {
-      TerminatorKind::Call { func, args, .. } => {
-        let is_mem_drop = func.const_fn_def()
-          .map_or(false, |(def_id, _)| tcx.is_diagnostic_item(rustc_span::sym::mem_drop, def_id));
-        for a in args {
-          if let Some((i, whole)) = carried(&a.node) {
-            mark(i, if is_mem_drop && whole { CapturedEnd::Dropped } else { CapturedEnd::Moved });
-          }
-        }
-      }
-      TerminatorKind::TailCall { args, .. } => {
-        for a in args {
-          if let Some((i, _)) = carried(&a.node) {
-            mark(i, CapturedEnd::Moved);
-          }
-        }
-      }
-      TerminatorKind::SwitchInt { .. } => has_branch = true,
-      _ => {}
-    }
-  }
-  ends.into_iter()
-    .map(|e| match e {
-      None => CapturedEnd::Dropped,
-      Some(_) if has_branch => CapturedEnd::Moved,
-      Some(e) => e,
-    })
-    .collect()
-}
-
 /// For an expression expanded from `vec![…]`, the elements the user
 /// wrote: `vec![s, t]` (an array literal inside the expansion) gives
 /// `[s, t]`, `vec![x; n]` (`from_elem(x, n)`) gives `[x]`. `None` for

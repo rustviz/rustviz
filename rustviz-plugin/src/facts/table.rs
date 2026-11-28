@@ -1158,6 +1158,7 @@ mod tests {
         BodyFacts {
             writes: BTreeMap::new(),
             scope_ends: Default::default(),
+            call_relationships: Default::default(),
             value_flow: Default::default(),
             joined_argument_loans: Default::default(),
             exact_reborrow_parents: Default::default(),
