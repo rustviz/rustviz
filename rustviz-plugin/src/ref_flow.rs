@@ -99,8 +99,6 @@ enum FlowTarget<'s> {
   Result,
   /// One field of the struct the call returns.
   Field(&'s str),
-  /// The receiver of a `&mut self` method (`refs.push(&s)`).
-  Receiver,
   /// The reference the call returns (in an `Option` / `Result` or not),
   /// as a pointer: only its own lifetime, not those of the references
   /// stored in what it points to. `refs.last_mut()` on a `Vec<&String>`
@@ -261,12 +259,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ if self.call_result_has_one_lifetime(self.passed_through_from(call)) => sig.output(),
         _ => return None,
       },
-      // What a `&mut self` method can store into its receiver: the
-      // receiver's own type (`Vec<T>` in `push(&mut self, value: T)`).
-      FlowTarget::Receiver => match sig.inputs().first()?.kind() {
-        ty::Ref(_, inner, m) if m.is_mut() => *inner,
-        _ => return Some(Vec::new()),
-      },
     };
     // A type parameter matters only if this call instantiates it with
     // something that holds a reference (`T = &i32` in `unwrap`).
@@ -379,9 +371,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let shares = |t: Ty<'tcx>| shares_in(t, &regions);
     let mut flows = Vec::new();
-    // The receiver doesn't flow into itself.
-    let skip = usize::from(matches!(target, FlowTarget::Receiver));
-    for (index, (input, arg)) in sig.inputs().iter().zip(args).enumerate().skip(skip) {
+    for (index, (input, arg)) in sig.inputs().iter().zip(args).enumerate() {
       let (place, content, place_mut) = match input.kind() {
         ty::Ref(r, inner, m) => (regions.contains(r), shares(*inner), m.is_mut()),
         _ => (false, shares(*input), false),
@@ -488,40 +478,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     found
-  }
-
-  /// Whether `call` is a `&mut self` method whose signature lets it
-  /// store a borrow carried by another argument into the receiver:
-  /// `push(&mut self, value: T)` on a `Vec<&String>` (#392). Decided
-  /// from the signature or from the loans MIR carries into its pointee.
-  pub fn call_stores_into_receiver(&self, call: &'tcx Expr<'tcx>) -> bool {
-    let ExprKind::MethodCall(_, receiver, _, _) = call.kind else { return false };
-    self.call_arg_flows_into(call, FlowTarget::Receiver).is_some_and(|f| !f.is_empty()) ||
-      expr_to_rap_name(receiver, &self.tcx).is_some_and(|name| self.body_facts.is_some_and(|facts|
-        facts.receiver_loans.get(&(call.span.with_parent(None), name)).is_some_and(|ls| ls.iter().any(|l| l.newly_held))))
-  }
-
-  /// The individual loans of an argument stored in the receiver when that
-  /// argument was built as an aggregate (`v.push((&a, &mut b))`).
-  pub(crate) fn receiver_aggregate_operands(&self, call: &'tcx Expr<'tcx>) -> Vec<OperandBorrow<'a>> {
-    let flows = self.call_arg_flows_into(call, FlowTarget::Receiver).unwrap_or_default();
-    flows.iter().filter(|f| f.content).filter_map(|f| self.aggregate_operand_borrows(f.arg, true)).flatten().collect()
-  }
-
-  /// If an input and receiver already share a loan, their overlap alone
-  /// says nothing about this call (e.g. inspect a previously stored key).
-  pub(crate) fn receiver_input_loans(&self, call: &'tcx Expr<'tcx>, inputs: &[crate::facts::ReceiverLoan])
-      -> std::collections::BTreeMap<usize, crate::facts::StoredOperand> {
-    let flows = self.call_arg_flows_into(call, FlowTarget::Receiver).unwrap_or_default();
-    let mut loans = std::collections::BTreeMap::new();
-    for input in inputs {
-      if input.newly_held || flows.iter().any(|f| f.index == input.argument) {
-        loans.entry(input.loan).and_modify(|op| {
-          if *op != input.operand { *op = crate::facts::StoredOperand::Carrier; }
-        }).or_insert(input.operand);
-      }
-    }
-    loans
   }
 
   /// The variables the reference `call` returns (or a value holding
@@ -813,8 +769,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   pub fn call_arg_tie(&self, call: &'tcx Expr<'tcx>, field: Option<&str>) -> ArgTie {
     if field.is_none() && matches!(call.kind, ExprKind::Call(_, [_])) && self.aggregate_borrows(call).is_some_and(|bs| !Self::aggregate_lender_kinds(bs).is_empty()) {
       // `Some(r)` always constructs the variant: its value is not None.
-      let constructs_variant = self.callee_sig(call).and_then(|(_, _, _, callee)| callee).is_some_and(|def_id|
-        matches!(self.tcx.def_kind(def_id), rustc_hir::def::DefKind::Ctor(rustc_hir::def::CtorOf::Variant, _)));
+      let constructs_variant = self.variant_construction(call).is_some();
       return ArgTie { total: 1, tied: vec![0], holds_all: true, constructs_variant, ..ArgTie::default() };
     }
     self.call_arg_tie_to(call, match field { Some(f) => FlowTarget::Field(f), None => FlowTarget::Result })
@@ -822,13 +777,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// `call_arg_tie` for the part `target` of the result.
   fn call_arg_tie_to(&self, call: &'tcx Expr<'tcx>, target: FlowTarget<'_>) -> ArgTie {
-    let Some((sig, _, args, callee)) = self.callee_sig(call) else { return ArgTie::default() };
+    let Some((sig, _, args, _)) = self.callee_sig(call) else { return ArgTie::default() };
     let mut tie = ArgTie {
       receiver: matches!(call.kind, ExprKind::MethodCall(..)),
       receiver_is_ref: sig.inputs().first().is_some_and(|ty| ty.is_ref()),
       total: args.len(),
-      constructs_variant: callee.is_some_and(|def_id| matches!(self.tcx.def_kind(def_id),
-        rustc_hir::def::DefKind::Ctor(rustc_hir::def::CtorOf::Variant, _))),
+      constructs_variant: self.variant_construction(call).is_some(),
       ..ArgTie::default()
     };
     let mut holds_all_literal = false;
@@ -857,16 +811,44 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     // A single aggregate argument holds all its borrows, not one of them.
     tie.holds_all = tie.tied.len() == 1 && holds_all_literal;
+    let record = self.call_relationship(call)
+      .filter(|record| record.kind == crate::facts::call_relationships::CallKind::Direct);
+    if matches!(target, FlowTarget::Result) {
+      tie.enum_holds_reference = record.and_then(|r| r.enum_holds_reference);
+      // The aggregate argument may carry more loans than the selected
+      // result payload. Preserve the signature's restriction here.
+      if tie.enum_holds_reference.is_some() {
+        tie.holds_all = false;
+      }
+    }
     if tie.tied.len() >= 2 {
-      use crate::facts::call_relationships::{CallKind, ReturnSource};
-      tie.returns_alternatives = self.call_relationship(call)
-        .filter(|record| record.kind == CallKind::Direct)
+      use crate::facts::call_relationships::ReturnSource;
+      tie.returns_alternatives = record
         .and_then(|record| record.return_sources.as_ref())
         .and_then(|sources| sources.iter().map(|source| match source {
           ReturnSource::Input { index, .. } => Some(*index),
           _ => None,
         }).collect::<Option<std::collections::BTreeSet<_>>>())
         .is_some_and(|inputs| inputs.into_iter().eq(tie.tied.iter().copied()));
+      if matches!(target, FlowTarget::Result) {
+        tie.proven_lender = record.and_then(|record| record.return_lender.as_ref()).map(|place| place.name.clone());
+        if let Some(record) = record {
+          // Only name a lender for a variant when every known reference
+          // payload in that variant points to the same single place.
+          let mut variants = std::collections::BTreeMap::<_, Vec<_>>::new();
+          for payload in &record.return_payloads {
+            if payload.sources.iter().all(|source| *source == ReturnSource::Absent) { continue; }
+            variants.entry(&payload.variant).or_default().push(payload.lender.as_ref());
+          }
+          for (variant, lenders) in variants {
+            if let Some(first) = lenders.first().copied().flatten() {
+              if lenders.iter().all(|place| *place == Some(first)) {
+                tie.variant_lenders.push((variant.clone(), first.name.clone()));
+              }
+            }
+          }
+        }
+      }
     }
     if multiple_lenders && tie.stored_in.is_empty() {
       if let [index] = tie.tied.as_slice() {
@@ -1190,6 +1172,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     match init.kind {
       ExprKind::Call(..) | ExprKind::MethodCall(..) => {
+        if let Some(loans) = self.enum_call_borrows(init) {
+          let mutable = !loans.is_empty() && loans.iter().all(|operand| operand.loan.kind == "mut");
+          let mut lenders = Vec::new();
+          for operand in loans {
+            if !lenders.contains(&operand.lender) { lenders.push(operand.lender); }
+          }
+          return (lenders, mutable);
+        }
         // `let el = refs.last_mut();` / `refs.iter_mut().next()` on a
         // `Vec<&String>`: an `Option` of a reference into refs (#1382,
         // #1395), not of what refs's elements borrow.
@@ -1234,7 +1224,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let borrows = match holder_branch_bodies(init) {
       Some(bodies) => bodies.into_iter().filter_map(branch_value_expr)
         .filter_map(|v| self.aggregate_borrows(v)).flatten().collect(),
-      None => self.aggregate_borrows(init).unwrap_or_default(),
+      None => self.aggregate_borrows(init).or_else(|| self.enum_call_borrows(init)).unwrap_or_default(),
     };
     let kinds = Self::aggregate_lender_kinds(borrows);
     if !kinds.is_empty() { return kinds; }
@@ -1249,11 +1239,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// The loan identities attached to the operands of this MIR construction.
   /// A lender column is a projection of an identified loan, never its key.
   pub(crate) fn aggregate_borrows(&self, init: &Expr<'_>) -> Option<Vec<OperandBorrow<'a>>> {
-    self.aggregate_operand_borrows(init, false)
-  }
-
-  fn aggregate_operand_borrows(&self, init: &Expr<'_>, receiver: bool) -> Option<Vec<OperandBorrow<'a>>> {
     let facts = self.body_facts?;
+    if let Some(variant) = self.variant_construction(init) {
+      return Some(self.aggregate_loan_operands(&variant.operands, false));
+    }
     let span = if crate::facts::is_vec_expansion(self.tcx, init.span.ctxt().outer_expn()) { init.span.source_callsite() } else { init.span };
     // For a reassignment rustc can attach the assignment's span to the
     // aggregate write. Its RHS is the expression this visitor was given.
@@ -1262,6 +1251,51 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let ExprKind::Assign(_, rhs, _) = parent.kind else { return None };
       (rhs.hir_id == init.hir_id).then(|| facts.aggregate_loans.get(&parent.span.with_parent(None))).flatten()
     })?;
+    Some(self.aggregate_loan_operands(ids, false))
+  }
+
+  fn variant_construction(&self, init: &Expr<'_>) -> Option<&'a crate::facts::VariantConstruction> {
+    let facts = self.body_facts?;
+    let at = facts.value_flow.constructor_site(init.span).or_else(|| {
+      let rustc_hir::Node::Expr(parent) = self.tcx.parent_hir_node(init.hir_id) else { return None };
+      let ExprKind::Assign(_, rhs, _) = parent.kind else { return None };
+      (rhs.hir_id == init.hir_id).then(|| facts.value_flow.constructor_site(parent.span)).flatten()
+    })?;
+    let index = facts.variant_constructions.binary_search_by_key(&at, |v| v.location).ok()?;
+    Some(&facts.variant_constructions[index])
+  }
+
+  /// A returned enum may have no reference on one path and it can keep
+  /// both inputs restricted through one lifetime. The origin of each
+  /// runtime payload is carried separately from these borrowck loans.
+  pub(crate) fn enum_call_borrows(&self, call: &Expr<'_>) -> Option<Vec<OperandBorrow<'a>>> {
+    let relationship = self.call_relationship(call)?;
+    if relationship.return_payloads.is_empty() { return None; }
+    let result = relationship.holders.as_ref()?.result.as_ref()?;
+    let slot = result.slots.iter().find(|slot| slot.place == result.destination)?;
+    // An unused result need not be live on the edge. The call still
+    // evaluates its operands, which the ordinary call drawing shows.
+    let operands: Vec<_> = slot.loans.intersection(&result.argument_loans).map(|&loan| crate::facts::AggregateLoan {
+      conditional: !self.body_facts.is_some_and(|facts| facts.loans.iter().any(|fact| {
+        use rustc_middle::mir::{Rvalue, StatementKind};
+        if fact.loan != loan { return false; }
+        let Some(issue) = fact.issue else { return false };
+        let Some(statement) = self.mir_body[issue.block].statements.get(issue.statement_index) else { return false };
+        let StatementKind::Assign(assign) = &statement.kind else { return false };
+        let Rvalue::Ref(_, _, place) = assign.1 else { return false };
+        relationship.return_payloads.iter().any(|payload| {
+          payload.always_present() && payload.lender.as_ref().is_some_and(|lender| lender.matches(self.tcx, place))
+        })
+      })),
+      issued: false,
+      loan,
+    }).collect();
+    if operands.is_empty() { return None; }
+    Some(self.aggregate_loan_operands(&operands, false))
+  }
+
+  pub(crate) fn aggregate_loan_operands(&self, ids: &[crate::facts::AggregateLoan], receiver: bool) -> Vec<OperandBorrow<'a>> {
+    let Some(facts) = self.body_facts else { return Vec::new() };
     let mut out = Vec::new();
     for operand in ids {
       let Some(loan) = facts.loans.iter().find(|l| l.loan == operand.loan) else { continue };
@@ -1305,7 +1339,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       };
       out.push(OperandBorrow { lender, loan, issued: operand.issued, conditional: operand.conditional });
     }
-    Some(out)
+    out
   }
 
   fn aggregate_lender_kinds(borrows: Vec<OperandBorrow<'_>>) -> Vec<(ResourceTy, bool)> {

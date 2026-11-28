@@ -319,6 +319,11 @@ impl ValueFlow {
         self.operands.constructors.contains_key(&span.with_parent(None))
     }
 
+    pub fn constructor_site(&self, span: Span) -> Option<Location> {
+        let [site] = self.operands.constructors.get(&span.with_parent(None))?.as_slice() else { return None };
+        Some(site.at)
+    }
+
     pub fn argument_constructor(&self, span: Span) -> bool {
         self.constructor(span) || self.imaginary.constructors.contains_key(&span.with_parent(None))
     }

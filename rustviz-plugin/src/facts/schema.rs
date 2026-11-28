@@ -37,13 +37,30 @@ pub struct Extraction {
     pub maybe: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
 pub struct AggregateLoan {
     pub loan: usize,
     /// This operand makes a reference, rather than carrying an older one.
     pub issued: bool,
     /// The aggregate can be constructed on a path that skips the issue.
     pub conditional: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct VariantConstruction {
+    #[serde(serialize_with = "location")]
+    pub location: Location,
+    pub destination: EndPlace,
+    pub variant: usize,
+    pub fields: Vec<VariantField>,
+    #[serde(skip)]
+    pub operands: Vec<AggregateLoan>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct VariantField {
+    pub place: EndPlace,
+    pub loans: Vec<AggregateLoan>,
 }
 
 /// The source-level name and the typed steps that have no column of their own.
@@ -63,7 +80,8 @@ pub(crate) enum PlaceStep {
 }
 
 /// How the MIR operand carries this loan into a receiver.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StoredOperand {
     /// A reference with an identified referent, or an aggregate of direct references.
     Direct,
@@ -76,11 +94,85 @@ pub enum StoredOperand {
 
 /// The argument index includes the receiver at index zero. A loan already
 /// in the receiver needs an independent signature tie to this argument.
+#[derive(Serialize)]
 pub struct ReceiverLoan {
     pub loan: usize,
     pub argument: usize,
     pub operand: StoredOperand,
     pub newly_held: bool,
+    pub signature_tied: bool,
+}
+
+/// A possible write through an argument, with both places in the caller
+/// before invocation. A strong update also establishes the new value.
+#[derive(Serialize)]
+pub(crate) struct CallStore {
+    pub argument: usize,
+    pub destination_argument: usize,
+    pub source: EndPlace,
+    pub target_argument: EndPlace,
+    pub destination: EndPlace,
+    pub holder: String,
+    #[serde(skip)]
+    pub sibling_use: bool,
+    pub loans: BTreeSet<usize>,
+    pub replaces: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub guaranteed: bool,
+    #[serde(skip)]
+    pub iterator: bool,
+    pub through_source: bool,
+    pub reference_value: bool,
+    /// A single incoming loan proved by the reaching definition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_loan: Option<usize>,
+    /// First instruction on the call's normal return edge.
+    #[serde(skip)]
+    pub returned_at: Location,
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct CallHolders {
+    /// Assignment which receives the result, following direct staging moves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<CallHolderResult>,
+    /// Lifetimes through the mutable receiver can keep these loans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiver: Option<ReceiverHolds>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stores: Vec<CallStore>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CallHolderResult {
+    pub destination: EndPlace,
+    #[serde(serialize_with = "location")]
+    pub arrival: Location,
+    /// Borrow-checker loans at the call edge, in the result's own projections.
+    pub slots: Vec<CallHolderSlot>,
+    /// Loans actually carried into this call at the operand reads.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub argument_loans: BTreeSet<usize>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CallHolderSlot {
+    pub place: EndPlace,
+    pub loans: BTreeSet<usize>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ReceiverHolds {
+    pub place: EndPlace,
+    pub loans: Vec<ReceiverLoan>,
+    pub unchanged: bool,
+    /// Inputs whose values the normal-return effect can establish are stored.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub stored_arguments: BTreeSet<usize>,
+    #[serde(skip)]
+    pub extends_vec: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub operands: Vec<AggregateLoan>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,10 +254,6 @@ pub struct BodyFacts {
     /// Number of owned resource fields in the binding's closure type.
     #[serde(skip)]
     pub closure_captures: BTreeMap<String, usize>,
-    /// Places a callee can write through a mutable operand, paired with
-    /// the loans carried by the source operand at that exact MIR call.
-    #[serde(skip)]
-    pub(crate) argument_stores: std::collections::HashMap<(rustc_span::Span, usize), Vec<(EndPlace, BTreeSet<usize>, Location)>>,
     /// Named holders still carrying each loan when their destructor runs.
     #[serde(skip)]
     pub drop_holders: BTreeMap<usize, BTreeSet<String>>,
@@ -192,13 +280,11 @@ pub struct BodyFacts {
     /// Loans in the outer reference origin on this call's normal return edge.
     #[serde(skip)]
     pub(crate) returned_reference_loans: BTreeMap<Location, BTreeSet<usize>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) variant_constructions: Vec<VariantConstruction>,
     /// Loans from a closure operand that reach the named call destination.
     #[serde(serialize_with = "closure_calls", skip_serializing_if = "ClosureResults::is_empty")]
     pub(crate) closure_result_loans: ClosureResults,
-    /// Loans carried by a non-receiver MIR operand into the receiver, indexed
-    /// by the call and the receiver place.
-    #[serde(skip)]
-    pub receiver_loans: std::collections::HashMap<(rustc_span::Span, String), Vec<ReceiverLoan>>,
     /// A single proven source for this holder at release. True when its whole owner is also usable.
     #[serde(skip)]
     pub(crate) direct_releases: BTreeMap<(usize, Occurrence), bool>,
@@ -1455,6 +1541,10 @@ impl TransientPlace {
 }
 
 impl EndPlace {
+    pub(crate) fn matches<'tcx>(&self, tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>) -> bool {
+        self.local == p.local.index() && self.projection == Self::new(tcx, p, String::new()).projection
+    }
+
     pub(crate) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>, name: String) -> Self {
         let place = TransientPlace::new(tcx, p);
         Self { local: place.local.index(), projection: place.projection, name }
