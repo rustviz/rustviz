@@ -1658,6 +1658,11 @@ pub struct RowLayout {
     /// Initialization and same-statement releases, keyed by event so inserted
     /// drawing rows and later statements sharing a source line stay distinct.
     pub(crate) let_else_success_events: BTreeMap<usize, Span>,
+    /// The MIR store each arrival and replacement dot depicts.
+    pub(crate) assignment_stores: BTreeMap<usize, AssignmentOccurrence>,
+    pub(crate) staged_replacements: BTreeSet<usize>,
+    /// Successive stores to one place, ranked in MIR order within a row group.
+    pub(crate) assignment_order: BTreeMap<usize, (usize, usize)>,
     /// The call ends the pictured control flow without a normal storage boundary.
     pub(crate) terminal_calls: BTreeSet<usize>,
     /// Both column dots and the connecting arrow describe the same aggregate operand.
@@ -1725,6 +1730,13 @@ pub struct RowLayout {
     same_dot: BTreeMap<usize, Vec<usize>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AssignmentOccurrence {
+    pub body: rustc_hir::def_id::DefId,
+    pub store: rustc_middle::mir::Location,
+    pub drop: Option<rustc_middle::mir::Location>,
+}
+
 #[derive(Debug)]
 pub(crate) struct DroppedFieldLoan {
     pub(crate) field: String,
@@ -1746,6 +1758,9 @@ impl RowLayout {
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.terminal_calls.append(&mut other.terminal_calls);
         self.scope_ends.append(&mut other.scope_ends);
+        self.assignment_stores.append(&mut other.assignment_stores);
+        self.staged_replacements.append(&mut other.staged_replacements);
+        self.assignment_order.append(&mut other.assignment_order);
         self.fork_arrow_titles.append(&mut other.fork_arrow_titles);
         self.fork_end_cases.append(&mut other.fork_end_cases);
         self.joined_end_titles.append(&mut other.joined_end_titles);

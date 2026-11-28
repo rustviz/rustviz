@@ -10,7 +10,11 @@ use std::collections::{BTreeMap, HashSet};
 // These occurrences need not have a separate SVG dot. Inspect the same
 // borrowck query and visitor as the installed plugin, before layout.
 fn with_body(name: &str, check: impl Fn(TyCtxt<'_>, &BodyFacts) + Send) {
-    let fixture = if name == "exit_with_guard" { "diverging_field_holder_1884" } else { "scope_drop_review" };
+    let fixture = match name {
+        "exit_with_guard" => "diverging_field_holder_1884",
+        "same_projection" => "edition2024/assignment_review_p4",
+        _ => "scope_drop_review",
+    };
     with_fixture_body(fixture, name, check);
 }
 
@@ -322,4 +326,23 @@ fn note_review_extended_temporary_survives_the_binding_being_reassigned() {
 #[test]
 fn note_review_destructured_binding_gets_the_temporary_fallback() {
     check_extended_temporary_fallback("destructured", "tuple");
+}
+
+#[test]
+fn assignment_review_a_place_is_never_its_own_child() {
+    with_body("same_projection", |tcx, facts| {
+        let bwf = rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, facts.def_id.expect_local());
+        let write = facts.writes.values().flatten()
+            .find(|write| write.runs && write.dest.as_ref().is_some_and(|column| column.name == "record.member"))
+            .expect("store to record.member");
+        let drop = write.replacing.as_ref().expect("store replaces the old member");
+        let TerminatorKind::Drop { place, .. } = bwf.body[write.drop_at.unwrap().block].terminator().kind
+            else { panic!("replacement must follow a MIR drop"); };
+        let rustc_middle::mir::StatementKind::Assign(assign) =
+            &bwf.body[write.at.block].statements[write.at.statement_index].kind
+            else { panic!("replacement must be a MIR store"); };
+        assert_ne!(place, assign.0, "rustc gives the drop and store different region variables");
+        assert!(super::places::same_place(place, assign.0));
+        assert!(drop.fields.is_empty(), "the enum has no pictured child to drop: {:?}", drop.fields);
+    });
 }

@@ -9240,24 +9240,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "edition2024/if_let_chain_else_reassign",
-        // The old value is still in `x` only if the condition didn't move
-        // it, so its drop at the reassignment is decided by a drop flag:
-        // there the condition, not a branch, may have moved it
-        // (maintainer, #581). After the reassignment the else branch
-        // holds a value whatever the condition did, so at the scope end
-        // only the if branch (whose condition moved x into a) has x
-        // moved: "no branch above". "nothing above" was false on the
-        // path where the condition moved x and then failed: the new
-        // value is dropped there (checked with a `Drop`-printing type;
-        // see edition2024/chain_move_then_reassign_247).
+        // At the store, the old Option was None or the condition already
+        // moved its Some payload into a. The replacement's ElaborateDrops
+        // ladder reaches the store on both edges without a destructor.
+        // After that store the else branch owns a new Some. At scope end
+        // rustc tests a flag for the payload because the if arm moved it.
         must_contain: &[
             "x goes out of scope. A value inside x may have been moved out above. Rust uses drop flags to drop the values that are still there. For Some, a runtime drop flag tracks whether x still holds its String payload.",
-            "x acquires ownership of a new resource. Its previous resource (including the String it holds, if any) is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "x acquires ownership of a resource",
         ],
         must_not_contain: &[
-            // The holds note goes before "is dropped" (#679).
             "Its previous resource is dropped here only if",
-            "Its previous resource (including the String it holds, if any) is dropped here only if no branch above moved it",
+            "Its previous resource (including the String it holds, if any) is dropped here",
             "x goes out of scope. Its resource (including the String it holds, if any) is dropped here only if nothing above moved it",
             "x acquires ownership of a new resource; its previous resource is dropped",
         ],
@@ -17363,7 +17357,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e's contents may have been moved out above, so e can't be used from here on.",
             "f's contents may have been moved out above, so f can't be used from here on until *f or f is assigned again.",
             "g's contents may have been moved out above, so g can't be used from here on until *g or g is assigned again.",
-            "g acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
+            "g acquires ownership of a new resource. The old Box drops the String if the earlier path left it initialized.",
             "b's contents may have been moved out above, so b can't be used from here on.",
         ],
         must_not_contain: &[
@@ -17491,7 +17485,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "e's contents may have been moved out above, so e can't be used from here on until *e or e is assigned again.",
             "A value is stored at *e. Its previous String is dropped here only if nothing above moved it out (Rust tracks this with a runtime drop flag).",
             "f's contents may have been moved out above, so f can't be used from here on until *f or f is assigned again.",
-            "f acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
+            "f acquires ownership of a new resource. The old Box drops the String if the earlier path left it initialized.",
             "g's contents may have been moved out above, so g can't be used from here on.",
         ],
         must_not_contain: &[
@@ -17546,9 +17540,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v was moved before the loop ended: the condition moves v to z before it can turn out false, so the while loop ends after that move, and v can't be used after the loop",
             "v goes out of scope. No resource is dropped.",
             "q may have been moved: when the condition moves q to w and then turns out false, the while loop ends after that move, so q can't be used after the loop",
-            "q acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "q acquires ownership of a new resource. Its previous resource is dropped here only if q still holds it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
+            "q acquires ownership of a new resource. Its previous resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
             "=s goes out of scope. Its resource is dropped.",
             "u acquires ownership of a new resource; its previous resource is dropped",
             "=v goes out of scope. Its resource is dropped.",
@@ -19430,18 +19425,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w acquired ownership of a resource (in all branches above)",
             "p goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "q goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            // the branch that moved u's old String away first drops nothing
+            // The arm that moves u's old String drops it at drop(u).
+            // At the shared store ElaborateDrops tests whether u still holds a String.
             "u's resource is moved into drop, which drops it",
             "u acquires ownership of a resource",
-            "u acquires ownership of a new resource; its previous resource is dropped",
+            "u acquires ownership of a new resource; its previous resource is dropped. Rust tracks this with a runtime drop flag.",
             "u acquired ownership of a resource (in all branches above)",
             // the branch that returns drops x's old String there, with h
             "x acquires ownership of a new resource; its previous resource is dropped",
             "x goes out of scope. Its resource is dropped.",
             "h goes out of scope. Its resource is dropped.",
             "x acquired ownership of a resource in every branch that reaches this point (the else branch returned)",
-            // `y = if c { y } else { m }`: y keeps its String on one path
-            "y acquires ownership of a new resource; its previous resource is dropped",
+            // `y = if c { y } else { m }`: the shared store tests whether y moved into its RHS
+            "y acquires ownership of a new resource; its previous resource is dropped. Rust tracks this with a runtime drop flag.",
             "m goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
@@ -21593,7 +21589,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
             "g goes out of scope. Any contents still in the Box are dropped. On paths where the Box is still here, its heap allocation, if it has one, is freed. Rust tracks this with a runtime drop flag.",
             "g was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). The Box may no longer hold its original contents.",
-            "j acquires ownership of a new resource. Whatever it still held (if anything) is dropped here.",
+            "j acquires ownership of a new resource. The old Box drops the String if the earlier path left it initialized.",
         ],
         must_not_contain: &[
             "its resource (including the String it holds) is dropped when b goes out of scope",
@@ -35023,8 +35019,8 @@ fn progen_1906_cleanup_and_hoisted_reads() {
 fn progen_1906_reassignment_and_capture_titles() {
     let svg = |case| run_with_local_backend(&format!("edition2024/progen_1906_{case}")).timeline_panel_string();
     check_review_tip(&svg("1127_49_oracle_moved"), "o@L7:dot:branch_join", &[
-        "is assigned None, which holds no payload", "previous value (including the String it holds, if any) is dropped",
-        "runtime drop flag", "until it's assigned again",
+        "is assigned None, which holds no payload", "(including the String it holds, if any), that resource is dropped",
+        "Rust drops the initialized parts of its previous value", "runtime drop flag", "until it's assigned again",
     ], &["acquires ownership of a new resource", "acquires ownership of a resource"]);
     // The successful edge stores x2, and a read of x there still compiles.
     // MIR only initializes x in the enclosing let-chain.
@@ -35110,8 +35106,17 @@ fn owner_titles_explain_cell_qualifiers() {
     }
     // (h holds a value, and *h.r, not h, is what q borrows.)
     assert_owner_title("rv3_facts_review_1833", "h", 56, 57, None, "This borrow was taken through h.r", "h's value is mutably borrowed");
-    assert_owner_title("known_bugs/1587_maybe_held_reassign_after_loop", "s", 24, 25, None,
-        "s may have been moved out", "hasn't been assigned");
+    let rv = run_with_local_backend("known_bugs/1587_maybe_held_reassign_after_loop");
+    let join = fact_row(fact_body(rv.facts().unwrap(), "run"), 24);
+    assert_eq!(join["state"]["s"], "maybe");
+    assert_eq!(join["cause"]["s"], "moved");
+    let tip = tooltip_of_id(&rv.timeline_panel_string(), "s@L24:dot:branch_join").unwrap();
+    assert!(tip.contains("s may have no value after the branches") && tip.contains("only some of them assign it"), "{tip}");
+    assert_review_title(&tip, &["s may have been moved out, so it can't be used here"],
+        &["s was moved out on every path"]);
+    let replacement = tooltip_of_id(&rv.timeline_panel_string(), "s@L22:dot:acquire+owner_drop_at_reassign").unwrap();
+    assert_review_title(&replacement, &["previous resource is dropped here only if s still holds it"],
+        &["no branch above moved it"]);
     // #1859 review: the struct literal is assigned at its `};` (MIR); the
     // line from the `let` row says so, and owns it from the `};` on.
     assert_owner_title("book/c5_01_struct_field_read", "user1", 9, 14, None, "user1 has no value yet", "owner of the resource");
@@ -42823,13 +42828,14 @@ fn borrow_ends_from_facts_review_ids() {
 #[test]
 fn branch_local_ref_ends_with_scope() {
     for (snippet, present, absent) in [
-        // v is used on line 23: its borrow doesn't end at the join (22).
+        // v is used on line 23. Its borrow lives past the join (22),
+        // where the completed assignment drops the old value.
         // (P2-1b review: v's reborrow `&mut *r` at `vec![r]` keeps r's loan of
         // a live until v's last use, after r's scope; r goes out of scope
         // still lent to v, with no "r's mutable borrow ends" at `vec![r]`.)
         ("assign_branch_reborrow_holder_1482",
          &["r@L18:dot:mutable_lend\"", "r@L19:dot:ref_go_out_of_scope\"", "r@L21:dot:mutable_lend\"",
-           "r@L22:dot:ref_go_out_of_scope\"", "v@L22:dot:branch_join\"", "r2@L42:dot:mutable_lend\"",
+           "r@L22:dot:ref_go_out_of_scope\"", "v@L22:dot:branch_join+owner_drop_at_reassign\"", "r2@L42:dot:mutable_lend\"",
            "q@L59:dot:mutable_lend\"", "y@L85:dot:mutable_die", "t.0@L104:dot:mutable_die"][..],
          &["r@L18:dot:mutable_lend+mutable_die", "r@L21:dot:mutable_lend+mutable_die", "r2@L42:dot:mutable_lend+mutable_die",
            "q@L59:dot:mutable_lend+mutable_die",
@@ -46398,6 +46404,210 @@ fn scope_review_nonreturning_call_ends_the_reference_column() {
         &["ends here because this call never returns"], &["goes out of scope", "is dropped"]);
 }
 
+const ASSIGNMENT_REPLACEMENTS: &str = "edition2024/assignment_replacements_p4";
+
+#[test]
+fn p4_write_replacement_is_drawn_where_the_rhs_finishes() {
+    let rv = run_with_local_backend(ASSIGNMENT_REPLACEMENTS);
+    let code = rv.code_panel_string();
+    let timeline = rv.timeline_panel_string();
+    let replacement = "value acquires ownership of a new resource; its previous resource is dropped";
+    let dots = dots_listing_tooltip(&timeline, replacement);
+    assert!(dots.iter().any(|&(_, y)| y == code_row_y(&code, "made(\"new\");")), "{dots:?}");
+    assert!(!dots.iter().any(|&(_, y)| y == code_row_y(&code, "value =")), "{dots:?}");
+    let field = run_with_local_backend("known_bugs/1677_drop_holder_rhs");
+    let svg = field.timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    assert!(doc.descendants().any(|n| {
+        n.attribute("data-rv-var") == Some("p.h") && n.attribute("data-rv-line") == Some("87")
+            && n.attribute("data-rv-event").is_some_and(|ev| ev.split_whitespace().any(|e| e == "owner_drop_at_reassign"))
+            && n.attribute("data-tooltip-text").is_some_and(|tip| tip.contains("its previous resource is dropped"))
+    }));
+}
+
+fn assignment_arrow_y(doc: &roxmltree::Document<'_>, from: &str, to: &str) -> f64 {
+    let arrow = doc.descendants().find(|node| {
+        node.attribute("data-rv-kind") == Some("arrow")
+            && matches!(node.attribute("data-rv-event"), Some("move" | "copy"))
+            && node.attribute("data-rv-var") == Some(from)
+            && node.attribute("data-rv-to") == Some(to)
+    }).unwrap_or_else(|| panic!("missing assignment arrow {from} → {to}"));
+    let points = arrow.children().find(|node| node.attribute("class") == Some("arrow-head"))
+        .and_then(|head| head.attribute("points")).expect("arrowhead coordinates");
+    points.split_ascii_whitespace().nth(1).unwrap().split_once(',').unwrap().1.parse().unwrap()
+}
+
+#[test]
+fn p4_write_destructuring_cycle_stages_the_old_values_before_stores() {
+    let svg = run_with_local_backend(ASSIGNMENT_REPLACEMENTS).timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    for name in ["left", "right"] {
+        assert!(tips.iter().any(|tip| tip.contains(&format!("{name} acquires ownership of a resource"))
+            && tip.contains("The right-hand side moved this place's old value before the stores.")),
+            "missing staging explanation on {name}");
+    }
+    let replaced = |name: &str| tips.iter().any(|t| t.starts_with(name) && t.contains("its previous resource is dropped"));
+    assert!(!replaced("left ") && !replaced("right "));
+    assert!(replaced("last "));
+}
+
+#[test]
+fn p4_write_early_return_from_rhs_skips_the_assignment_place() {
+    let svg = run_with_local_backend(ASSIGNMENT_REPLACEMENTS).timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    assert!(!tips.iter().any(|tip| tip == "Move from ticket to index"),
+        "the index operand must stay unevaluated when the RHS returns");
+    check_review_tip(&svg, "ticket@L80:dot:owner_go_out_of_scope",
+        &["ticket goes out of scope. Its resource is dropped."], &["passed", "moved"]);
+}
+
+#[test]
+fn p4_write_replacement_drops_only_the_initialized_box_and_array_parts() {
+    let svg = run_with_local_backend(ASSIGNMENT_REPLACEMENTS).timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    assert!(tips.iter().any(|tip| tip.contains("*boxed acquires ownership of a new resource.")
+        && tip.contains("boxed.0 was moved out in at least one branch above")
+        && tip.contains("runtime drop flag") && tip.contains("Its previous boxed.1 is dropped.")));
+    assert!(tips.iter().any(|tip| tip.contains("Rust drops the initialized parts of its previous value.")
+        && tip.contains("A runtime drop flag tracks which parts still need to be dropped.")));
+    assert!(!tips.iter().any(|tip| tip.contains("array acquires ownership of a new resource. Its previous resource")
+        && tip.contains("is dropped here only if no branch above moved it")));
+    let nested = run_with_local_backend("known_bugs/1711_struct_inner_moves");
+    let tips = timeline_tooltips(&nested.timeline_panel_string());
+    assert!(tips.iter().any(|tip| tip == "p.a acquires ownership of a new resource. Rust drops the initialized parts of its previous value."));
+    assert!(tips.iter().any(|tip| tip.starts_with("p.q acquires ownership of a new resource. Its previous contents were moved out earlier")
+        && tip.contains("only its heap allocation")));
+    assert!(!tips.iter().any(|tip| tip.starts_with("p.a acquires ownership of a new resource; its previous resource")));
+}
+
+#[test]
+fn p4_write_same_line_field_replacements_follow_their_own_stores() {
+    let svg = run_with_local_backend(ASSIGNMENT_REPLACEMENTS).timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let first = assignment_arrow_y(&doc, "one", "pair.right");
+    let copy = assignment_arrow_y(&doc, "copied", "n");
+    let second = assignment_arrow_y(&doc, "two", "pair.left");
+    let third = assignment_arrow_y(&doc, "three", "pair.right");
+    assert!(first < copy && copy < second && second < third, "store rows: {first}, {copy}, {second}, {third}");
+    let drops = |field| dots_listing_tooltip(&svg, &format!("{field} acquires ownership of a new resource; its previous resource is dropped"));
+    let mut right = drops("pair.right");
+    right.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let left = drops("pair.left");
+    assert_eq!(right.len(), 2, "{right:?}");
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!([right[0].1, left[0].1, right[1].1], [first, second, third]);
+}
+
+const ASSIGNMENT_REVIEW: &str = "edition2024/assignment_review_p4";
+
+#[test]
+fn p4_write_review_repeated_destination_replaces_the_first_store() {
+    let svg = run_with_local_backend(ASSIGNMENT_REVIEW).timeline_panel_string();
+    let tip = rv_elements(&svg, "a@L14:dot:").into_iter().map(|(_, tip, ..)| tip).collect::<String>();
+    assert_eq!(tip.matches("The right-hand side moved this place's old value before the stores.").count(), 1, "{tip}");
+    assert_eq!(tip.matches("its previous resource is dropped").count(), 1, "{tip}");
+    let moved = tip.find("a's resource is moved").unwrap();
+    let first = tip.find("The right-hand side moved this place's old value before the stores.").unwrap();
+    let second = tip.find("its previous resource is dropped").unwrap();
+    assert!(moved < first && first < second, "{tip}");
+}
+
+#[test]
+fn p4_write_review_conditional_rhs_preserves_drop_effects() {
+    let svg = run_with_local_backend(ASSIGNMENT_REVIEW).timeline_panel_string();
+    let titles = |prefix| rv_elements(&svg, prefix).into_iter()
+        .filter(|(id, ..)| id.contains("owner_drop_at_reassign")).map(|(_, tip, ..)| tip).collect::<Vec<_>>();
+    let old_box = titles("boxed@L33:dot:");
+    assert_eq!(old_box.len(), 2, "{old_box:?}");
+    for title in old_box {
+        assert_review_title(&title, &["drops the String if the earlier path left it initialized", "old Box frees its heap allocation"],
+            &["Whatever it still held", "including the String it holds"]);
+    }
+    let emptied = titles("only_allocation@L40:dot:");
+    assert_eq!(emptied.len(), 2, "{emptied:?}");
+    for title in emptied {
+        assert_review_title(&title, &["previous contents were moved out earlier", "only its heap allocation"],
+            &["including the String", "runtime drop flag"]);
+    }
+    let refill = rv_elements(&svg, "x@").into_iter().find(|(id, tip, ..)| id.contains("owner_drop_at_reassign")
+        && tip.contains("previous resource is dropped here only if x still holds it")).expect("conditional replacement of x");
+    assert_review_title(&refill.1, &["runtime drop flag"], &["no branch above moved"]);
+}
+
+#[test]
+fn p4_write_review_partial_replacements_drop_the_remaining_parts() {
+    let svg = run_with_local_backend(ASSIGNMENT_REVIEW).timeline_panel_string();
+    check_review_tip(&svg, "pair@L57:dot:acquire+owner_drop_at_reassign",
+        &["pair.left was moved out earlier", "only on paths that refilled it", "pair.right is dropped", "runtime drop flag"],
+        &["no branch above moved it", "moved out in at least one branch"]);
+    let payload = rv_elements(&svg, "boxed_array@L49:dot:").into_iter().find(|(id, ..)| id.contains("owner_drop_at_reassign"))
+        .expect("replacement drop on the Box payload");
+    assert_review_title(&payload.1, &["*boxed_array acquires ownership of a new resource",
+        "Rust drops the initialized parts of its previous value", "runtime drop flag"], &["frees its heap allocation"]);
+    let exhausted = rv_elements(&svg, "exhausted@L63:dot:");
+    assert!(exhausted.iter().any(|(_, tip, ..)| tip.contains("exhausted acquires ownership")), "{exhausted:?}");
+    assert!(exhausted.iter().all(|(id, ..)| !id.contains("owner_drop_at_reassign")), "{exhausted:?}");
+}
+
+#[test]
+fn p4_write_review_self_assignment_visits_the_rhs_before_the_store() {
+    let svg = run_with_local_backend(ASSIGNMENT_REVIEW).timeline_panel_string();
+    for (name, row) in [("original", 70), ("ticket", 71)] {
+        check_review_tip(&svg, &format!("{name}@L{row}:dot:move"),
+            &[&format!("{name}'s resource is moved into drop"), "which drops it"], &["acquires"]);
+    }
+    assert!(rv_elements(&svg, "original@L68:dot:").iter().all(|(id, ..)| !id.contains("owner_drop_at_reassign")));
+}
+
+#[test]
+fn p4_write_review_duplicated_guard_keeps_the_replacement() {
+    let svg = run_with_local_backend(ASSIGNMENT_REVIEW).timeline_panel_string();
+    check_review_tip(&svg, "guarded@L82:dot:acquire+owner_drop_at_reassign",
+        &["guarded acquires ownership of a new resource", "its previous resource is dropped"],
+        &["runtime drop flag"]);
+}
+
+#[test]
+fn p4_write_review_untaken_destructuring_arm_keeps_field_ownership() {
+    for (snippet, row) in [("destructure_assign_parts_1412", 60), ("rv3_issues/1674_destructure_assign_in_arm", 5)] {
+        let svg = run_with_local_backend(snippet).timeline_panel_string();
+        check_review_tip(&svg, &format!("r.a@L{row}:branch_line:full_privilege"),
+            &["r.a is the owner of the resource"], &["moved out"]);
+    }
+}
+
+#[test]
+fn p4_write_review_whole_store_pairs_the_member_drop_with_its_arrival() {
+    let svg = run_with_local_backend("struct_reassign_whole").timeline_panel_string();
+    check_review_tip(&svg, "d.data@L6:dot:acquire+owner_drop_at_reassign",
+        &["d.data acquires ownership of a new resource", "its previous resource is dropped"],
+        &["d.data acquires ownership of a resource"]);
+    assert!(rv_elements(&svg, "d.data@L6:dot:").iter().all(|(id, ..)| id != "d.data@L6:dot:acquire"));
+}
+
+#[test]
+fn p4_write_review_box_drop_names_the_payload() {
+    for (snippet, column) in [("rv3_issues/1590_box_rebox_in_arm", "b"), ("rv3_issues/1601_box_contents_leg", "bt")] {
+        let svg = run_with_local_backend(snippet).timeline_panel_string();
+        let (_, title, ..) = rv_elements(&svg, &format!("{column}@L7:dot:")).into_iter()
+            .find(|(id, ..)| id.contains("owner_drop_at_reassign")).unwrap();
+        assert_review_title(&title, &["drops the String if the earlier path left it initialized",
+            "old Box frees its heap allocation", "runtime drop flag"], &["Whatever it still held"]);
+    }
+}
+
+#[test]
+fn p4_write_review_returning_repoint_does_not_change_the_referent_at_the_store() {
+    let rv = run_with_local_backend("rv3_issues/1626_let_else_repoint_return");
+    let svg = rv.timeline_panel_string();
+    let (_, title, ..) = rv_elements(&svg, "r@L9:dot:").into_iter().find(|(_, title, ..)| title.contains("*r")).unwrap();
+    assert_review_title(&title, &["The old value at *r is dropped and the replacement is stored there"],
+        &["previous contents were moved out"]);
+    assert!(rv_elements(&svg, "b@L9:dot:").iter().all(|(id, ..)| !id.contains("owner_drop_at_reassign")));
+    let body = fact_body(rv.facts().unwrap(), "main");
+    assert!(row_facts(body, 9).iter().any(|f| f["ev"] == "BorrowEnd" && f["holder"] == "r" && f["lender"] == "a"));
+}
+
 #[test]
 fn p4_loop_boundaries_follow_the_compilers_normal_edges() {
     let rv = run_with_local_backend("p4_loop_continuation");
@@ -48297,4 +48507,17 @@ fn borrow_spelling_review_distinguishes_the_match_guard_borrow() {
     let guard = fact_loan(body, 13, "x");
     assert_eq!(payload["implicit"], false, "{payload}");
     assert_eq!(guard["implicit"], true, "{guard}");
+}
+
+/// A variable that held a value before the conditional is not one "with no
+/// value yet" on the dashed leg of a path the borrow checker still checks.
+/// Here `s` is assigned by the loop, whose literal range always runs, so the
+/// dashed legs on the later `if d` rows come from a move on a path that never
+/// runs.
+#[test]
+fn dashed_leg_of_an_assigned_variable_is_not_called_empty_yet() {
+    let svg = run_with_local_backend("known_bugs/1587_loop_two_conditionals").timeline_panel_string();
+    for row in ["s@L12:branch_line", "s@L13-14:branch_line", "s@L15:branch_line"] {
+        check_review_tip(&svg, row, &["can't prove that"], &["no value yet"]);
+    }
 }

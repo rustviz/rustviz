@@ -560,7 +560,7 @@ pub fn event_dot_owner_drop_at_reassign_box_contents_moved(my_name: &String) -> 
 // is dropped), `Some(by_cond)` when on some paths only (a drop flag
 // decides). This writes into the existing Box. `holds`: the
 // Box's `Owner::holds` (`the String it holds`).
-pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Option<&str>, maybe: Option<bool>) -> String {
+pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Option<&str>, maybe: Option<(bool, bool)>) -> String {
     let ty = holds.and_then(|h| h.strip_suffix(" it holds")).and_then(|t| t.strip_prefix("the "));
     let what = ty.map_or_else(|| String::from("contents"), escape_tooltip_name);
     let plural = ty.is_none();
@@ -569,7 +569,11 @@ pub fn event_dot_box_contents_write_after_move(deref_name: &String, holds: Optio
             "Its previous {} {} moved out earlier, so nothing is dropped.",
             what, if plural { "were" } else { "was" }
         ),
-        Some(by_cond) => format!(
+        Some((_, false)) => format!(
+            "Its previous {} {} dropped here if still initialized.",
+            what, if plural { "are" } else { "is" }
+        ),
+        Some((by_cond, true)) => format!(
             "Its previous {} {} dropped here only if {} moved {} out (Rust tracks this with a runtime drop flag).",
             what, if plural { "are" } else { "is" }, moved_above(by_cond), if plural { "them" } else { "it" }
         ),
@@ -611,10 +615,47 @@ pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate
         };
         (s, names.len() > 1)
     }
+    if parts.box_parts && parts.moved.is_empty() && parts.maybe_moved.is_empty() && parts.dropped.is_empty() {
+        let mut out = if let Some(payload) = &parts.box_payload {
+            format!("{} acquires ownership of a new resource. The old Box drops {} if the earlier path left it initialized.",
+                styled_name_html(my_name), escape_tooltip_name(payload))
+        } else {
+            event_dot_owner_drop_at_reassign_box_paths(my_name)
+        };
+        out.push_str("&lt;br&gt;The old Box frees its heap allocation, if it had one.");
+        if parts.flag {
+            out.push_str(" A runtime drop flag tracks whether the previous contents still need to be dropped.");
+        }
+        return out;
+    }
     let mut out = format!("{} acquires ownership of a new resource.", styled_name_html(my_name));
+    let not_refilled: Vec<_> = parts.maybe_moved.iter().filter(|n| !parts.refilled.contains(n)).cloned().collect();
+    if parts.other_drops {
+        out.push_str(" Rust drops the initialized parts of its previous value.");
+        if parts.flag {
+            out.push_str(" A runtime drop flag tracks which parts still need to be dropped.");
+        }
+    }
+    for field in &parts.refilled {
+        out.push_str(&format!(" Its previous {} was moved out earlier. A replacement {} is dropped here only on paths that refilled it.",
+            styled_name_html(field), styled_name_html(field)));
+    }
+    if !parts.refilled.is_empty() && parts.flag && !parts.other_drops && not_refilled.is_empty() {
+        out.push_str(" A runtime drop flag tracks whether the field still needs to be dropped.");
+    }
+    if parts.box_parts {
+        out.push_str(" The old Box frees its heap allocation, if it had one.");
+    }
+    if parts.moved.is_empty() && not_refilled.is_empty() {
+        if !parts.dropped.is_empty() {
+            let (names, plural) = join(&parts.dropped);
+            out.push_str(&format!(" Its previous {} {} dropped.", names, if plural { "are" } else { "is" }));
+        }
+        return out;
+    }
     let (moved_s, moved_plural) = join(&parts.moved);
     let (dropped_s, dropped_plural) = join(&parts.dropped);
-    if parts.maybe_moved.is_empty() {
+    if not_refilled.is_empty() && !parts.other_drops && parts.refilled.is_empty() && !parts.box_parts {
         let rest = if parts.dropped.is_empty() {
             String::from("nothing of it is dropped")
         } else {
@@ -627,21 +668,29 @@ pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate
     if !parts.moved.is_empty() {
         out.push_str(&format!(" Its previous {} {} moved out earlier.", moved_s, if moved_plural { "were" } else { "was" }));
     }
-    let (maybe_s, maybe_plural) = join(&parts.maybe_moved);
-    out.push_str(&match (parts.by_cond, maybe_plural) {
-        (true, true) => format!(
-            " Its previous {} may have been moved out above, so each is dropped here only if nothing above \
-             moved it (Rust tracks this with runtime drop flags).", maybe_s),
-        (true, false) => format!(
-            " Its previous {} may have been moved out above, so it's dropped here only if nothing above \
-             moved it (Rust tracks this with a runtime drop flag).", maybe_s),
-        (false, true) => format!(
-            " Its previous {} were moved out in some of the branches above; each is dropped here only if no \
-             branch above moved it (Rust tracks this with runtime drop flags).", maybe_s),
-        (false, false) => format!(
-            " Its previous {} was moved out in at least one branch above, so it's dropped here only if no \
-             branch above moved it (Rust tracks this with a runtime drop flag).", maybe_s),
-    });
+    if !not_refilled.is_empty() {
+        if !parts.flag || parts.other_drops {
+            let (fields, plural) = join(&not_refilled);
+            out.push_str(&format!(" Its previous {} may have been moved out. Rust drops {} when still initialized.",
+                fields, if plural { "each of them" } else { "it" }));
+        } else {
+            let (maybe_s, maybe_plural) = join(&not_refilled);
+            out.push_str(&match (parts.by_cond, maybe_plural) {
+                (true, true) => format!(
+                    " Its previous {} may have been moved out above, so each is dropped here only if nothing above \
+                     moved it (Rust tracks this with runtime drop flags).", maybe_s),
+                (true, false) => format!(
+                    " Its previous {} may have been moved out above, so it's dropped here only if nothing above \
+                     moved it (Rust tracks this with a runtime drop flag).", maybe_s),
+                (false, true) => format!(
+                    " Its previous {} were moved out in some of the branches above; each is dropped here only if no \
+                     branch above moved it (Rust tracks this with runtime drop flags).", maybe_s),
+                (false, false) => format!(
+                    " Its previous {} was moved out in at least one branch above, so it's dropped here only if no \
+                     branch above moved it (Rust tracks this with a runtime drop flag).", maybe_s),
+            });
+        }
+    }
     if !parts.dropped.is_empty() {
         out.push_str(&format!(" Its previous {} {} dropped.", dropped_s, if dropped_plural { "are" } else { "is" }));
     }
@@ -1020,6 +1069,7 @@ pub fn reassign_subsumes_acquire(reassign: &str, acquire: &str) -> bool {
             rest.strip_prefix("; its previous resource")
                 .is_some_and(|tail| tail.starts_with(" is dropped") || tail.starts_with(" (including "))
                 || rest.starts_with(". Its previous ")
+                || rest.starts_with(". Rust drops the initialized parts")
                 // A re-boxed Box's path-dependent drop (#1220).
                 || rest.starts_with(". Whatever it still held ")
         })
@@ -5474,6 +5524,12 @@ pub fn event_dot_owner_drop_at_reassign_maybe_kept(my_name: &String, note: &str)
          {0} still holds it (Rust tracks this with a runtime drop flag).",
         styled_name_html(my_name), holds, rest
     )
+}
+
+pub fn event_dot_owner_drop_at_reassign_if_initialized(my_name: &str, note: &str) -> String {
+    let (holds, rest) = split_drop_note(note);
+    let name = styled_name_html(my_name);
+    format!("{name} acquires ownership of a new resource. Its previous resource{holds} is dropped{rest} here if it still holds it.")
 }
 
 // Its scope end, when it isn't assigned again.

@@ -437,8 +437,12 @@ fn drop_with_lender_return(drop: &ExternalEvent, die: &ExternalEvent) -> bool {
 /// the drop goes with the arrival, on its row and dot. Left in the
 /// line's sequence, it was appended on the last row the line's other
 /// arrows added, as a second dot for the one write (#1345).
-fn drop_at_arrival(drop: &ExternalEvent, arrow: &ExternalEvent) -> bool {
+fn drop_at_arrival(drop: &ExternalEvent, arrow: &ExternalEvent, layout: &crate::event_order::RowLayout) -> bool {
     let ExternalEvent::OwnerDropAtReassign { ro, .. } = drop else { return false };
+    let stores = &layout.assignment_stores;
+    if stores.get(&drop.get_id()).is_some_and(|store| stores.get(&arrow.get_id()) != Some(store)) {
+        return false;
+    }
     matches!(arrow, ExternalEvent::Move { .. } | ExternalEvent::Copy { .. })
         && ResourceAccessPoint_extract(arrow).1.extract_rap().is_some_and(|t| t.hash() == ro.hash())
 }
@@ -1001,15 +1005,22 @@ struct OneLineArmGaps {
 }
 
 /// Give successive MIR effects on the same source line distinct drawing rows.
-fn ordered_effect_rows(events: &[ExternalEvent], order: &BTreeMap<usize, (usize, usize)>) -> Option<Vec<Vec<ExternalEvent>>> {
-    let &(group, _) = order.get(&events.first()?.get_id())?;
+fn ordered_effect_rows(
+    events: &[ExternalEvent], order: &BTreeMap<usize, (usize, usize)>, allow_unranked: bool,
+) -> Option<Vec<Vec<ExternalEvent>>> {
+    let &(group, _) = events.iter().find_map(|e| order.get(&e.get_id()))?;
     let mut rows = BTreeMap::<_, Vec<_>>::new();
+    let mut unranked = Vec::new();
     for event in events {
-        let &(g, rank) = order.get(&event.get_id())?;
-        if group != g { return None; }
-        rows.entry(rank).or_default().push(event.clone());
+        match order.get(&event.get_id()) {
+            Some(&(g, rank)) if g == group => rows.entry(rank).or_default().push(event.clone()),
+            None if allow_unranked => unranked.push(vec![event.clone()]),
+            _ => return None,
+        }
     }
-    (rows.len() > 1).then(|| rows.into_values().collect())
+    // Unassociated arrows have no MIR rank on this row. They cannot
+    // invalidate the proved order of the stores.
+    (rows.len() > 1).then(|| rows.into_values().chain(unranked).collect())
 }
 
 /// Split proven successive assignments to the same slot into drawing rows.
@@ -1313,7 +1324,7 @@ pub fn mutate_branch_lines(
                         on_pattern_line.then(|| side_by_side_bindings(ev, b_data)).flatten()
                             .or_else(|| chain_bindings_side_by_side(ev, binding_columns).then(Vec::new))
                     });
-                    let ordered = res.as_deref().and_then(|ev| ordered_store_rows(ev, &row_layout.stack_points).or_else(|| ordered_effect_rows(ev, &row_layout.call_rows)));
+                    let ordered = res.as_deref().and_then(|ev| ordered_store_rows(ev, &row_layout.stack_points).or_else(|| ordered_effect_rows(ev, &row_layout.assignment_order, true)).or_else(|| ordered_effect_rows(ev, &row_layout.call_rows, false)));
                     let ex = match res {
                     Some(ev) if ordered.is_some() => {
                         let mut row = new_line_num;
@@ -1323,6 +1334,12 @@ pub fn mutate_branch_lines(
                                 skippable_ev.insert(event.get_id());
                                 if let Some((l, _)) = b_data.e_data[i..].iter_mut().find(|(_, e)| e.get_id() == event.get_id()) {
                                     *l = row;
+                                }
+                                for (l, drop) in &mut b_data.e_data[i..] {
+                                    if *l == line_num && drop_at_arrival(drop, event, row_layout) {
+                                        skippable_ev.insert(drop.get_id());
+                                        *l = row;
+                                    }
                                 }
                             }
                             same_line_shift = Some((line_num, row - line_num));
@@ -1397,7 +1414,7 @@ pub fn mutate_branch_lines(
                             let Some(at) = b_data.e_data.iter().position(|(_, p_e)| p_e.get_id() == g.get_id()) else { continue };
                             let row = b_data.e_data[at].0;
                             let drops: Vec<usize> = (at + 1..size)
-                                .filter(|&k| b_data.e_data[k].0 == line_num && drop_at_arrival(&b_data.e_data[k].1, g)
+                                .filter(|&k| b_data.e_data[k].0 == line_num && drop_at_arrival(&b_data.e_data[k].1, g, row_layout)
                                     && !skippable_ev.contains(&b_data.e_data[k].1.get_id()))
                                 .collect();
                             for (n, k) in drops.into_iter().enumerate() {
@@ -2069,7 +2086,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 if ev.iter().any(|e| visualization_data.row_layout.transfer_stack.contains(&e.get_id())) {
                     return Some(ev.iter().cloned().map(|e| vec![e]).collect());
                 }
-                ordered_store_rows(ev, &visualization_data.row_layout.stack_points).or_else(|| ordered_effect_rows(ev, &visualization_data.row_layout.call_rows))
+                ordered_store_rows(ev, &visualization_data.row_layout.stack_points).or_else(|| ordered_effect_rows(ev, &visualization_data.row_layout.assignment_order, true)).or_else(|| ordered_effect_rows(ev, &visualization_data.row_layout.call_rows, false))
             });
             let ex = match res {
                 Some(ev) if ordered.is_some() => {
@@ -2079,6 +2096,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                         for e in &group {
                             placed.push((row, e.clone()));
                             skippable_ev.insert(e.get_id());
+                            for (_, drop) in visualization_data.preprocess_external_events[i + 1..].iter()
+                                .filter(|(l, d)| *l == line_num && drop_at_arrival(d, e, &visualization_data.row_layout)) {
+                                if skippable_ev.insert(drop.get_id()) {
+                                    placed.push((row, drop.clone()));
+                                }
+                            }
                         }
                         same_line_row = Some((line_num, row));
                         let count = group.len();
@@ -2171,7 +2194,7 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                                 placed.push((row, d.clone()));
                             }
                         }
-                        for d in rest_of_line.iter().filter(|d| drop_at_arrival(d, e)) {
+                        for d in rest_of_line.iter().filter(|d| drop_at_arrival(d, e, &visualization_data.row_layout)) {
                             if skippable_ev.insert(d.get_id()) {
                                 placed.push((row, d.clone()));
                             }

@@ -133,6 +133,10 @@ pub struct BodyBindings {
 
 #[derive(Serialize)]
 pub struct BodyFacts {
+    /// Explicit stores at their compiler source spans. Each replacement is
+    /// joined to its store by the normal MIR successor, before row layout.
+    #[serde(skip)]
+    pub(crate) writes: BTreeMap<rustc_span::Span, Vec<AssignmentWrite>>,
     /// Mutable call operands whose own loan ends on the normal return edge.
     #[serde(skip)]
     pub short_call_borrows: BTreeSet<(rustc_span::Span, usize)>,
@@ -216,10 +220,6 @@ pub struct BodyFacts {
     /// Assignment and call sites, with their reachability on the runtime CFG.
     #[serde(skip)]
     pub effect_sites: BTreeMap<rustc_span::Span, Vec<(rustc_middle::mir::BasicBlock, bool)>>,
-    /// MIR replacement drops keyed by the LHS span and its local. A site
-    /// can be lowered more than once, so this records whether any copy runs.
-    #[serde(skip)]
-    pub reassignment_sites: BTreeMap<(rustc_span::Span, rustc_middle::mir::Local), bool>,
     /// Drop sites with a flag before the additional runtime CFG refinements.
     #[serde(skip)]
     pub drop_flags: BTreeSet<rustc_middle::mir::Location>,
@@ -436,6 +436,64 @@ pub struct IteratorDrop {
     /// A definite item destructor on this same cleanup path, before storage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after_item: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AssignmentWrite {
+    pub at: rustc_middle::mir::Location,
+    pub row: usize,
+    pub runs: bool,
+    pub skipped: bool,
+    pub copy: bool,
+    pub direct: bool,
+    pub dest: Option<WriteColumn>,
+    pub staged_move: Option<WriteColumn>,
+    pub self_assignment: bool,
+    pub drop_at: Option<rustc_middle::mir::Location>,
+    pub replacing: Option<ReplacementDrop>,
+}
+
+/// A drawn place or the payload drawn on a Box's own column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WriteColumn {
+    pub local: rustc_middle::mir::Local,
+    pub name: String,
+    pub payload: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReplacementDrop {
+    pub how: &'static str,
+    pub flag: bool,
+    pub may_have_moved: bool,
+    pub may_be_refilled: bool,
+    pub moved_columns: Vec<WriteColumn>,
+    pub box_parts: bool,
+    pub box_payload_maybe_moved: bool,
+    pub contents_gone: bool,
+    pub partial: Option<PartialDrop>,
+    pub fields: Vec<ReplacementField>,
+    /// RHS values reaching a shared replacement, sampled after evaluation.
+    pub inputs: Vec<(rustc_span::Span, &'static str)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReplacementField {
+    pub column: WriteColumn,
+    pub conditional: bool,
+    pub flag: bool,
+    pub may_have_moved: bool,
+    pub partial: Option<PartialDrop>,
+    pub contents_gone: bool,
+}
+
+impl ReplacementDrop {
+    pub(crate) fn on_input(&self, site: rustc_span::Span) -> Option<&'static str> {
+        if self.how != "drops_if_init" { return Some(self.how); }
+        let mut kinds = self.inputs.iter().filter(|(span, _)| site.contains(*span)).map(|(_, how)| *how);
+        let first = kinds.next()?;
+        Some(if kinds.all(|how| first == how) { first } else { self.how })
+    }
 }
 
 pub(crate) struct DropMove {
