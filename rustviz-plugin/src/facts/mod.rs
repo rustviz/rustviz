@@ -29,6 +29,7 @@ mod borrow_spelling;
 mod control;
 pub use control::SourceArm;
 pub(crate) use control::{enclosing_arms, location_arms};
+pub(crate) mod call_relationships;
 mod call_stores;
 pub(crate) mod call_wording;
 mod holder_path;

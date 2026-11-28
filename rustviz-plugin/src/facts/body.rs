@@ -938,7 +938,7 @@ pub(crate) fn reference_argument_source<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tc
     let either_input = callee.as_local().filter(|id| tcx.hir_maybe_body_owned_by(*id).is_some()).is_some_and(|id| {
         let inner = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, id).body;
         inner.arg_count == 2 && inner.args_iter().all(|l| inner.local_decls[l].ty.is_ref())
-            && super::call_wording::return_origins(tcx, inner, None)
+            && super::call_relationships::return_arguments(tcx, inner, None)
                 .is_some_and(|origins| origins == inner.args_iter().map(Some).collect())
     });
     Some((tcx.item_name(callee).to_string(), reborrow, either_input))
@@ -7989,9 +7989,41 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     ));
     scope_ends.terminal_calls = terminal_calls;
     let value_flow = super::value_flow::collect(tcx, body, &cx.names, &runs, &checked, &cx.rows.event_row);
+    let mut call_relationships = super::call_relationships::collect(tcx, body, &cx.names.bindings, &runs, &checked, &cx.rows.event_row);
+    if let (Some(t), Some(pol)) = (table, pol.as_ref()) {
+        let capture_issues: BTreeSet<_> = call_relationships.captures.iter()
+            .filter(|capture| capture.transfer == super::call_relationships::CaptureTransfer::Shared)
+            .filter_map(|capture| capture.issue).collect();
+        let mut call_ends = BTreeMap::<_, Vec<_>>::new();
+        for event in out_rows.iter().flat_map(|row| &row.facts) {
+            if let Fact::BorrowEnd { loan, .. } = &event.fact {
+                call_ends.entry(event.location).or_default().push((*loan, &event.end_places));
+            }
+        }
+        for call in call_relationships.calls.iter_mut().filter(|call| call.kind.is_callable()) {
+            let TerminatorKind::Call { args, .. } = &body[call.location.block].terminator().kind else { continue };
+            let Some(receiver) = args.first().and_then(|arg| arg.node.place()) else { continue };
+            let borrow = super::call_wording::operand_borrow(body, call.location, receiver);
+            let source = borrow.map_or(receiver, |(_, place)| place);
+            let point = t.start_index(call.location);
+            let live = pol.loans_in_scope_at(point);
+            let capture_reaches_call = |issue| capture_issues.contains(&issue) && ldom(issue, call.location);
+            call.receiver_loans = held_by_place(source, point).into_iter().filter(|&id| {
+                live.contains(&BorrowIndex::from_usize(id)) && taken_at(id).is_some_and(capture_reaches_call)
+            }).collect();
+            for &(id, places) in call_ends.get(&call.location).into_iter().flatten() {
+                let Some(issue) = taken_at(id) else { continue };
+                if capture_reaches_call(issue) && places.iter().any(|place| place.local == source.local.index()) {
+                    call.receiver_loans.insert(id);
+                }
+                call.receiver_borrow_ends |= borrow.is_some_and(|(at, _)| at == issue);
+            }
+        }
+    }
     BodyFacts {
         writes,
         scope_ends,
+        call_relationships,
         value_flow,
         joined_argument_loans,
         exact_reborrow_parents,

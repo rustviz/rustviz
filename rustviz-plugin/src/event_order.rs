@@ -1714,6 +1714,10 @@ pub struct RowLayout {
     pub(crate) scope_end_ids: BTreeSet<usize>,
     pub(crate) holder_handoff_titles: BTreeMap<usize, String>,
     pub(crate) result_lend_titles: BTreeMap<usize, String>,
+    pub(crate) closure_receivers: BTreeMap<usize, String>,
+    /// Bindings whose callable representation is unknown in this body.
+    pub(crate) opaque_callable_columns: BTreeSet<u64>,
+    pub(crate) unique_closure_captures: BTreeSet<usize>,
     pub(crate) closure_captures: BTreeMap<usize, Vec<usize>>,
     pub(crate) stack_points: BTreeMap<usize, (usize, Point)>,
     pub(crate) uncertain_store_ends: BTreeSet<usize>,
@@ -1807,6 +1811,9 @@ impl RowLayout {
         self.copied_ends.append(&mut other.copied_ends);
         self.retained_references.append(&mut other.retained_references);
         self.reassigned_receivers.append(&mut other.reassigned_receivers);
+        self.closure_receivers.append(&mut other.closure_receivers);
+        self.opaque_callable_columns.append(&mut other.opaque_callable_columns);
+        self.unique_closure_captures.append(&mut other.unique_closure_captures);
         self.closure_captures.append(&mut other.closure_captures);
         self.field_generations.append(&mut other.field_generations);
         self.later_field_effects.append(&mut other.later_field_effects);
