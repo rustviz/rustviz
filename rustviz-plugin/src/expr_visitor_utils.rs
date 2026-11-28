@@ -546,6 +546,12 @@ pub(crate) fn map_place_name(expr: &Expr, root: &impl Fn(&Path) -> Option<String
   }
 }
 
+/// An inline closure's definition distinguishes even identical expressions.
+pub(crate) fn inline_closure_key(callee: &Expr<'_>) -> Option<String> {
+  let ExprKind::Closure(closure) = callee.kind else { return None };
+  Some(format!("<closure {}>", closure.def_id.local_def_index.as_u32()))
+}
+
 /// Key of a Function RAP in a `raps` map. Functions live in their own
 /// namespace, under a key no identifier can spell, so a variable named
 /// like a function or method called in the same fn (`let len =
@@ -1895,7 +1901,7 @@ pub fn get_rap(expr: &Expr, tcx: &TyCtxt, raps: &BodyRaps) -> ResourceTy {
       // A call through a local (`f(1)` with `f` a closure or fn
       // pointer) yields the call's result, not `f`'s own value: name
       // the call's Function RAP, never the variable (#254, #299).
-      let key = hirid_to_var_name(fn_expr.hir_id, tcx).map(|n| fn_key(&n));
+      let key = hirid_to_var_name(fn_expr.hir_id, tcx).or_else(|| inline_closure_key(fn_expr)).map(|n| fn_key(&n));
       key.and_then(|n| raps.get(&n).map(|rd| fn_result_rap(expr, rd.rap.to_owned(), tcx, raps)))
         .map_or(ResourceTy::Anonymous, ResourceTy::Value)
     }

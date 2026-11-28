@@ -197,6 +197,7 @@ pub(super) struct IncomingStores<'a, 'tcx> {
     pub body: &'a Body<'tcx>,
     pub preds: BTreeMap<Location, Vec<Location>>,
     pub addressed: Vec<Place<'tcx>>,
+    pub swaps: BTreeMap<Location, [Place<'tcx>; 2]>,
     pub moves: &'a rustc_mir_dataflow::move_paths::MoveData<'tcx>,
 }
 
@@ -217,7 +218,17 @@ impl<'a, 'tcx> IncomingStores<'a, 'tcx> {
                 preds.entry(next.start_location()).or_default().push(terminator);
             }
         }
-        Self { tcx, body, preds, addressed: addressed_slots(tcx, body), moves }
+        Self { tcx, body, preds, addressed: addressed_slots(tcx, body), swaps: BTreeMap::new(), moves }
+    }
+
+    /// A normal swap return defines the destination from the *pre-call*
+    /// value in the other slot, including a subplace of an aggregate.
+    pub(super) fn swap_source(&self, at: Location, slot: Place<'tcx>) -> Option<Place<'tcx>> {
+        let &[left, right] = self.swaps.get(&at)?;
+        [(left, right), (right, left)].into_iter().find_map(|(dst, src)| {
+            super::places::place_under(slot, dst)
+                .then(|| src.project_deeper(&slot.projection[dst.projection.len()..], self.tcx))
+        })
     }
 
     /// Follow only value-preserving transfers back to the issuing borrow.
@@ -287,7 +298,7 @@ impl<'a, 'tcx> IncomingStores<'a, 'tcx> {
     /// Stop each normal incoming path independently. An uninitialized arm
     /// contributes no loan, but its sibling's definition still reaches the join.
     pub fn definitions(&self, point: Location, slot: Place<'tcx>) -> Incoming {
-        let Self { tcx, body, preds, addressed, moves } = self;
+        let Self { tcx, body, preds, addressed, moves, swaps } = self;
         let tcx = *tcx;
         let mut result = Incoming::default();
         let Some(slot) = self.slot_before(point, slot) else {
@@ -348,7 +359,20 @@ impl<'a, 'tcx> IncomingStores<'a, 'tcx> {
                     match data.terminator().kind {
                         TerminatorKind::Call { destination, target: Some(target), .. }
                             if target.start_location() == next && defines(at, destination) => Some(Some(next)),
-                        TerminatorKind::Goto { .. } | TerminatorKind::SwitchInt { .. } => None,
+                        TerminatorKind::Call { target: Some(target), .. }
+                            if target.start_location() == next && swaps.contains_key(&at) => {
+                            if self.swap_source(at, slot).is_some() {
+                                Some(Some(next))
+                            } else if swaps[&at].iter().copied().any(overlaps) {
+                                result.unknown = true;
+                                continue;
+                            } else {
+                                None
+                            }
+                        }
+                        TerminatorKind::Goto { .. } | TerminatorKind::SwitchInt { .. }
+                        | TerminatorKind::FalseEdge { .. } | TerminatorKind::FalseUnwind { .. }
+                        | TerminatorKind::Assert { .. } => None,
                         _ if exposed => {
                             result.unknown = true;
                             continue;

@@ -25,6 +25,66 @@ struct RepresentedEnds {
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// A pattern can borrow a reference slot inside an enum. The owning
+  /// column is an anchor. The wording needs the slot and the release edge.
+  pub(crate) fn describe_reference_payload_ends(&mut self) {
+    use crate::svg_generator::hover_messages as hover;
+    use rustc_middle::ty::TyKind;
+
+    let Some(facts) = self.body_facts else { return };
+    let body = self.mir_body;
+    let switches = self.branch_switches();
+    let mut slots = Vec::new();
+    templates_in(self.preprocessed_events, &mut Vec::new(), None, &mut slots);
+    for (row, event, path) in slots {
+      let (from, to) = endpoints(&event);
+      let Some(holder) = from.extract_rap().and_then(|r| r.ref_local()) else { continue };
+      if !matches!(body.local_decls[holder].ty.kind(), TyKind::Ref(_, payload, _) if payload.is_ref()) {
+        continue;
+      }
+      let Some((root, container, kind)) = crate::facts::call_wording::payload_borrow(
+        self.tcx, body, holder, &self.raps.bindings,
+      ) else { continue };
+      let Some(parent) = to.extract_rap().filter(|r| r.owner_local() == Some(root)) else { continue };
+      if !matches!(&event, ExternalEvent::MutableDie { still_borrowed_by, .. }
+        | ExternalEvent::StaticDie { still_borrowed_by, .. } if still_borrowed_by.is_empty()) { continue; }
+      let id = event.get_id();
+      let Some([loan]) = self.end_loans.get(&id).map(Vec::as_slice) else { continue };
+      let mut edges = self.reference_effects.ends(*loan).filter_map(|end| {
+        let Fact::BorrowEnd { to_line, .. } = end.fact.fact else { return None };
+        if !matches!(end.fact.exact_end_places.as_slice(), [p] if p.local == holder.index() && p.projection.is_empty()) {
+          return None;
+        }
+        let (site, _) = self.normal_fork_site(facts, &switches, end.row, end.fact, to_line);
+        if site.matches(self.preprocessed_events, &path, row, id) {
+          Some(end.fact.occurrence)
+        } else {
+          None
+        }
+      });
+      // A statement has one normal successor. At a terminator, a sibling
+      // successor needs its own release before the drawing can summarize
+      // both as an unconditional end.
+      let release = edges.next().is_some_and(|first| {
+        edges.all(|other| other == first)
+          && (first.at != body.terminator_loc(first.at.block)
+            || matches!(crate::facts::real_successor_blocks(body, first.at.block).as_slice(),
+              [next] if first.successor == Some(next.start_location())))
+      });
+      let holder = hover::styled_name_html(&from.name());
+      let root = hover::styled_name_html(parent.name());
+      let container = hover::styled_name_html(&container);
+      let place = if root == container { format!("the value inside {container}") }
+        else { format!("the reference slot inside {container}") };
+      let title = if release {
+        format!("{holder}'s {kind} borrow of {place} ends. This borrow no longer restricts access to {root}.")
+      } else {
+        format!("{holder}'s {kind} borrow of {place} may end here.")
+      };
+      self.row_layout.aggregate_titles.insert(id, title);
+    }
+  }
+
   /// A projected pattern's reference and the loan of the scrutinee's
   /// owner can end independently. Match each drawn endpoint to its MIR
   /// edge before describing what ends.
@@ -699,14 +759,104 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let switches = self.branch_switches();
     let mut remove = BTreeSet::new();
     let mut put = Vec::new();
+    let mut swap_releases = BTreeSet::new();
+    let swap_writes: BTreeSet<_> = facts.call_relationships.calls.iter().filter(|call| {
+      matches!(self.mir_body[call.location.block].terminator().kind,
+        rustc_middle::mir::TerminatorKind::Call { ref func, .. }
+          if func.const_fn_def().is_some_and(|(def, _)| self.tcx.is_diagnostic_item(rustc_span::sym::mem_swap, def)))
+    }).filter_map(|call| call.holders.as_ref()).flat_map(|h| &h.stores)
+      .filter(|store| store.guaranteed && store.replaces && store.through_source)
+      .map(|store| store.destination.local).collect();
     for (line, ev, path) in &slots {
       let (from, to) = endpoints(ev);
       if !matches!(ev, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. }) {
         continue;
       }
       let Some(r) = from.extract_rap() else { continue };
+      let swapped = r.ref_local().or_else(|| r.owner_local()).filter(|l| swap_writes.contains(&l.index()));
+      if swapped.is_some() && r.is_ref() && from.is_same_underlying(to)
+        && matches!(ev, ExternalEvent::StaticDie { static_lender: None, .. }
+          | ExternalEvent::MutableDie { static_lender: None, .. })
+      {
+        let name = crate::svg_generator::hover_messages::styled_name_html(r.name());
+        let kind = if r.is_mutref() { "mutable" } else { "shared" };
+        self.row_layout.aggregate_titles.entry(ev.get_id()).or_insert_with(||
+          format!("{name}'s {kind} borrow ends (what it borrows from isn't shown)"));
+      }
       let loans = &self.end_loans[&ev.get_id()];
       let &[loan_id] = loans.as_slice() else { continue };
+      if let Some(local) = swapped {
+        let holds = |p: &crate::facts::EndPlace| p.local == local.index()
+          && (!r.is_ref() || p.projection.is_empty());
+        let ends = || self.reference_effects.ends(loan_id).filter(|boundary| boundary.fact.end_places.iter().any(holds));
+        let mut handoffs = ends().filter(|boundary| !boundary.release);
+        if let Some(handoff) = handoffs.next().filter(|first| handoffs.all(|e| e.fact.occurrence == first.fact.occurrence)
+          && ends().all(|e| {
+            let at = e.fact.occurrence.at;
+            !e.release || at == self.mir_body.terminator_loc(at.block)
+              && matches!(self.mir_body[at.block].terminator().kind,
+                rustc_middle::mir::TerminatorKind::Call { target: None, .. })
+          }))
+        {
+          let Fact::HoldEnd { to_line, .. } = handoff.fact.fact else { unreachable!() };
+          let (site, _) = self.normal_fork_site(facts, &switches, handoff.row, handoff.fact, to_line);
+          if site.path.starts_with(path) {
+            let old = ev.get_id();
+            remove.insert(old);
+            let mut placed = ExternalEvent::RefDie {
+              slot: ev.end_slot().unwrap(), from: from.clone(), to: ResourceTy::Anonymous,
+              id: old, num_curr_borrowers: 1,
+            };
+            identify_end(&mut placed, true, vec![loan_id], self.unique_id, &mut self.end_loans);
+            let id = placed.get_id();
+            self.drawn_references.ends.insert(id, vec![handoff]);
+            self.row_layout.record_arm_point(id, handoff.fact);
+            let name = crate::svg_generator::hover_messages::styled_name_html(r.name());
+            let what = if r.is_mutref() { "its mutable reference" } else if r.is_ref() { "its shared reference" }
+              else { "the value holding this borrow" };
+            self.row_layout.holder_handoff_titles.insert(id, format!(
+              "{name} stops using {what}. The borrow checker can keep the loan live through other holders."
+            ));
+            // A holder can stop while the common swap lifetime still
+            // restricts the lender. Preserve the lender's own release
+            // when no other arrow covers its MIR edge.
+            if matches!(to, ResourceTy::Value(_)) && !from.is_same_underlying(to) {
+              for boundary in self.reference_effects.ends(loan_id).filter(|b| b.release) {
+                let Fact::BorrowEnd { to_line, .. } = boundary.fact.fact else { continue };
+                let (release, _) = self.normal_fork_site(facts, &switches, boundary.row, boundary.fact, to_line);
+                if !release.matches(self.preprocessed_events, path, *line, old)
+                  || slots.iter().any(|(row, other, arm)| {
+                    let other_id = other.get_id();
+                    other_id != old && !remove.contains(&other_id)
+                      && matches!(other, ExternalEvent::StaticDie { .. } | ExternalEvent::MutableDie { .. })
+                      && endpoints(other).1 == to && self.end_loans[&other_id].contains(&loan_id)
+                      && release.matches(self.preprocessed_events, arm, *row, other_id)
+                  })
+                  || !swap_releases.insert(boundary.key())
+                {
+                  continue;
+                }
+                let mut lender_end = ev.clone();
+                match &mut lender_end {
+                  ExternalEvent::StaticDie { from, .. } | ExternalEvent::MutableDie { from, .. } =>
+                    *from = ResourceTy::Anonymous,
+                  _ => unreachable!(),
+                }
+                identify_end(&mut lender_end, true, vec![loan_id], self.unique_id, &mut self.end_loans);
+                let id = lender_end.get_id();
+                self.row_layout.record_arm_point(id, boundary.fact);
+                self.drawn_references.ends.insert(id, vec![boundary]);
+                if let Some(title) = self.edge_release_title(facts, &lender_end, &[boundary]) {
+                  self.row_layout.joined_end_titles.insert(id, title);
+                }
+                put.push((release, lender_end));
+              }
+            }
+            put.push((site, placed));
+            continue;
+          }
+        }
+      }
       if let Some(local) = r.ref_local().filter(|_| !r.is_mutref()) {
         let belongs = |p: &crate::facts::EndPlace| p.local == local.index() && p.projection.is_empty();
         let boundaries: Vec<_> = self.reference_effects.ends(loan_id).collect();

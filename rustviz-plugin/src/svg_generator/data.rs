@@ -533,7 +533,10 @@ pub struct Function {
     pub mir_result: bool,
     pub mir_constructor: bool,
     pub(crate) operator: bool,
-    pub(crate) mutable_call_receiver: bool,
+    /// The call borrows its callable receiver. The flag is its mutability.
+    pub(crate) call_receiver: Option<bool>,
+    pub(crate) receiver_has_empty_args: bool,
+    pub(crate) inline_closure: bool,
     pub callable_result: bool,
     pub(crate) result_path: Vec<crate::facts::value_flow::ReturnPart>,
     pub(crate) result_is_resource: bool,
@@ -2136,6 +2139,8 @@ pub struct ChainUse {
     pub mutable: bool,
     pub binding: bool,
     pub changes: bool,
+    pub call_receiver: bool,
+    pub definite: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -4475,9 +4480,9 @@ impl Event {
                 }
             }
             Event::MutableLend { to: ResourceTy::Value(ResourceAccessPoint::Function(f)), is, .. }
-                if f.mutable_call_receiver =>
+                if f.call_receiver == Some(true) =>
             {
-                hover_messages::event_dot_mutable_callable_lend(&self.deref_name(my_name), &f.name, lender_holds_value(is))
+                hover_messages::event_dot_mutable_callable_lend(&self.deref_name(my_name), f, lender_holds_value(is))
             }
             Event::MutableLend{ to, is, of_ref_var, ..} => {
                 let holds_value = lender_holds_value(is);
@@ -4782,7 +4787,7 @@ impl Event {
             // value one() returns (#1183).
             Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), of: CopyOf::IntoCtor(ctor), ..}
                 if f.inside.is_none() && (f.mir_result || !f.name.rsplit("::").next().unwrap_or(&f.name).starts_with(|c: char| c.is_uppercase())) => {
-                hover_messages::event_dot_init_from_call_in_ctor(&self.deref_name(my_name), &f.name, ctor, f.cast_to.as_deref())
+                hover_messages::event_dot_init_from_call_in_ctor(&self.deref_name(my_name), f, ctor)
             }
             Event::Copy{ from: ResourceTy::Value(ResourceAccessPoint::Function(f)), ..} => {
                 let constructor = !f.mir_result && f.name.rsplit("::").next().is_some_and(|l| l.starts_with(|c: char| c.is_uppercase()));

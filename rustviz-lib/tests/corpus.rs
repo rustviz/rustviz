@@ -23230,8 +23230,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // arrows named each variable's old lender.
         must_contain: &[
             "If r1 holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
-            "If r2 holds a borrow affecting a, that borrow ends here. It no longer restricts access to a",
-            "If m1 holds a mutable borrow affecting d, that borrow ends here. It no longer restricts access to d",
+            "If r2 holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
+            "m1 stops using its mutable reference. The borrow checker can keep the loan live through other holders.",
             "If m2 holds a mutable borrow affecting c, that borrow ends here. It no longer restricts access to c",
         ],
         must_not_contain: &[
@@ -23239,6 +23239,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r2's shared borrow of b ends",
             "m1's mutable borrow of c ends",
             "m2's mutable borrow of d ends",
+            "If m1 holds a mutable borrow affecting d, that borrow ends here",
         ],
     },
     TooltipExpect {
@@ -23264,7 +23265,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "r6's shared borrow of f ends. This borrow no longer restricts access to f. Ending the borrow doesn't move the resource",
             // mem::swap: exactly exchanged (#1230).
             "If r7 holds a shared borrow affecting h, that borrow ends here. It no longer restricts access to h",
-            "If r8 holds a borrow affecting g, that borrow ends here. It no longer restricts access to g",
+            "If r8 holds a shared borrow affecting g, that borrow ends here. It no longer restricts access to g",
         ],
         must_not_contain: &[
             "r5's shared borrow of f ends",
@@ -49617,7 +49618,7 @@ fn p4_call_swap_source_uses_the_pattern_binding() {
     let tips = timeline_tooltips(&rv.timeline_panel_string());
     // The &mut binding aliases the Some payload; the fixture checks the swap.
     assert!(!forbidden_present("puts the reference from (e as Some).0", &tips));
-    assert!(tips.iter().any(|tip| tip.contains("puts the reference from *payload in other.")));
+    assert!(tips.iter().any(|tip| tip.contains("puts the reference from *payload, which points into a, in other.")));
 }
 
 #[test]
@@ -49810,7 +49811,8 @@ fn p4_closure_review_unique_capture_and_branch_holder() {
     // On the other edge of the Some test, c2's call still uses its loan of s.
     let svg = run_with_local_backend("closure_in_arm_nested_if_1528").timeline_panel_string();
     check_review_tip(&svg, "c2@L25:dot:",
-        &["s's resource is being shared by one or more variables. c2 holds a shared borrow"],
+        &["s's resource is being shared by one or more variables. c2 holds a shared borrow",
+            "Calling c2 borrows c2 by shared reference as the receiver. The call may read through it"],
         &["c2 is passed to c2 by shared reference"]);
 }
 
@@ -50128,5 +50130,217 @@ fn p4_owner_review_interval_with_iterator_and_item_has_its_own_title() {
     for id in ["v@L7-8:line:revoked_privilege", "v@L8-9:line:revoked_privilege"] {
         assert_eq!(tooltip_of_id(&svg, id).as_deref(),
             Some("v's resource is mutably borrowed; v can't be used until the borrow ends"));
+    }
+}
+
+#[test]
+fn issue_1954_inline_closure_results_have_a_readable_callee() {
+    // The Fn::call terminators produce the String and the tuple's operands.
+    // The try invocation returns Some, whose payload initializes text.
+    let svg = run_with_local_backend("rv3_1954_inline_calls").timeline_panel_string();
+    let tips = timeline_tooltips(&svg);
+    for expected in [
+        "text acquires ownership of the resource the inline closure returns",
+        "The caller receives a tuple whose first element is the resource the inline closure returns",
+        "The caller receives a tuple whose second element is the value the inline closure returns",
+        "If the inline closure returns Some, text acquires ownership of the value inside it. Otherwise the `?` exits early.",
+    ] {
+        assert!(tips.iter().any(|tip| tip.contains(expected)), "missing {expected:?}");
+    }
+    for wrong in ["String::new()() returns", "the inline closure()"] {
+        assert!(!forbidden_present(wrong, &tips), "{wrong}");
+    }
+    check_review_tip(&svg, "the_inline_closure>caller@L7:arrow:copy",
+        &["second element is the value the inline closure returns"], &["second element is the resource"]);
+}
+
+#[test]
+fn issue_1954_inline_closure_returns_whole_value_to_at_binding() {
+    let svg = run_with_local_backend("rv3_1954_inline_calls").timeline_panel_string();
+    check_review_tip(&svg, "all@L33:dot:acquire",
+        &["all acquires ownership of the resource the inline closure returns"],
+        &["part of the resource", "the inline closure()"]);
+}
+
+#[test]
+fn issue_1954_inline_closure_copy_inside_constructor() {
+    let svg = run_with_local_backend("rv3_1954_inline_calls").timeline_panel_string();
+    check_review_tip(&svg, "result@L38:dot:copy",
+        &["result is initialized with a Some value holding the value the inline closure returns"],
+        &["the inline closure()", "resource"]);
+}
+
+#[test]
+fn issue_1954_inline_closure_identity_is_independent_of_display_name() {
+    let svg = run_with_local_backend("rv3_1954_inline_calls").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    // Alternate closure bodies and identical closure bodies each have
+    // two distinct closure definitions and MIR callable operands.
+    for row in [7, 43] {
+        let id = format!("the_inline_closure>caller@L{row}:fn:");
+        let hashes: Vec<_> = doc.descendants().filter(|n| n.attribute("data-rv-id").is_some_and(|v| v.starts_with(&id)))
+            .map(|n| n.attribute("data-hash").unwrap()).collect();
+        assert_eq!(hashes.len(), 2, "{row}: {hashes:?}");
+        assert_ne!(hashes[0], hashes[1], "{row}: {hashes:?}");
+    }
+}
+
+#[test]
+fn issue_1954_failed_guard_describes_call_without_assuming_arity_or_receiver_mutation() {
+    let svg = run_with_local_backend("rv3_1954_inline_calls").timeline_panel_string();
+    // f(n) writes through its mutable capture into calls. If the pattern
+    // fails, f is never called. The program checks both routes.
+    check_review_tip(&svg, "f@L19:dot:",
+        &["f's value is mutably borrowed for the call to f",
+            "f is passed to the call to f by mutable reference", "The call may read or write it"],
+        &["for the call f()", "f is passed to f by mutable reference"]);
+    check_review_tip(&svg, "f@L20:dot:",
+        &["f may have been borrowed for this call", "takes a mutable reference as its receiver",
+            "matching goes on with the next pattern"],
+        &["lends f to f", "for the call f()", "f may have been changed by f"]);
+}
+
+#[test]
+fn issue_1954_guard_borrows_on_alternative_arms_are_conditional() {
+    let svg = run_with_local_backend("rv3_1954_inline_calls").timeline_panel_string();
+    check_review_tip(&svg, "f@L55:dot:",
+        &["f may have been borrowed for this call", "takes a shared reference as its receiver",
+            "check may have received a borrow of f by shared reference", "matching goes on with the next pattern"],
+        &["lends f to f", "f is borrowed for the call f() and", "and the guard on line 54 lends f to check"]);
+}
+
+#[test]
+fn issue_1954_short_circuit_keeps_each_borrows_certainty() {
+    let svg = run_with_local_backend("edition2024/rv3_1954_short_circuit").timeline_panel_string();
+    check_review_tip(&svg, "f@L6:dot:",
+        &["keep borrows f by shared reference", "keep goes out of scope",
+            "f may have been borrowed for this call", "the else branch runs"],
+        &["f is borrowed for the call f()", "lends f to f"]);
+}
+
+#[test]
+fn issue_1957_exchange_of_a_shared_reference_payload_preserves_the_copyable_holder() {
+    // In MIR the swap reborrows *payload. Later the whole Option is copied
+    // into copied; the holder remains initialized until its StorageDead.
+    let rv = run_with_local_backend("rv3_1957_shared_payload_swap");
+    let svg = rv.timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    assert_eq!(doc.root_element().attribute("data-rv-invalid"), None);
+    check_review_tip(&svg, "copied@L10:dot:copy", &["copied is initialized with a copy of slot"], &[]);
+    for (row, holder) in [(27, "copied_left"), (28, "copied_right"), (39, "copied_left"), (40, "copied_right")] {
+        let source = holder.strip_prefix("copied_").unwrap();
+        check_review_tip(&svg, &format!("{holder}@L{row}:dot:copy"),
+            &[&format!("{holder} is initialized with a copy of {source}")], &[]);
+    }
+    let tips = timeline_tooltips(&svg);
+    assert!(tips.iter().any(|tip| tip.contains("std::mem::swap puts the reference from *payload")
+        && tip.contains("in other.")));
+    check_review_tip(&svg, "payload>slot@L8:arrow:mutable_die",
+        &["payload's mutable borrow of the value inside slot ends. This borrow no longer restricts access to slot."], &[]);
+    assert!(rv_elements(&svg, "other>").iter().any(|(id, tip, ..)| id.contains("@L12:arrow:static_die")
+        && tip.contains("other") && tip.contains("shared borrow") && tip.contains("ends")), "missing shared holder end at other’s last use");
+    for wrong in ["If other holds a shared borrow affecting slot", "other's shared borrow of b ends",
+        "If slot holds a shared borrow affecting a, that borrow ends here", "(slot as Some).0"] {
+        assert!(!forbidden_present(wrong, &tips), "{wrong}");
+    }
+}
+
+#[test]
+fn issue_1957_mutable_sibling_stops_holding_on_its_last_use() {
+    let svg = run_with_local_backend("rv3_call_holder_review").timeline_panel_string();
+    check_review_tip(&svg, "other@L123:dot:",
+        &["other stops using its mutable reference"], &["other's shared borrow ends"]);
+    let later = rv_elements(&svg, "other@L124:dot:");
+    assert!(later.iter().all(|(_, tip, ..)| !tip.contains("other's mutable borrow ends")), "{later:?}");
+}
+
+#[test]
+fn issue_1957_holder_can_stop_before_the_lender_is_released() {
+    let svg = run_with_local_backend("mem_swap_ref_vars_1230").timeline_panel_string();
+    check_review_tip(&svg, "m2@L23:dot:",
+        &["mem::swap puts the reference from m2, which points into d, in m1."],
+        &["m2, which points into c, in m1"]);
+    check_review_tip(&svg, "m1@L24:dot:",
+        &["m1 stops using its mutable reference", "keep the loan live"], &["m1's mutable borrow ends"]);
+    check_review_tip(&svg, "d@L25:dot:mutable_reacquire",
+        &["The mutable borrow of d ends. This borrow no longer restricts access to d"],
+        &["m1's mutable borrow"]);
+}
+
+#[test]
+fn issue_1957_nested_payload_does_not_expose_mir_projections() {
+    let svg = run_with_local_backend("rv3_1957_shared_payload_swap").timeline_panel_string();
+    check_review_tip(&svg, "payload>outer@L107:arrow:mutable_die",
+        &["payload's mutable borrow of the reference slot inside the inner Some of outer ends",
+            "This borrow no longer restricts access to outer"],
+        &["(outer as One).0", "(outer as One)"]);
+}
+
+#[test]
+fn issue_1957_same_row_siblings_do_not_prove_an_unconditional_release() {
+    let svg = run_with_local_backend("rv3_1957_shared_payload_swap").timeline_panel_string();
+    check_review_tip(&svg, "payload>slot@L119:arrow:mutable_die",
+        &["payload's mutable borrow of the value inside slot may end here"],
+        &["ends. This borrow no longer restricts access to slot"]);
+}
+
+#[test]
+fn issue_1957_swaps_through_aliases_update_both_reference_slots() {
+    let svg = run_with_local_backend("rv3_1957_shared_payload_swap").timeline_panel_string();
+    for (holder, lender, stale, row) in [
+        ("right", "a", "b", 60), ("other", "a", "b", 71),
+    ] {
+        check_review_tip(&svg, &format!("{holder}>{lender}@L{row}:arrow:static_die"),
+            &["shared borrow", "ends"], &[&format!("borrow of {stale}"), "what it borrows from isn't shown"]);
+        assert!(rv_elements(&svg, &format!("{holder}>{stale}@L{row}:arrow:")).is_empty());
+    }
+    check_review_tip(&svg, "via>left@L58:arrow:mutable_die",
+        &["via's mutable borrow of the reference slot left ends", "Ending the borrow doesn't move the value"], &[]);
+}
+
+#[test]
+fn issue_1957_every_guard_lowering_swaps_its_operands() {
+    let rv = run_with_local_backend("rv3_1957_shared_payload_swap");
+    let facts = rv.facts().unwrap();
+    let b = facts["bodies"].as_array().unwrap().iter().find(|b| b["func"] == "swap_in_guard").unwrap();
+    let calls: Vec<_> = b["call_relationships"]["calls"].as_array().unwrap().iter()
+        .filter(|c| c["callee"] == "std::mem::swap").collect();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    for call in calls {
+        let stores = call["stores"].as_array().unwrap();
+        for (holder, lender) in [("right", "a"), ("left", "b")] {
+            let loan = b["loans"].as_array().unwrap().iter().find(|l| l["lender"] == lender).unwrap();
+            assert!(stores.iter().any(|s| s["destination"]["name"] == holder
+                && s["effective_loan"] == loan["loan"]), "{holder}: {stores:?}");
+        }
+    }
+    let svg = rv.timeline_panel_string();
+    check_review_tip(&svg, "right>a@L92:arrow:static_die", &["shared borrow", "ends"], &[]);
+    assert!(rv_elements(&svg, "right>b@L92:arrow:").is_empty());
+}
+
+#[test]
+fn issue_1957_copied_options_carry_the_post_swap_references() {
+    let rv = run_with_local_backend("rv3_1957_shared_payload_swap");
+    let facts = rv.facts().unwrap();
+    let svg = rv.timeline_panel_string();
+    for row in [30, 42] {
+        check_review_tip(&svg, &format!("copied_right>a@L{row}:arrow:static_die"),
+            &["shared borrow", "ends"], &["borrow affecting b"]);
+        assert!(rv_elements(&svg, &format!("copied_right>b@L{row}:arrow:")).is_empty());
+    }
+    for function in ["swap_matched_payloads", "swap_whole_holders"] {
+        let b = facts["bodies"].as_array().unwrap().iter().find(|b| b["func"] == function).unwrap();
+        let call = b["call_relationships"]["calls"].as_array().unwrap().iter()
+            .find(|c| c["callee"] == "std::mem::swap").unwrap();
+        for (holder, lender) in [("right", "a"), ("left", "b")] {
+            let loan = b["loans"].as_array().unwrap().iter().find(|l| l["lender"] == lender).unwrap();
+            let stores = loan["holder_stores"].as_array().unwrap();
+            assert!(stores.iter().any(|s| s["name"] == holder && s["occurrence"]["at"] == call["location"]
+                && s["occurrence"]["successor"].is_array() && s["complete"] == true),
+                "{function}: {holder} does not receive {lender} at the call: {stores:?}");
+            let copy = format!("copied_{holder}");
+            assert!(stores.iter().any(|s| s["name"] == copy), "{function}: {copy} does not carry {lender}: {stores:?}");
+        }
     }
 }

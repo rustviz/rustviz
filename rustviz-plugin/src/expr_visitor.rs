@@ -2004,19 +2004,29 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
 
   // Adds a function RAP
   pub fn add_fn(&mut self, name: String) {
-    self.add_function(name, false);
+    self.add_function(name, false, None);
   }
 
   pub(crate) fn add_operator(&mut self, name: String) {
-    self.add_function(name, true);
+    self.add_function(name, true, None);
   }
 
-  fn add_function(&mut self, name: String, operator: bool) {
-    self.add_rap(ResourceAccessPoint::Function(Function {
-      mir_result: false, mir_constructor: false, operator, mutable_call_receiver: false,
+  pub(crate) fn add_callee(&mut self, callee: &Expr<'_>, key: &str) {
+    if matches!(callee.kind, ExprKind::Closure(..)) {
+      self.add_function("the inline closure".to_owned(), false, Some(fn_key(key)));
+    } else {
+      self.add_fn(key.to_owned());
+    }
+  }
+
+  fn add_function(&mut self, name: String, operator: bool, inline_key: Option<String>) {
+    let inline_closure = inline_key.is_some();
+    let key = inline_key.unwrap_or_else(|| fn_key(&name));
+    self.add_rap_with_key(ResourceAccessPoint::Function(Function {
+      mir_result: false, mir_constructor: false, operator, call_receiver: None, receiver_has_empty_args: false, inline_closure,
       callable_result: false, result_path: Vec::new(), result_is_resource: false, result_try: None, name, hash: self.rap_hashes as u64,
       drops_arg: Default::default(), rc_call: None, cast_to: None, inside: None,
-    }), self.current_scope, true);
+    }), key, self.current_scope, true);
   }
 
   /// Sibling declarations and their fields share the original header group.
@@ -2042,10 +2052,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       scope, is_global);
   }
 
-  pub fn add_rap(&mut self, mut r: ResourceAccessPoint, scope: usize, is_global: bool) {
+  pub fn add_rap(&mut self, r: ResourceAccessPoint, scope: usize, is_global: bool) {
     // Functions are keyed in their own namespace (see `fn_key`), so a
     // variable and a function with the same name get separate RAPs.
     let key = if r.is_fn() { fn_key(r.name()) } else { r.name().to_string() };
+    self.add_rap_with_key(r, key, scope, is_global);
+  }
+
+  fn add_rap_with_key(&mut self, mut r: ResourceAccessPoint, key: String, scope: usize, is_global: bool) {
     self.in_scope.push(key.clone());
     let local = self.raps.local(&key);
     let scope_owner = r.is_member().then(|| self.raps.struct_locals.get(&r.get_owner()).copied()).flatten();
@@ -4187,7 +4201,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           let mut rap = r.rap.clone();
           // The call's receiver, not an argument: the call dot says so.
           if let ResourceAccessPoint::Function(f) = &mut rap {
-            f.mutable_call_receiver = *mutable;
+            f.call_receiver = Some(*mutable);
+            // FnMut takes the receiver and a tuple of the ordinary arguments.
+            f.receiver_has_empty_args = *mutable && invocations.iter().all(|at| {
+              let rustc_middle::mir::TerminatorKind::Call { args, .. } =
+                &self.mir_body[at.block].terminator().kind else { return false };
+              matches!(&args[..], [_, tuple] if tuple.node.ty(&self.mir_body.local_decls, self.tcx).is_unit())
+            });
           }
           ResourceTy::Value(rap)
         }) else { return };
@@ -5273,10 +5293,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       && self.tcx.typeck(expr.hir_id.owner).node_type(expr.hir_id).is_ref()
   }
 
-  /// The name a call whose callee is an expression, not a path, goes
-  /// by (`(w.f)()` → `w.f`; #703): the callee's source text without
-  /// the parentheses around it (the HIR span includes them).
+  /// The lookup name for a callee expression. Inline closures use their
+  /// definition key. Other expressions use their source text with the
+  /// enclosing parentheses removed (`(w.f)()` → `w.f`, #703).
   pub fn callee_text(&self, callee: &Expr) -> String {
+    if let Some(key) = inline_closure_key(callee) { return key; }
     fn unwrap_parens(t: &str) -> &str {
       let t = t.trim();
       let Some(inner) = t.strip_prefix('(').and_then(|r| r.strip_suffix(')')) else { return t };
@@ -5830,6 +5851,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if binding.is_member() { return; }
     if let Some(path) = self.body_facts.and_then(|b| b.value_flow.stored_result(site?, binding.owner_local()?)) {
       f.result_path = path.to_vec();
+      if f.inline_closure && f.result_try.is_none() {
+        // The whole result reaches this binding, even with a pattern like `all @ _`.
+        f.inside = None;
+      }
     }
   }
 
@@ -5837,7 +5862,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let outgoing = matches!(to, ResourceTy::Caller) || to.extract_rap().is_some_and(|r| r.is_fn());
     if let ResourceTy::Value(ResourceAccessPoint::Function(f)) = &mut from {
       f.callable_result = call.callable_result;
-      f.result_is_resource = call.result_is_resource;
+      f.result_is_resource = call.result_is_resource && (!f.inline_closure || call.result_needs_drop);
       if call.callable_result {
         f.result_try = self.body_facts.and_then(|b| b.value_flow.result_used_by_try(call));
       }
@@ -7550,7 +7575,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// variables (#1230): each now holds the other's reference, so each
   /// gives back the borrow the other held (both loans are in one
   /// lifetime, `swap<T>(&mut T, &mut T)`, so they end together).
-  pub fn swap_ref_vars(&mut self, fn_expr: &'tcx Expr<'tcx>, args: &'tcx [Expr<'tcx>], line: usize) {
+  pub fn swap_ref_vars(&mut self, call: &'tcx Expr<'tcx>, fn_expr: &'tcx Expr<'tcx>, args: &'tcx [Expr<'tcx>]) {
     let typeck = self.tcx.typeck(fn_expr.hir_id.owner);
     let Some(rustc_middle::ty::FnDef(def_id, _)) = typeck.node_type_opt(fn_expr.hir_id).map(|t| *t.kind()) else { return };
     let ref_var = |a: &'tcx Expr<'tcx>| match a.kind {
@@ -7563,24 +7588,43 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.exchangeable_ref_vars(def_id, &names);
       return;
     }
-    let [x, y] = args else { return };
-    let (Some(n1), Some(n2)) = (ref_var(x), ref_var(y)) else { return };
-    if n1 == n2 {
-      return;
+    let Some(facts) = self.body_facts else { return };
+    let mut sites = facts.value_flow.call_sites(call.span, def_id);
+    let Some(site) = sites.next() else { return };
+    let stores = |at| facts.call_relationships.call(at).and_then(|call| call.holders.as_ref())
+      .into_iter().flat_map(|holders| &holders.stores)
+      .filter(|s| s.guaranteed && s.replaces && s.through_source && s.reference_value);
+    let others: Vec<_> = sites.collect();
+    let mut updates = Vec::new();
+    for store in stores(site.at).filter(|s| s.destination.projection.is_empty()) {
+      let local = Local::from_usize(store.destination.local);
+      let name = &store.destination.name;
+      let Some(current) = self.borrow_map.get(name).filter(|rd| rd.local == Some(local)) else { continue };
+      let arrivals: Option<Vec<_>> = others.iter().map(|site| {
+        let mut writes = stores(site.at).filter(|other| other.destination == store.destination);
+        writes.next().filter(|_| writes.next().is_none())
+      }).collect();
+      let Some(arrivals) = arrivals else { continue };
+      // A source call can lower once per alternative. A named origin
+      // requires the same incoming loan on all those return edges.
+      let loan = store.effective_loan.filter(|id| arrivals.iter().all(|s| s.effective_loan == Some(*id)))
+        .and_then(|id| facts.loans.iter().find(|loan| loan.loan == id));
+      let lender = loan.and_then(|loan| self.closure_result_lender(loan)).unwrap_or(ResourceTy::Anonymous);
+      let aliasing = get_aliasing_data(&lender, &self.borrow_map);
+      let mut updated = current.clone();
+      updated.lender = lender;
+      updated.aliasing = aliasing;
+      updated.static_lender = None;
+      updated.borrow_span = loan.and_then(|loan| loan.issue).map(|at| self.mir_body.source_info(at).span);
+      updated.indexed_span = None;
+      updated.loan_line = None;
+      updated.co_lenders.clear();
+      updated.lender_muts.clear();
+      updated.through.clear();
+      updated.assigned_at = site.row;
+      updates.push((name.clone(), updated));
     }
-    let (Some(d1), Some(d2)) = (self.borrow_map.get(&n1).cloned(), self.borrow_map.get(&n2).cloned()) else { return };
-    for (n, from) in [(&n1, &d2), (&n2, &d1)] {
-      if let Some(rd) = self.borrow_map.get_mut(n) {
-        rd.lender = from.lender.clone();
-        rd.aliasing = from.aliasing.clone();
-        rd.static_lender = from.static_lender.clone();
-        rd.borrow_span = from.borrow_span;
-        rd.loan_line = from.loan_line;
-        rd.co_lenders = from.co_lenders.clone();
-        rd.lender_muts = from.lender_muts.clone();
-        rd.assigned_at = line;
-      }
-    }
+    self.borrow_map.extend(updates);
   }
 
   /// `exchange(&mut r1, &mut r2)` with `fn exchange<T>(x: &mut T, y:
@@ -8319,6 +8363,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let mut through = Vec::new();
     let narrowed = self.narrow_holder_lenders(name, init, &mut lenders, &mut lender_muts, &mut through);
     self.extend_closure_result_lenders(name, name, init, &mut lenders, &mut lender_muts);
+    let swapped = self.body_facts.and_then(|facts| {
+      let read = facts.value_flow.read(init.span).filter(|read| read.exact)?;
+      let arrival = (read.site.at, self.raps.root_local(name)?);
+      let id = facts.swapped_holder_bindings.get(&arrival)?;
+      Some(id.and_then(|id| facts.loans.iter().find(|loan| loan.loan == id)))
+    });
+    if let Some(loan) = swapped {
+      lenders.clear();
+      lender_muts.clear();
+      through.clear();
+      if let Some((lender, loan)) = loan.and_then(|loan| Some((self.closure_result_lender(loan)?, loan))) {
+        lender_muts.push((lender.clone(), loan.kind == "mut"));
+        lenders.push(lender);
+      } else {
+        self.mark_holder(name);
+        return;
+      }
+    }
     if narrowed && lenders.is_empty() {
       self.mark_holder(name);
       return;
@@ -12384,7 +12446,7 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   let from = match name {
     Some(n) => {
       if !self.raps.contains_key(&fn_key(&n)) {
-        self.add_fn(n.clone());
+        self.add_callee(fn_expr, &n);
       }
       self.raps.get(&fn_key(&n))
         .map(|rd| ResourceTy::Value(fn_result_rap(rhs, rd.rap.with_mir_result(), &self.tcx, &self.raps)))
@@ -13879,6 +13941,7 @@ pub fn print_out_of_scope(&mut self){
     self.place_let_else_ends();
     self.place_exit_ends(&empty_payloads);
     self.attribute_projected_pattern_ends();
+    self.describe_reference_payload_ends();
     self.describe_joined_argument_ends();
     mark_exhaustion_paths(self.preprocessed_events, &self.exit_scopes);
     self.print_out_of_scope();

@@ -1281,6 +1281,7 @@ mod tests {
             closure_captures: Default::default(),
             iterators: Vec::new(),
             binding_loans: BTreeMap::new(),
+            swapped_holder_bindings: BTreeMap::new(),
             loans: vec![LoanInfo {
                 temp_fields: None, temp_borrow: None,
                 projected: None,

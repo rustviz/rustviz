@@ -1227,20 +1227,26 @@ pub(crate) fn callable_result(receiver: &str, f: &Function, acquired: Option<boo
 
 fn callable_result_at(receiver: &str, f: &Function, path: &[crate::facts::value_flow::ReturnPart], acquired: Option<bool>) -> String {
     let callee = styled_name_html(&f.name);
+    let invocation = function_invocation(f);
     let verb = if acquired.is_some() { "acquires ownership of" } else { "receives" };
-    let what = held(acquired.unwrap_or(true));
     if let Some(kind) = f.result_try {
         let (condition, payload) = match kind {
-            TryMove::Result => (format!("{callee}() returns Ok"), "the value inside it"),
-            TryMove::Option => (format!("{callee}() returns Some"), "the value inside it"),
-            TryMove::Other => (format!("the `?` produces an output from the result of {callee}()"), "that output"),
+            TryMove::Result => (format!("{invocation} returns Ok"), "the value inside it"),
+            TryMove::Option => (format!("{invocation} returns Some"), "the value inside it"),
+            TryMove::Other => (format!("the `?` produces an output from the result of {invocation}"), "that output"),
         };
         let value = returned_value_containing(path, payload.to_owned());
         return format!("If {condition}, {receiver} {verb} {value}. Otherwise the `?` exits early.");
     }
     let value = match f.inside.as_deref() {
-        Some("") => return format!("{receiver} {verb} a {what} from the call to {callee}"),
-        Some(wrapper) => format!("a {what} inside the {wrapper} that {callee}() returns"),
+        Some("") => {
+            let what = if f.inline_closure { "value" } else { held(acquired.unwrap_or(true)) };
+            return format!("{receiver} {verb} a {what} from the call to {callee}");
+        }
+        Some(wrapper) => {
+            let what = if f.inline_closure { "value" } else { held(acquired.unwrap_or(true)) };
+            format!("a {what} inside the {wrapper} that {invocation} returns")
+        }
         None if acquired.is_some() && path.is_empty() && f.cast_to.is_none() =>
             function_result(f, held(!f.result_is_resource)),
         None => function_result_in_path(f, path),
@@ -1982,10 +1988,15 @@ pub fn event_dot_mut_lend(my_name: &String, target_name: &String, holds_value: b
     )
 }
 
-pub(crate) fn event_dot_mutable_callable_lend(name: &str, callee: &str, holds_value: bool) -> String {
+fn mutable_receiver_call(f: &Function) -> String {
+    let callee = styled_name_html(&f.name);
+    if f.receiver_has_empty_args { format!("the call {callee}()") } else { format!("the call to {callee}") }
+}
+
+pub(crate) fn event_dot_mutable_callable_lend(name: &str, f: &Function, holds_value: bool) -> String {
     let name = styled_name_html(name);
-    let callee = styled_name_html(callee);
-    format!("{name}'s {} is mutably borrowed for the call {callee}(). {name} can't be used while the borrow is live", held(holds_value))
+    let call = mutable_receiver_call(f);
+    format!("{name}'s {} is mutably borrowed for {call}. {name} can't be used while the borrow is live", held(holds_value))
 }
 
 // Lender dot when the lender r is itself a reference (#313): `let r2 =
@@ -2864,26 +2875,41 @@ fn function_result_in_path(f: &Function, path: &[crate::facts::value_flow::Retur
     function_result(f, held(path.is_empty() || !f.result_is_resource))
 }
 
+fn function_invocation(f: &Function) -> String {
+    if f.inline_closure {
+        f.name.clone()
+    } else {
+        format!("{}()", styled_name_html(&f.name))
+    }
+}
+
 fn function_result(f: &Function, what: &str) -> String {
-    let name = styled_name_html(&f.name);
     if f.operator {
+        let name = styled_name_html(&f.name);
         return format!("the result of the {name} expression");
     }
+    let call = function_invocation(f);
     match f.cast_to.as_deref() {
-        Some(ty) => format!("the value {name}() returns, converted to {}", styled_name_html(ty)),
-        None => format!("the {what} {name}() returns"),
+        Some(ty) => format!("the value {call} returns, converted to {}", styled_name_html(ty)),
+        None => format!("the {what} {call} returns"),
     }
 }
 
 pub(crate) fn function_logo_title(f: &Function) -> String {
+    if f.inline_closure { return f.name.clone(); }
     let name = styled_name_html(&f.name);
     if f.operator { format!("The {name} operator") } else { name }
 }
 
-pub fn event_dot_init_from_call_in_ctor(my_name: &String, callee: &String, ctor: &str, cast_to: Option<&str>) -> String {
-    let value = match cast_to {
-        Some(ty) => format!("the value {}() returns, converted to {}", callee, ty),
-        None => format!("the value {}() returns", callee),
+pub fn event_dot_init_from_call_in_ctor(my_name: &str, f: &Function, ctor: &str) -> String {
+    let callee = &f.name;
+    let value = if f.inline_closure {
+        function_result_value(f)
+    } else {
+        match f.cast_to.as_deref() {
+            Some(ty) => format!("the value {callee}() returns, converted to {ty}"),
+            None => format!("the value {callee}() returns"),
+        }
     };
     format!("{} is initialized with {} holding {}", my_name, ctor_value_phrase(ctor), value)
 }
@@ -6745,34 +6771,54 @@ pub fn event_dot_chain_fail_use(
     } else {
         ""
     };
-    let named: Vec<String> = uses.iter().filter(|u| !u.to.is_empty()).map(|u| u.to.clone()).collect();
     let cond = fail_subject(path);
-    let lends = if named.is_empty() {
-        format!("{} borrows {}", cond, obj)
-    } else {
-        format!("{} lends {} to {}", cond, obj, join(&named))
-    };
-    let bound: Vec<String> = uses.iter().filter(|u| u.binding && !u.to.is_empty()).map(|u| u.to.clone()).collect();
-    let gos = match bound.len() {
-        0 => String::new(),
-        1 => format!("{} goes out of scope, and ", join(&bound)),
-        _ => format!("{} go out of scope, and ", join(&bound)),
-    };
-    // Not "after that borrow has ended": a call in the condition may
-    // have stored the reference somewhere that outlives it (#1769). "The
-    // next pattern": a false guard can send matching to the same arm's
-    // next or-pattern alternative.
     let then = match path {
         FailPath::NoElse => "the body is skipped",
         FailPath::Else => "the else branch runs",
         FailPath::Guard(_) => "matching goes on with the next pattern",
     };
-    let mut out = if definite {
-        format!("{} was {}borrowed: {} before it can turn out false; when it does, {}{}",
-            what, kind, lends, gos, then)
+    let mut out = if uses.iter().any(|u| u.call_receiver) {
+        // The receiver and other uses may occur on different iterations of
+        // a guard or on disjoint paths through its condition.
+        let mut descriptions = Vec::new();
+        for u in uses {
+            let kind = if u.mutable { "mutably" } else { "by shared reference" };
+            let to = styled_name_html(&u.to);
+            let use_ = if u.call_receiver {
+                let borrow = if u.mutable { "mutable" } else { "shared" };
+                format!("{what} may have been borrowed for this call. The call takes a {borrow} reference as its receiver")
+            } else if u.binding {
+                if u.definite {
+                    format!("{to} borrows {obj} {kind}, and {to} goes out of scope when {cond} turns out false")
+                } else {
+                    format!("If {to} was bound, it borrowed {obj} {kind} and goes out of scope when {cond} turns out false")
+                }
+            } else if u.to.is_empty() {
+                format!("{what} may have been borrowed {kind}")
+            } else {
+                format!("{to} may have received a borrow of {obj} {kind}")
+            };
+            descriptions.push(use_);
+        }
+        format!("{}. When {cond} turns out false, {then}", descriptions.join(". "))
     } else {
-        format!("{} may have been {}borrowed: when {} and then turns out false, {}{}",
-            what, kind, lends, gos, then)
+        let named: Vec<String> = uses.iter().filter(|u| !u.to.is_empty()).map(|u| u.to.clone()).collect();
+        let lends = if named.is_empty() {
+            format!("{cond} borrows {obj}")
+        } else {
+            format!("{cond} lends {obj} to {}", join(&named))
+        };
+        let bound: Vec<String> = uses.iter().filter(|u| u.binding && !u.to.is_empty()).map(|u| u.to.clone()).collect();
+        let gos = match bound.len() {
+            0 => String::new(),
+            1 => format!("{} goes out of scope, and ", join(&bound)),
+            _ => format!("{} go out of scope, and ", join(&bound)),
+        };
+        if definite {
+            format!("{what} was {kind}borrowed: {lends} before it can turn out false; when it does, {gos}{then}")
+        } else {
+            format!("{what} may have been {kind}borrowed: when {lends} and then turns out false, {gos}{then}")
+        }
     };
     // A mutable borrow can have changed it on the way.
     let by: Vec<String> = uses.iter().filter(|u| u.changes && !u.binding && !u.to.is_empty())
@@ -7458,15 +7504,16 @@ pub fn arrow_full_title(external_event: &ExternalEvent, from: &ResourceTy, to: &
 }
 
 pub fn arrow_callable_result(f: &Function, destination: &str) -> String {
-    let call = styled_name_html(&f.name);
+    let call = function_invocation(f);
     match f.inside.as_deref() {
         Some("Ok" | "Some") => {
             let variant = f.inside.as_deref().unwrap();
-            format!("If {call}() returns {variant}, move its payload to {destination}")
+            format!("If {call} returns {variant}, move its payload to {destination}")
         }
-        Some("") => format!("Move of part of the result of {call}() to {destination}"),
-        Some(wrapper) => format!("Move of the value inside the {wrapper} {call}() returns to {destination}"),
-        None => format!("Move of the result of {call}() to {destination}"),
+        Some("") if f.inline_closure => format!("Move of a value from the result of {call} to {destination}"),
+        Some("") => format!("Move of part of the result of {call} to {destination}"),
+        Some(wrapper) => format!("Move of the value inside the {wrapper} {call} returns to {destination}"),
+        None => format!("Move of the result of {call} to {destination}"),
     }
 }
 
@@ -7542,11 +7589,12 @@ pub fn event_dot_field_lenders_end(my_name: &String, lenders: &[String]) -> Stri
 /// reference (`f(&s)`, `f(&mut s)`): `from_variable` is lent to
 /// `function`.
 pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, from_variable: &ResourceTy) -> String {
-    let styled_fn_name = styled_name_html(&function.name);
     let styled_from_name = styled_name_html(&from_variable.name());
-    if function.mutable_call_receiver {
-        return format!("{styled_from_name} is passed to the call {styled_fn_name}() by mutable reference. The call may read or write it");
+    if function.call_receiver == Some(true) {
+        let call = mutable_receiver_call(function);
+        return format!("{styled_from_name} is passed to {call} by mutable reference. The call may read or write it");
     }
+    let styled_fn_name = styled_name_html(&function.name);
     // `k[0].push('!')` with k an array of `&mut String` (#1319): push
     // writes through the reference in k[0], not through k's value.
     let styled_via = match external_event {

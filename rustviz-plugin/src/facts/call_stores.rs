@@ -281,6 +281,37 @@ fn source_parameter<'tcx>(
     }
 }
 
+/// Resolve the mutable operand of a swap to its caller storage. Follow
+/// reaching pointer definitions, including a borrow staged in a tuple.
+pub(super) fn swap_slot<'tcx>(
+    stores: &super::repoints::IncomingStores<'_, 'tcx>,
+    paths: &super::holder_path::HolderPath<'_, 'tcx>,
+    mut at: Location,
+    mut place: Place<'tcx>,
+) -> Option<Place<'tcx>> {
+    let mut seen = HashSet::new();
+    while seen.insert((at, place)) {
+        let Some(i) = place.projection.iter().position(|step| step == ProjectionElem::Deref) else {
+            return stores.slot_before(at, place);
+        };
+        let tcx = stores.tcx;
+        let pointer = Place { local: place.local, projection: tcx.mk_place_elems(&place.projection[..i]) };
+        let incoming = stores.definitions(at, pointer);
+        if incoming.unknown || incoming.argument || incoming.uninitialized || incoming.sites.len() != 1 {
+            return None;
+        }
+        at = incoming.sites.first()?.at;
+        let StatementKind::Assign(write) = &stores.body[at.block].statements.get(at.statement_index)?.kind else { return None };
+        let rest = &place.projection[i + 1..];
+        place = match write.1 {
+            Rvalue::Ref(_, BorrowKind::Mut { .. }, borrowed) if write.0.projection.len() == i =>
+                borrowed.project_deeper(rest, tcx),
+            _ => paths.direct_source(&write.1, &place.projection[write.0.projection.len()..])?,
+        };
+    }
+    None
+}
+
 pub(super) fn writable_addresses<'tcx>(body: &Body<'tcx>) -> Vec<(Location, Place<'tcx>)> {
     body.basic_blocks.iter_enumerated().flat_map(|(block, data)| {
         data.statements.iter().enumerate().filter_map(move |(statement_index, stmt)| {

@@ -1079,9 +1079,12 @@ const BOOK: &[Snippet] = &[
         id: "c13_03_fnmut_counter",
         must_contain: &[
             "Closure capture (mutable borrow) from count to inc",
+            "L4 inc's value is mutably borrowed for the call inc(). inc can't be used while the borrow is live",
+            "L5 inc's value is mutably borrowed for the call inc(). inc can't be used while the borrow is live",
+            "inc is passed to the call inc() by mutable reference. The call may read or write it",
             "If inc holds a mutable borrow affecting count, that borrow ends here. It no longer restricts access to count",
         ],
-        must_not_contain: &["Return mutably borrowed resource from inc to count"],
+        must_not_contain: &["Return mutably borrowed resource from inc to count", "inc is passed to inc by mutable reference"],
         ..E
     },
     Snippet {
@@ -1174,9 +1177,11 @@ const BOOK: &[Snippet] = &[
         id: "c13_12_closure_borrow_then_use",
         must_contain: &[
             "Closure capture (immutable borrow) from list to only_borrows",
+            "L5 Calling only_borrows borrows only_borrows by shared reference as the receiver. The call may read through it. list's resource is being shared by one or more variables. only_borrows holds a shared borrow. When the call returns, its receiver borrow ends",
             "If only_borrows holds a shared borrow affecting list, that borrow ends here. It no longer restricts access to list",
             "list goes out of scope. Its resource is dropped.",
         ],
+        must_not_contain: &["only_borrows is passed to only_borrows by shared reference"],
         ..E
     },
     // ─── Chapter 15: smart pointers ───────────────────────────────────
