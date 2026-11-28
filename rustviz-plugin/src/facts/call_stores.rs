@@ -1,7 +1,7 @@
 //! An instantiated lifetime can carry a loan past a call even when the
 //! callee never stores the supplied reference. Trace MIR writes separately.
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::{BasicBlock, Body, Local, Location, Operand, Place, ProjectionElem, Rvalue, StatementKind, TerminatorKind, START_BLOCK};
+use rustc_middle::mir::{BasicBlock, Body, BorrowKind, Local, Location, Operand, Place, ProjectionElem, Rvalue, StatementKind, TerminatorKind, START_BLOCK};
 use rustc_middle::ty::{TyCtxt, TyKind};
 use rustc_span::Symbol;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -80,21 +80,56 @@ pub(super) struct Store {
     pub through_source: Option<Vec<Projection>>,
     /// This effect replaces the complete destination on every normal return.
     pub replaces: bool,
+    /// This input is installed on every normal return (including appends).
+    pub guaranteed: bool,
+    /// Installation is through Vec::extend, so the input has to yield items.
+    pub iterator: bool,
 }
 
 pub(super) fn argument_stores(tcx: TyCtxt<'_>, def: DefId) -> BTreeSet<Store> {
     stores(tcx, def, &mut std::collections::HashSet::new())
 }
 
+pub(super) fn resolved_callee<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>,
+    callee: Option<(DefId, rustc_middle::ty::GenericArgsRef<'tcx>)>,
+) -> Option<DefId> {
+    let (def, args) = callee?;
+    if tcx.trait_of_assoc(def).is_none() { return Some(def); }
+    let instance = rustc_middle::ty::Instance::try_resolve(tcx, body.typing_env(tcx), def, args).ok().flatten()?;
+    matches!(instance.def, rustc_middle::ty::InstanceKind::Item(_)).then(|| instance.def_id())
+}
+
+/// Recognize the resolved standard Vec operation. A call on an arbitrary
+/// type with the same method name or lifetime signature proves no write.
+pub(super) fn vec_method<'tcx>(tcx: TyCtxt<'tcx>, def: DefId) -> Option<Symbol> {
+    let imp = tcx.impl_of_assoc(def)?;
+    if tcx.type_of(imp).instantiate_identity().skip_norm_wip().ty_adt_def()
+        .is_none_or(|adt| adt.did().krate != imp.krate || !tcx.is_diagnostic_item(rustc_span::sym::Vec, adt.did())) {
+        return None;
+    }
+    Some(tcx.item_name(def))
+}
+
+fn vec_append(tcx: TyCtxt<'_>, def: DefId) -> Option<bool> {
+    match vec_method(tcx, def)?.as_str() {
+        "push" => Some(false),
+        "extend" => Some(true),
+        _ => None,
+    }
+}
+
 fn stores<'tcx>(tcx: TyCtxt<'tcx>, def: DefId, active: &mut std::collections::HashSet<DefId>) -> BTreeSet<Store> {
     if tcx.is_diagnostic_item(Symbol::intern("mem_replace"), def) {
-        return BTreeSet::from([Store { destination: 0, projection: Vec::new(), source: 1, through_source: None, replaces: true }]);
+        return BTreeSet::from([Store { destination: 0, projection: Vec::new(), source: 1, through_source: None, replaces: true, guaranteed: true, iterator: false }]);
     }
     if tcx.is_diagnostic_item(Symbol::intern("mem_swap"), def) {
         return BTreeSet::from([
-            Store { destination: 0, projection: Vec::new(), source: 1, through_source: Some(Vec::new()), replaces: true },
-            Store { destination: 1, projection: Vec::new(), source: 0, through_source: Some(Vec::new()), replaces: true },
+            Store { destination: 0, projection: Vec::new(), source: 1, through_source: Some(Vec::new()), replaces: true, guaranteed: true, iterator: false },
+            Store { destination: 1, projection: Vec::new(), source: 0, through_source: Some(Vec::new()), replaces: true, guaranteed: true, iterator: false },
         ]);
+    }
+    if let Some(iterator) = vec_append(tcx, def) {
+        return BTreeSet::from([Store { destination: 0, projection: Vec::new(), source: 1, through_source: None, replaces: false, guaranteed: true, iterator }]);
     }
     let Some(local) = def.as_local() else { return BTreeSet::new() };
     if !tcx.is_mir_available(def) || !active.insert(def) {
@@ -150,6 +185,26 @@ fn stores<'tcx>(tcx: TyCtxt<'tcx>, def: DefId, active: &mut std::collections::Ha
             StatementKind::Assign(a) if a.0.is_indirect())).count() == 1
         && body[START_BLOCK].statements.iter().all(|st| !matches!(&st.kind,
             StatementKind::Assign(a) if matches!(a.1, Rvalue::RawPtr(..))));
+    // A linear forwarding body can append several arguments in sequence.
+    // Follow its normal path through Vec appends and no other side effects.
+    let only_appends = seen.iter().any(|&bb| matches!(body[bb].terminator().kind, TerminatorKind::Return))
+        && seen.iter().all(|&bb| {
+        let data = &body[bb];
+        data.statements.iter().all(|st| !matches!(&st.kind,
+            StatementKind::Assign(a) if a.0.is_indirect() || matches!(a.1, Rvalue::RawPtr(..))))
+            && match &data.terminator().kind {
+                TerminatorKind::Call { func, target: Some(_), .. } =>
+                    resolved_callee(tcx, body, func.const_fn_def()).and_then(|def| vec_append(tcx, def)).is_some(),
+                TerminatorKind::Goto { .. } | TerminatorKind::Return => true,
+                // Before drop elaboration a moved argument can still
+                // have a syntactic Drop terminator on the normal path.
+                TerminatorKind::Drop { place, .. } if place.as_local().is_some_and(|local| !written.contains(&local)) =>
+                    seen.iter().any(|&pred| body.basic_blocks.dominators().dominates(pred, bb)
+                        && body[pred].statements.iter().any(|st| matches!(&st.kind,
+                            StatementKind::Assign(a) if matches!(a.1, Rvalue::Use(Operand::Move(src)) if src == *place)))),
+                _ => false,
+            }
+    });
     let mut result = BTreeSet::new();
     for &bb in &seen {
         let data = &body.basic_blocks[bb];
@@ -161,39 +216,14 @@ fn stores<'tcx>(tcx: TyCtxt<'tcx>, def: DefId, active: &mut std::collections::Ha
                         .map(|src| {
                             let param_ty = tcx.erase_and_anonymize_regions(body.local_decls[Local::from_usize(src + 1)].ty);
                             let replaces = one_write && matches!(&a.1, Rvalue::Use(_)) && param_ty == dest_ty;
-                            Store { destination, projection: projection.clone(), source: src, through_source: None, replaces }
+                            Store { destination, projection: projection.clone(), source: src, through_source: None, replaces, guaranteed: replaces, iterator: false }
                         }));
                 }
             }
         }
         if let TerminatorKind::Call { func, args, target: Some(_), .. } = &data.terminator().kind {
-            let TyKind::FnDef(callee, _) = *func.ty(&body.local_decls, tcx).kind() else { continue };
-            let pairs = if callee.is_local() || ["mem_replace", "mem_swap"].into_iter()
-                .any(|item| tcx.is_diagnostic_item(Symbol::intern(item), callee)) {
-                stores(tcx, callee, active)
-            } else {
-                // For an opaque sink into a container, MIR must pass both
-                // values to it on this path. This supports the borrow-checker
-                // wording for e.g. Vec::push in a wrapper. A slot arrow always
-                // requires a write or a summarized store through that slot.
-                let mut pairs = BTreeSet::new();
-                let sig = func.ty(&body.local_decls, tcx).fn_sig(tcx).skip_binder();
-                if sig.output().is_unit() {
-                    for (dst, ty) in sig.inputs().iter().enumerate() {
-                        let TyKind::Ref(_, inner, m) = ty.kind() else { continue };
-                        if !m.is_mut() || !inner.is_adt() { continue; }
-                        for (src, input) in sig.inputs().iter().enumerate() {
-                            if dst != src && inner.walk().filter_map(|arg| arg.as_type()).any(|ty|
-                                tcx.erase_and_anonymize_regions(ty) == tcx.erase_and_anonymize_regions(*input))
-                            {
-                                pairs.insert(Store { destination: dst, projection: Vec::new(), source: src, through_source: None, replaces: false });
-                            }
-                        }
-                    }
-                }
-                pairs
-            };
-            for Store { destination, projection, source: argument, through_source, .. } in pairs {
+            let Some(callee) = resolved_callee(tcx, body, func.const_fn_def()) else { continue };
+            for Store { destination, projection, source: argument, through_source, guaranteed, iterator, .. } in stores(tcx, callee, active) {
                 let operand = |index: usize| args.get(index).and_then(|a| a.node.place());
                 let Some((destination, projection)) = operand(destination)
                     .and_then(|p| project(tcx, body, tcx.mk_place_deref(p), &projection)).and_then(target) else { continue };
@@ -204,7 +234,10 @@ fn stores<'tcx>(tcx: TyCtxt<'tcx>, def: DefId, active: &mut std::collections::Ha
                     None => source(arg).map(|index| (index, None)),
                 };
                 let Some((source, through_source)) = src else { continue };
-                result.insert(Store { destination, projection, source, through_source, replaces: false });
+                let preserves_iterator = !iterator || tcx.erase_and_anonymize_regions(arg.ty(&body.local_decls, tcx).ty)
+                    == tcx.erase_and_anonymize_regions(body.local_decls[Local::from_usize(source + 1)].ty);
+                result.insert(Store { destination, projection, source, through_source, replaces: false,
+                    guaranteed: guaranteed && only_appends && preserves_iterator, iterator });
             }
         }
     }
@@ -248,6 +281,62 @@ fn source_parameter<'tcx>(
     }
 }
 
+pub(super) fn writable_addresses<'tcx>(body: &Body<'tcx>) -> Vec<(Location, Place<'tcx>)> {
+    body.basic_blocks.iter_enumerated().flat_map(|(block, data)| {
+        data.statements.iter().enumerate().filter_map(move |(statement_index, stmt)| {
+            let StatementKind::Assign(assign) = &stmt.kind else { return None };
+            match assign.1 {
+                Rvalue::Ref(_, BorrowKind::Mut { .. }, place) | Rvalue::RawPtr(_, place) =>
+                    Some((Location { block, statement_index }, place)),
+                _ => None,
+            }
+        })
+    }).collect()
+}
+
+/// Is an address of this slot available on a path to the instruction?
+/// A later borrow made for the swap itself is irrelevant on acyclic paths.
+fn previously_exposed(
+    body: &Body<'_>, runs: &BTreeSet<BasicBlock>, at: Location, place: Place<'_>,
+    addresses: &[(Location, Place<'_>)],
+) -> bool {
+    let sites: Vec<_> = addresses.iter().filter(|(loc, p)| runs.contains(&loc.block) && overlaps(place, *p))
+        .map(|(loc, _)| *loc).collect();
+    if sites.is_empty() { return false; }
+    let mut work = vec![at];
+    let mut seen = BTreeSet::new();
+    while let Some(point) = work.pop() {
+        if !seen.insert(point) { continue; }
+        if sites.iter().any(|loc| loc.block == point.block && loc.statement_index < point.statement_index) {
+            return true;
+        }
+        work.extend(body.basic_blocks.predecessors()[point.block].iter().copied()
+            .filter(|bb| runs.contains(bb) && real_successor_blocks(body, *bb).contains(&point.block))
+            .map(|bb| body.terminator_loc(bb)));
+    }
+    false
+}
+
+fn overlaps(a: Place<'_>, b: Place<'_>) -> bool {
+    a.local == b.local && !a.projection.iter().zip(b.projection.iter()).any(|(a, b)| match (a, b) {
+        (ProjectionElem::Field(a, _), ProjectionElem::Field(b, _)) => a != b,
+        (ProjectionElem::Downcast(_, a), ProjectionElem::Downcast(_, b)) => a != b,
+        _ => false,
+    })
+}
+
+/// Prove a prefix of a place. An index local can hold a different value
+/// at the read and the write, even when both use the same MIR local.
+fn definite_prefix<'tcx>(place: Place<'tcx>, prefix: Place<'tcx>) -> bool {
+    place.local == prefix.local && place.projection.len() >= prefix.projection.len()
+        && place.projection.iter().zip(prefix.projection.iter()).all(|(a, b)| match (a, b) {
+            (ProjectionElem::Field(a, _), ProjectionElem::Field(b, _)) => a == b,
+            (ProjectionElem::Downcast(_, a), ProjectionElem::Downcast(_, b)) => a == b,
+            (ProjectionElem::ConstantIndex { .. }, ProjectionElem::ConstantIndex { .. }) => a == b,
+            _ => false,
+        })
+}
+
 /// Trace a concrete reference back through the caller's assignments and
 /// strong call writes. Borrowck origins can include a loan from a value
 /// that an earlier call replaced. Keep that loan as a constraint, but
@@ -259,15 +348,9 @@ pub(super) fn reaching_issue<'tcx>(
     mut at: Location,
     mut place: Place<'tcx>,
     stores: &BTreeMap<Location, Vec<(Place<'tcx>, Place<'tcx>)>>,
+    addresses: &[(Location, Place<'tcx>)],
 ) -> Option<Location> {
     let mut seen = HashSet::new();
-    let overlaps = |a: Place<'tcx>, b: Place<'tcx>| {
-        a.local == b.local && !a.projection.iter().zip(b.projection.iter()).any(|(a, b)| match (a, b) {
-            (ProjectionElem::Field(a, _), ProjectionElem::Field(b, _)) => a != b,
-            (ProjectionElem::Downcast(_, a), ProjectionElem::Downcast(_, b)) => a != b,
-            _ => false,
-        })
-    };
     while seen.insert((at, place)) && !place.is_indirect() {
         let block = &body[at.block];
         for (index, stmt) in block.statements[..at.statement_index].iter().enumerate().rev() {
@@ -280,7 +363,7 @@ pub(super) fn reaching_issue<'tcx>(
             let destination = super::body::resolve_write_deref(tcx, body, a.0);
             if destination.is_indirect() { return None; }
             if !overlaps(place, destination) { continue; }
-            if destination.local != place.local || destination.projection.len() > place.projection.len() {
+            if !definite_prefix(place, destination) {
                 return None;
             }
             let suffix = &place.projection[destination.projection.len()..];
@@ -301,20 +384,34 @@ pub(super) fn reaching_issue<'tcx>(
         let prev = predecessors.next()?;
         if predecessors.next().is_some() { return None; }
         at = body.terminator_loc(prev);
-        if let TerminatorKind::Call { destination, args, .. } = &body[prev].terminator().kind {
-            if overlaps(place, *destination) { return None; }
-            let path = projection(&place.projection)?;
-            if let Some((_, source)) = stores.get(&at).into_iter().flatten().find(|(dest, _)| {
-                dest.local == place.local && projection(&dest.projection).as_ref() == Some(&path)
-            }) {
-                place = *source;
-            } else if args.iter().any(|arg| arg.node.place().is_some_and(|arg| {
-                if !arg.ty(&body.local_decls, tcx).ty.is_mutable_ptr() { return false; }
-                let written = super::body::resolve_write_deref(tcx, body, tcx.mk_place_deref(arg));
-                written.is_indirect() || overlaps(place, written)
-            })) {
-                return None;
+        let exposed = || previously_exposed(body, runs, at, place, addresses);
+        match &body[prev].terminator().kind {
+            TerminatorKind::Call { destination, args, .. } => {
+                if destination.is_indirect() || overlaps(place, *destination) { return None; }
+                let mut writes = stores.get(&at).into_iter().flatten().filter(|(dest, _)| overlaps(place, *dest));
+                if let Some((dest, source)) = writes.next() {
+                    if writes.next().is_some() || !definite_prefix(place, *dest) { return None; }
+                    place = source.project_deeper(&place.projection[dest.projection.len()..], tcx);
+                } else if (args.is_empty() || args.iter().any(|arg| {
+                    let ty = arg.node.ty(&body.local_decls, tcx);
+                    // A writable pointer can travel inside an aggregate.
+                    // Only a resolved, disjoint top-level pointer rules
+                    // out a write through that operand.
+                    if ty.is_mutable_ptr() && ty.builtin_deref(true).is_some_and(|ty| ty.is_primitive() || ty.is_ref()) {
+                        let Some(arg) = arg.node.place() else { return true };
+                        let written = super::body::resolve_write_deref(tcx, body, tcx.mk_place_deref(arg));
+                        written.is_indirect() || overlaps(place, written)
+                    } else {
+                        !ty.is_primitive()
+                    }
+                })) && exposed() {
+                    return None;
+                }
             }
+            TerminatorKind::Drop { place: dropped, .. }
+                if overlaps(place, *dropped) || exposed() && dropped.ty(&body.local_decls, tcx).ty.needs_drop(tcx, body.typing_env(tcx)) =>
+                return None,
+            _ => {}
         }
     }
     None

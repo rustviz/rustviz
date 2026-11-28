@@ -3,7 +3,7 @@ use crate::svg_generator::data::{BranchExit, EarlyReturns, LoopExits, LoopLeft, 
 
 /* Event Dot messages: shows up when someone hovers over a dot */
 
-use crate::svg_generator::data::{ArgTie, ChainFailHow, ChainRef, ChainUse, FailPath, NoValueBefore, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, TiedInputs, ViaCarrier};
+use crate::svg_generator::data::{ArgTie, BorrowVia, ChainFailHow, ChainRef, ChainUse, FailPath, NoValueBefore, RcCall, RcDrop, StaticLender, TryMove, TupleDropAt, TupleLeft, TiedInputs, ViaCarrier};
 /// Escape a name (`s`, `p.x`, or an operator such as `<` or `&`) for a
 /// tooltip. A tooltip is HTML stored in an SVG attribute that is written
 /// without escaping (the span markup around names is already in its
@@ -2993,6 +2993,31 @@ pub(crate) fn reference_slot_transfer(call: &str, source: &str, destination: &st
 /// #1352), which passes the borrow on like `unwrap`.
 pub const TRY_PASSES_ON: &str = "\u{1d}?";
 
+pub(crate) fn call_constraint_borrow(via: &BorrowVia, from: &ResourceTy, to: &ResourceTy,
+    mutable: bool, projected: Option<&str>,
+) -> String {
+    let lender = projected.map_or_else(|| styled_name_html(&from.name()), str::to_owned);
+    let holder = styled_name_html(&to.name());
+    let call = styled_name_html(&via.func);
+    let kind = if mutable { "mutable" } else { "shared" };
+    let mut title = format!("The borrow checker tracks a {kind} borrow of {lender} through {holder}");
+    if via.carrier == ViaCarrier::StoredBy {
+        title.push_str(&format!(" ({holder} isn't a reference itself). The signature of {call} can keep this loan active through {holder}."));
+    } else {
+        title.push_str(&arrow_borrow_via_call_suffix(&to.name(), &via.func, &via.lenders, via.also_unnamed,
+            &via.tie, via.carrier, &via.passed_on, false));
+    }
+    if !title.ends_with('.') {
+        title.push('.');
+    }
+    title.push_str(if mutable {
+        " Other access to the borrowed place is restricted while this mutable borrow is live."
+    } else {
+        " While this shared borrow is live, you can't overwrite or move the borrowed place."
+    });
+    title
+}
+
 // Appended to the "Immutable borrow from s to w" / "Mutable borrow
 // from s to w" arrow title when `w` is the reference a call returned
 // (`let w = first_word(&s);`, #171): says why, via the lifetimes in the
@@ -3004,9 +3029,6 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
     let func_fmt = styled_name_html(func);
     let to_fmt = styled_name_html(to_name);
     if carrier == ViaCarrier::StoredBy {
-        if tie.storage_constraint_only {
-            return format!(". The signature of {func_fmt} can keep this loan active through {to_fmt}.");
-        }
         // `refs.push(&s)` (#392): `func` is the method.
         return format!(
             ", stored in {0} by {1}; {0} isn't a reference, but its value now holds one",
@@ -3108,8 +3130,8 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
     }
     // A value that isn't a reference (`let it = v.iter();`) or a
     // struct with a reference field can carry the borrow too (#336).
-    let may_be_none = !tie.variant_lenders.is_empty()
-        || option_ref && (!tie.constructs_variant || !passed_on.is_empty());
+    let may_be_none = tie.enum_holds_reference.map_or_else(
+        || option_ref && (!tie.constructs_variant || !passed_on.is_empty()), |holds| !holds);
     let (noun, not_ref) = match carrier {
         ViaCarrier::Reference => ("reference", String::new()),
         ViaCarrier::Value if may_be_none => ("value", format!("; {to_fmt}'s value can hold a reference ({to_fmt} isn't a reference itself)")),
@@ -3260,7 +3282,8 @@ fn signature_tie(func_fmt: &str, what: &str, to_name: &String, names: &[String],
             format!(". At the caller, {kept} while {to_fmt} is in use. The reference {func_fmt} returns points into {lender}.")
         } else if !tie.variant_lenders.is_empty() {
             let cases = tie.variant_lenders.iter().map(|(variant, lender)| {
-                format!("If {to_fmt} is {}, it contains a reference into {}.", styled_name_html(variant), styled_name_html(lender))
+                format!("If {func_fmt} returns {}, its result contains a reference into {}.",
+                    styled_name_html(variant), styled_name_html(lender))
             }).collect::<Vec<_>>().join(" ");
             format!(". {cases} At the caller, {kept} while {to_fmt} is in use")
         } else {
@@ -7026,6 +7049,9 @@ pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &Resource
     let lenders = &group.lenders;
     let all = if lenders.len() == 2 { "both" } else { "all of them" };
     if group.end {
+        if group.constraint_end {
+            return field_constraint_end(&from.name(), lenders);
+        }
         let field = styled_name_html(&from.name());
         let places = or_list(lenders);
         let which = if previous { "The earlier reference" } else { "The reference" };
@@ -7041,6 +7067,20 @@ pub fn arrow_field_lenders_title(external_event: &ExternalEvent, from: &Resource
             format!("{title}: the borrow checker keeps {all} borrowed while {field} is in use")
         }
     }
+}
+
+pub(crate) fn field_constraint_end(name: &str, lenders: &[String]) -> String {
+    let field = styled_name_html(name);
+    let places = lenders.iter().map(|lender| styled_name_html(lender)).collect::<Vec<_>>();
+    format!("The borrow checker stops tracking the borrows of {} through {field}. Other references can still keep those places borrowed.", join_names(&places))
+}
+
+pub(crate) fn call_slot_loan_end(slot: &str, lender: &str, mutable: bool, of_ref_var: bool) -> String {
+    let slot = styled_name_html(slot);
+    let lender = styled_name_html(lender);
+    let lender = if of_ref_var { format!("the reference slot {lender}") } else { lender };
+    let kind = if mutable { "mutable" } else { "shared" };
+    format!("{slot}'s {kind} borrow of {lender} ends. This borrow no longer restricts access to {lender}.")
 }
 
 /// The field's own dot where those borrows start (`arrow_field_lenders_title`).
@@ -7120,7 +7160,8 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
         let stored_suffix: String = match external_event {
             ExternalEvent::PassByStaticReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives, cloned_to, moves_of_clone, made_to), .. }
             | ExternalEvent::PassByMutableReference { stored_in: StoredIn(Some(place), moved_to, copied_to, alternatives, cloned_to, moves_of_clone, made_to), .. } => {
-                let styled_place = styled_name_html(place);
+                let styled_place = styled_name_html(&place.slot);
+                let holder = styled_name_html(&place.holder);
                 // The place's value moves on while the borrow is live
                 // (`let w = hold;`, `let w = pass(hold);`): the borrow
                 // goes with it (#990).
@@ -7178,9 +7219,14 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
                 }
                 // A move of a clone's value comes after the clone.
                 let later = if *moves_of_clone { [copied, cloned, made, moved_on] } else { [moved_on, copied, cloned, made] };
+                let sibling_use = if place.sibling_use {
+                    format!(". Use of another field of {holder} can keep this borrow live.")
+                } else {
+                    String::new()
+                };
                 format!(
-                    "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use{}",
-                    styled_fn_name, styled_place, styled_from_name, styled_place, later.concat(),
+                    "; {}'s signature lets it store this reference in {}, so {} stays borrowed while {} is in use{}{}",
+                    styled_fn_name, styled_place, styled_from_name, holder, later.concat(), sibling_use,
                 )
             }
             _ => String::new(),

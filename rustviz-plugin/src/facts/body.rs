@@ -2503,16 +2503,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let mut no_indirect_writes = std::collections::HashMap::new();
         let mut write_sources = Vec::new();
         let mut strong_stores = BTreeMap::<_, Vec<_>>::new();
+        let writable_addresses = super::call_stores::writable_addresses(body);
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             let term = data.terminator();
             let TerminatorKind::Call { func, args, target: Some(return_to), .. } = &term.kind else { continue };
             if !runs.contains(&bb) || args.len() < 2 { continue; }
             let loc = Location { block: bb, statement_index: data.statements.len() };
-            let callee = match *func.ty(&body.local_decls, tcx).kind() {
-                TyKind::FnDef(def, _) if args.iter().any(|arg| arg.node.place()
-                    .is_some_and(|p| decl_place_ty(tcx, body, p).is_mutable_ptr())) => Some(def),
-                _ => None,
-            };
+            let callee = super::call_stores::resolved_callee(tcx, body, func.const_fn_def());
+            let callee = callee.filter(|_| args.iter().any(|arg| arg.node.place()
+                .is_some_and(|p| decl_place_ty(tcx, body, p).is_mutable_ptr())));
             if let Some(def) = callee {
                 let writes = callees.entry(def).or_insert_with(|| super::call_stores::argument_stores(tcx, def));
                 for write in writes.iter() {
@@ -2528,8 +2527,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     if !decl_place_ty(tcx, body, dst).is_mutable_ptr() { continue; }
                     let argument = resolve_write_deref(tcx, body, tcx.mk_place_deref(dst));
                     let Some(target) = super::call_relationships::project(tcx, body, argument, &write.projection) else { continue };
-                    let Some(holder) = cx.name(target).filter(|_| cx.names.root(target)
-                        .is_some_and(|(_, skip, _)| column_projection(body, target, skip))) else { continue; };
+                    let Some((root, skip, _)) = cx.names.root(target) else { continue };
+                    if !column_projection(body, target, skip) { continue; }
+                    let Some(holder) = cx.name(target) else { continue };
                     if write.replaces && !target.is_indirect() {
                         strong_stores.entry(loc).or_default().push((target, source));
                     }
@@ -2537,15 +2537,41 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let carried = held_by_place(source, t.start_index(loc));
                     let ids: BTreeSet<_> = kept.intersection(&carried).filter(|id| published.contains(id)).copied().collect();
                     if !ids.is_empty() {
+                        let sibling_use = target.projection.iter().enumerate().skip(skip).any(|(i, elem)| {
+                            if !matches!(elem, ProjectionElem::Field(..)) { return false; }
+                            let prefix = Place { local: target.local, projection: tcx.mk_place_elems(&target.projection[..i]) };
+                            match decl_place_ty(tcx, body, prefix).kind() {
+                                TyKind::Tuple(fields) => fields.len() > 1,
+                                TyKind::Adt(def, _) if def.is_struct() => def.non_enum_variant().fields.len() > 1,
+                                _ => false,
+                            }
+                        });
+                        let source_name = cx.names.root(source)
+                            .filter(|(_, skip, _)| column_projection(body, source, *skip))
+                            .and_then(|_| cx.name(source))
+                            .or_else(|| {
+                                write.through_source.as_ref().filter(|path| path.is_empty())?;
+                                let p = resolve_temp_deref(tcx, body, tcx.mk_place_deref(operand(write.source)?));
+                                // A pattern binding can expose a slot that has no
+                                // column of its own. Name the dereferenced binding.
+                                (p.projection.as_slice() == [ProjectionElem::Deref]
+                                    && body.local_decls[p.local].is_user_variable()
+                                    && body.local_decls[p.local].ty.is_ref()).then(|| cx.name(p)).flatten()
+                            });
                         let stores = &mut call_holders.entry(loc).or_default().stores;
                         write_sources.push((loc, stores.len(), source));
                         stores.push(CallStore {
                             argument: write.source,
-                            source: EndPlace::new(tcx, source, cx.name(source).unwrap_or_default()),
+                            destination_argument: write.destination,
+                            source: EndPlace::new(tcx, source, source_name.unwrap_or_default()),
                             target_argument: EndPlace::new(tcx, argument, cx.name(argument).unwrap_or_default()),
                             destination: EndPlace::new(tcx, target, holder),
+                            holder: root,
+                            sibling_use,
                             loans: ids,
                             replaces: write.replaces,
+                            guaranteed: write.guaranteed && (!write.iterator || nonempty_extend_input(&cx, loc, source)),
+                            iterator: write.iterator,
                             through_source: write.through_source.is_some(),
                             reference_value: decl_place_ty(tcx, body, source).is_ref(),
                             effective_loan: None,
@@ -2629,17 +2655,31 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if !stored.is_empty() {
                 let unchanged = callee.is_some_and(|def| *no_indirect_writes.entry(def).or_insert_with(||
                     super::call_stores::no_indirect_writes(tcx, def)));
-                call_holders.entry(loc).or_default().receiver = Some(ReceiverHolds {
+                let entry = call_holders.entry(loc).or_default();
+                let vec_method = callee.and_then(|def| super::call_stores::vec_method(tcx, def));
+                let extends_vec = vec_method.is_some_and(|name| name.as_str() == "extend");
+                let stored_arguments = stored.iter().filter_map(|loan| {
+                    let arg = inputs.get(loan.argument - 1)?.node.place()?;
+                    let known_vec_write = vec_method.is_some_and(|name| matches!(name.as_str(), "push" | "insert"))
+                        || extends_vec && nonempty_extend_input(&cx, loc, arg);
+                    let proved_write = entry.stores.iter().any(|write|
+                        write.guaranteed && write.destination_argument == 0 && write.argument == loan.argument
+                            && write.loans.contains(&loan.loan));
+                    (known_vec_write || proved_write).then_some(loan.argument)
+                }).collect();
+                entry.receiver = Some(ReceiverHolds {
                     place: EndPlace::new(tcx, dest, name),
                     loans: stored,
                     unchanged,
+                    stored_arguments,
+                    extends_vec,
                     operands: Vec::new(),
                 });
             }
         }
         for (loc, index, source) in write_sources {
             if !decl_place_ty(tcx, body, source).is_ref() { continue; }
-            let Some(issue) = super::call_stores::reaching_issue(tcx, body, &runs, loc, source, &strong_stores) else { continue };
+            let Some(issue) = super::call_stores::reaching_issue(tcx, body, &runs, loc, source, &strong_stores, &writable_addresses) else { continue };
             let Some(loan) = loans.iter().find(|loan| loan.issue == Some(issue)) else { continue };
             let store = &mut call_holders.get_mut(&loc).unwrap().stores[index];
             if store.loans.contains(&loan.loan) {
@@ -2659,7 +2699,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let stored = if cx.name(*destination).is_some() {
                 Some((*destination, loc))
             } else {
-                call_result_store(&cx, *destination, successor)
+                call_result_store(&cx, *destination, successor, &writable_addresses)
             };
             if let Some((holder, arrival)) = stored {
                 let slots = columns.iter().chain(&synth).filter_map(|(_, place, name)| {
@@ -6061,9 +6101,43 @@ fn operand_construction<'tcx>(
     None
 }
 
+/// Only standard, nonempty inputs establish that Vec::extend appends.
+fn nonempty_extend_input<'tcx>(cx: &Cx<'_, 'tcx>, at: Location, input: Place<'tcx>) -> bool {
+    let (tcx, body) = (cx.tcx, cx.body);
+    let ty = decl_place_ty(tcx, body, input);
+    if let TyKind::Array(_, len) = ty.builtin_deref(false).unwrap_or(ty).kind() {
+        return len.try_to_target_usize(tcx).is_some_and(|n| n > 0);
+    }
+    if ty.ty_adt_def().is_some_and(|adt| tcx.is_diagnostic_item(rustc_span::sym::Option, adt.did()))
+        && input.as_local().is_some_and(|local| !body.local_decls[local].is_user_variable()) {
+        let assign = body[at.block].statements[..at.statement_index].iter().rev().find_map(|stmt| {
+            let StatementKind::Assign(assign) = &stmt.kind else { return None };
+            (assign.0.local == input.local).then_some(assign)
+        });
+        return assign.is_some_and(|assign| assign.0 == input && matches!(&assign.1,
+            Rvalue::Aggregate(kind, operands) if operands.len() == 1
+                && matches!(&**kind, AggregateKind::Adt(def, ..) if tcx.is_diagnostic_item(rustc_span::sym::Option, *def))));
+    }
+    #[expect(clippy::disallowed_methods, reason = "only tests membership among MIR destinations")]
+    cx.vec_results.values().any(|(site, result)| {
+        if *result != input { return false; }
+        let TerminatorKind::Call { func, args, .. } = &body[site.block].terminator().kind else { return false };
+        let Some((def, _)) = func.const_fn_def() else { return false };
+        if tcx.is_diagnostic_item(rustc_span::Symbol::intern("vec_from_elem"), def) {
+            args.get(1).and_then(|a| a.node.constant())
+                .and_then(|c| c.const_.try_eval_target_usize(tcx, body.typing_env(tcx))).is_some_and(|n| n > 0)
+        } else {
+            // The other construction here is vec![element, ...].
+            true
+        }
+    })
+}
+
 /// Follow the normal edge and direct transfers of a call's temporary
 /// result until it reaches a user place.
-fn call_result_store<'tcx>(cx: &Cx<'_, 'tcx>, mut value: Place<'tcx>, mut at: Location) -> Option<(Place<'tcx>, Location)> {
+fn call_result_store<'tcx>(cx: &Cx<'_, 'tcx>, mut value: Place<'tcx>, mut at: Location,
+    writable_addresses: &[(Location, Place<'tcx>)],
+) -> Option<(Place<'tcx>, Location)> {
     let mut seen = BTreeSet::new();
     loop {
         if !seen.insert(at) { return None; }
@@ -6071,6 +6145,9 @@ fn call_result_store<'tcx>(cx: &Cx<'_, 'tcx>, mut value: Place<'tcx>, mut at: Lo
         for (idx, stmt) in block.statements.iter().enumerate().skip(at.statement_index) {
             match &stmt.kind {
                 StatementKind::Assign(asg) => {
+                    if matches!(asg.1, Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) if p.local == value.local) {
+                        return None;
+                    }
                     let loc = Location { block: at.block, statement_index: idx };
                     let suffix = |src: Place<'tcx>| {
                         (src.local == value.local).then(|| value.projection.strip_prefix(src.projection.as_slice())).flatten()
@@ -6111,6 +6188,18 @@ fn call_result_store<'tcx>(cx: &Cx<'_, 'tcx>, mut value: Place<'tcx>, mut at: Lo
         }
         match &block.terminator().kind {
             TerminatorKind::Goto { .. } => {}
+            // An intermediate operand can itself be a call. On the normal
+            // edge the saved result survives if that call neither uses it
+            // nor can write to it through an address.
+            TerminatorKind::Call { func, args, destination, target: Some(target), .. }
+                if !destination.is_indirect() && destination.local != value.local
+                    && func.place().is_none_or(|p| p.local != value.local)
+                    && args.iter().all(|arg| arg.node.place().is_none_or(|p| p.local != value.local))
+                    && writable_addresses.iter().all(|(_, p)| p.local != value.local) =>
+            {
+                at = Location { block: *target, statement_index: 0 };
+                continue;
+            }
             TerminatorKind::Drop { place, .. } if place.local != value.local => {}
             _ => return None,
         }

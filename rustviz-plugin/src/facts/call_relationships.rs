@@ -123,6 +123,13 @@ pub(crate) struct ReturnPayload {
     pub lender: Option<super::EndPlace>,
 }
 
+impl ReturnPayload {
+    pub(crate) fn always_present(&self) -> bool {
+        !self.sources.is_empty() && !self.sources.contains(&ReturnSource::Absent)
+            && !self.sources.contains(&ReturnSource::Unknown)
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct CallRelationship {
     #[serde(serialize_with = "super::schema::location")]
@@ -134,6 +141,8 @@ pub(crate) struct CallRelationship {
     pub return_sources: Option<BTreeSet<ReturnSource>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub return_payloads: Vec<ReturnPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_holds_reference: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_lender: Option<super::EndPlace>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
@@ -306,6 +315,13 @@ pub(super) fn collect<'tcx>(
                     .clone()
             })
             .unwrap_or_default();
+        let enum_holds_reference = (!return_payloads.is_empty()).then(|| {
+            let result_ty = destination.ty(&body.local_decls, tcx).ty;
+            let variants_with_reference: BTreeSet<_> = return_payloads.iter()
+                .filter_map(|payload| payload.projection.first()).collect();
+            result_ty.ty_adt_def().is_some_and(|adt| variants_with_reference.len() == adt.variants().len())
+                || return_payloads.iter().any(|payload| payload.always_present())
+        });
         let location = body.terminator_loc(bb);
         let lender = |sources: &BTreeSet<ReturnSource>, result: Place<'tcx>| {
             let mut present = sources.iter().filter(|source| **source != ReturnSource::Absent);
@@ -352,6 +368,7 @@ pub(super) fn collect<'tcx>(
             callee: callee.map(|id| tcx.def_path_str(id)),
             return_sources: target.and(return_sources),
             return_payloads: if target.is_some() { return_payloads } else { Vec::new() },
+            enum_holds_reference: target.and(enum_holds_reference),
             return_lender: target.and(return_lender),
             holders: None,
             capture_fates,

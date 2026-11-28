@@ -108,11 +108,19 @@ pub struct ReceiverLoan {
 #[derive(Serialize)]
 pub(crate) struct CallStore {
     pub argument: usize,
+    pub destination_argument: usize,
     pub source: EndPlace,
     pub target_argument: EndPlace,
     pub destination: EndPlace,
+    pub holder: String,
+    #[serde(skip)]
+    pub sibling_use: bool,
     pub loans: BTreeSet<usize>,
     pub replaces: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub guaranteed: bool,
+    #[serde(skip)]
+    pub iterator: bool,
     pub through_source: bool,
     pub reference_value: bool,
     /// A single incoming loan proved by the reaching definition.
@@ -155,6 +163,11 @@ pub(crate) struct ReceiverHolds {
     pub place: EndPlace,
     pub loans: Vec<ReceiverLoan>,
     pub unchanged: bool,
+    /// Inputs whose values the normal-return effect can establish are stored.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub stored_arguments: BTreeSet<usize>,
+    #[serde(skip)]
+    pub extends_vec: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operands: Vec<AggregateLoan>,
 }
@@ -968,6 +981,10 @@ pub enum EndProjection {
 }
 
 impl EndPlace {
+    pub(crate) fn matches<'tcx>(&self, tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>) -> bool {
+        self.local == p.local.index() && self.projection == Self::new(tcx, p, String::new()).projection
+    }
+
     pub(super) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>, name: String) -> Self {
         use rustc_middle::mir::ProjectionElem::*;
         let projection = p.projection.iter().map(|step| match step {

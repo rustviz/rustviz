@@ -810,9 +810,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     // A single aggregate argument holds all its borrows, not one of them.
     tie.holds_all = tie.tied.len() == 1 && holds_all_literal;
+    let record = self.call_relationship(call)
+      .filter(|record| record.kind == crate::facts::call_relationships::CallKind::Direct);
+    if matches!(target, FlowTarget::Result) {
+      tie.enum_holds_reference = record.and_then(|r| r.enum_holds_reference);
+      // The aggregate argument may carry more loans than the selected
+      // result payload. Preserve the signature's restriction here.
+      if tie.enum_holds_reference.is_some() {
+        tie.holds_all = false;
+      }
+    }
     if tie.tied.len() >= 2 {
-      use crate::facts::call_relationships::{CallKind, ReturnSource};
-      let record = self.call_relationship(call).filter(|record| record.kind == CallKind::Direct);
+      use crate::facts::call_relationships::ReturnSource;
       tie.returns_alternatives = record
         .and_then(|record| record.return_sources.as_ref())
         .and_then(|sources| sources.iter().map(|source| match source {
@@ -1268,7 +1277,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // An unused result need not be live on the edge. The call still
     // evaluates its operands, which the ordinary call drawing shows.
     let operands: Vec<_> = slot.loans.intersection(&result.argument_loans).map(|&loan| crate::facts::AggregateLoan {
-      conditional: false,
+      conditional: !self.body_facts.is_some_and(|facts| facts.loans.iter().any(|fact| {
+        use rustc_middle::mir::{Rvalue, StatementKind};
+        if fact.loan != loan { return false; }
+        let Some(issue) = fact.issue else { return false };
+        let Some(statement) = self.mir_body[issue.block].statements.get(issue.statement_index) else { return false };
+        let StatementKind::Assign(assign) = &statement.kind else { return false };
+        let Rvalue::Ref(_, _, place) = assign.1 else { return false };
+        relationship.return_payloads.iter().any(|payload| {
+          payload.always_present() && payload.lender.as_ref().is_some_and(|lender| lender.matches(self.tcx, place))
+        })
+      })),
       issued: false,
       loan,
     }).collect();

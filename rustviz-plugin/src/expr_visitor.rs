@@ -4002,7 +4002,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if let Some(holders) = self.emitting_expr.and_then(|call| self.call_relationship(call)?.holders.as_ref()) {
         let mut stores = holders.stores.iter().filter(|s| s.argument == 0);
         if let Some(store) = stores.next().filter(|_| stores.next().is_none()) {
-          stored_in.0 = Some(store.destination.name.clone());
+          stored_in.0 = Some(StoreDestination {
+            slot: store.destination.name.clone(), holder: store.holder.clone(), sibling_use: store.sibling_use,
+          });
         }
       }
     }
@@ -5276,7 +5278,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// Draw a call's store only when the actual MIR source operand carries
   /// the loan and the callee can write it through the destination operand.
   fn argument_stored_borrows(&mut self, arg: &'tcx Expr<'tcx>, from: &ResourceTy, line: usize, issued: Option<usize>)
-      -> Vec<(ResourceTy, ResourceTy, usize, usize)> {
+      -> Vec<(ResourceTy, ResourceTy, StoreDestination, usize, usize, bool)> {
     let Some(facts) = self.body_facts else { return Vec::new() };
     let Some((call, argument)) = self.enclosing_call_argument(arg) else { return Vec::new() };
     let Some(holders) = self.call_relationship(call).and_then(|call| call.holders.as_ref()) else { return Vec::new() };
@@ -5294,6 +5296,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     };
     let mut out = Vec::new();
     for store in holders.stores.iter().filter(|s| s.argument == argument) {
+      // A method append to the whole receiver is drawn by record_receiver_store.
+      if !store.replaces && (store.guaranteed || store.iterator) && matches!(call.kind, ExprKind::MethodCall(..))
+        && store.destination_argument == 0 && store.destination == store.target_argument { continue; }
       let local = Local::from_usize(store.destination.local);
       let Some(place) = self.raps.place(local, &store.destination.name).map(|d| &d.rap) else { continue };
       // A non-reference member is part of the containing value's drop
@@ -5310,7 +5315,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           if !from_call && issued != Some(loan.loan) { continue; }
           let Some(end) = loan.end_lines.last().copied().filter(|&end| end > line) else { continue };
           let dest = ResourceTy::Index(place.clone(), place.name().clone(), PlaceWrite::Update);
-          out.push((lender.clone(), dest, end, loan.loan));
+          let destination = StoreDestination { slot: place.name().clone(), holder: store.holder.clone(), sibling_use: store.sibling_use };
+          let replaces = store.replaces && store.effective_loan == Some(loan.loan);
+          out.push((lender.clone(), dest, destination, end, loan.loan, replaces));
         }
       }
     }
@@ -6807,7 +6814,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // `store(&mut r, b.as_str())`: the reference a call returns,
       // into b, may be stored in r; b stays borrowed while r is (#1124).
       let stored = self.argument_stored_borrows(arg, &from_ro, line_num, argument_loan.map(|loan| loan.loan));
-      for (from_ro, place, end_line, loan) in stored.iter().cloned() {
+      for (from_ro, place, destination, end_line, loan, replaces) in stored.iter().cloned() {
         let mutable = arg_mut == Mutability::Mut;
         let id = *self.unique_id;
         let loans = vec![loan];
@@ -6817,7 +6824,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if of_ref_var {
           self.stored_ref_var_lends.insert((place.name().to_owned(), from_ro.real_name()));
         }
-        let stored_in = StoredIn(Some(place.name().to_owned()), Vec::new(), Vec::new(), false, Vec::new(), false, Vec::new());
+        let stored_in = StoredIn(Some(destination), Vec::new(), Vec::new(), false, Vec::new(), false, Vec::new());
         self.add_external_event(line_num, if mutable {
           ExternalEvent::PassByMutableReference {
             manually_takes: false, terminal: None, from: from_ro.clone(), to: to_ro.clone(), id, is_reborrow: false, ends_at_call: false,
@@ -6852,6 +6859,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
             // (Its id comes after the borrow end's: that one is the
             // event after the call's, see `stored_borrows`.)
             let id = *self.unique_id + 1;
+          if replaces && p.is_member() {
+            self.row_layout.proved_field_stores.insert(id);
+          }
             let ev = if mutable {
               ExternalEvent::MutableBorrow { from, to, is_partial: false, is_reborrow: false, break_alt: None, via: Some(via), id, of_ref_var }
             } else {
@@ -6864,6 +6874,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         };
         // StaticDie/MutableDie { from: place, to: lender }: drawn on
         // the lender's column only, like a borrow stored in an element.
+        let lender = from_ro.name();
         let mut die = self.ext_ev_of_evt(if mutable { Evt::MDie } else { Evt::SDie }, from_ro, place, *self.unique_id, false);
         if let ExternalEvent::StaticDie { of_ref_var: o, .. } | ExternalEvent::MutableDie { of_ref_var: o, .. } = &mut die {
           *o = of_ref_var;
@@ -6872,6 +6883,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           self.end_loans.insert(*self.unique_id, vec![loan]);
           if holder.is_member() {
             self.row_layout.stored_field_ends.insert(*self.unique_id);
+            if replaces {
+              let title = crate::svg_generator::hover_messages::call_slot_loan_end(holder.name(), &lender, mutable, of_ref_var);
+              self.row_layout.call_slot_ends.insert(*self.unique_id, title);
+            }
           }
         }
         self.add_external_event(end_line, die);
@@ -8187,7 +8202,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let Some(rd) = self.borrow_map.get(name).cloned() else { return };
     let line = expr_to_line(&init, &self.tcx);
     let to = ResourceTy::Value(rap);
-    self.draw_holder_borrows(&to, &rd.all_lenders(), &rd, &self.aggregate_borrows(init).unwrap_or_default(), line, None);
+    self.draw_holder_borrows(&to, &rd.all_lenders(), &rd, &self.aggregate_borrows(init).unwrap_or_default(), line, None, None);
   }
 
   /// `emit_holder_literal_borrows` for the value of one branch (`body`)
@@ -8210,7 +8225,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let line = expr_to_line(&v, &self.tcx);
     let to = ResourceTy::Value(rap);
     let lenders: Vec<_> = rd.all_lenders().into_iter().filter(|l| own.contains(l)).collect();
-    self.draw_holder_borrows(&to, &lenders, &rd, &self.aggregate_borrows(v).unwrap_or_default(), line, None);
+    self.draw_holder_borrows(&to, &lenders, &rd, &self.aggregate_borrows(v).unwrap_or_default(), line, None, None);
   }
 
   /// `name` was just registered as an owner bound to `init`. If its
@@ -8599,7 +8614,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let Some(local) = loan.lender_local else { continue };
       if local.index() == slot.place.local { continue; }
       let through_ref = loan.through.is_some();
-      let is_mut = loan.kind == "mut";
+      let unique = loan.kind == "unique";
+      let is_mut = matches!(loan.kind, "mut" | "unique");
       let column = loan.through.as_ref().unwrap_or(&loan.lender);
       let capture = facts.call_relationships.captures.iter().find(|capture|
         loan.issue.is_some() && capture.issue == loan.issue).and_then(|capture| capture.source.as_ref());
@@ -8621,6 +8637,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       };
       let id = *self.unique_id;
       *self.unique_id += 1;
+      if unique {
+        use crate::svg_generator::hover_messages as hover;
+        self.row_layout.unique_closure_captures.insert(id);
+        self.row_layout.aggregate_titles.insert(id, format!("{}. {} returned this closure",
+          hover::unique_closure_capture(&from, &to), hover::styled_name_html(&func)));
+      }
       let ev = if is_mut {
         ExternalEvent::MutableBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: through_ref, break_alt: None, via: Some(via), id, of_ref_var: false }
       } else {
@@ -8631,7 +8653,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // add_ev maps (lhs, rhs) to a Die { from: rhs, to: lhs }: the
       // borrow goes back from g to s, as in the closure literal arm.
       let die = if is_mut { Evt::MDie } else { Evt::SDie };
+      let end = *self.unique_id;
       self.add_ev(loan.end_lines.last().copied().unwrap_or(line).max(line), die, from, to.clone(), false);
+      if unique {
+        self.end_loans.insert(end, vec![loan.loan]);
+      }
     }
   }
 
@@ -8699,11 +8725,48 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       .filter(|r| r.holds_borrow()) else { return };
     use crate::facts::StoredOperand;
     let mut inputs = BTreeMap::new();
+    let mut constraints = BTreeSet::new();
+    let mut iterator_constraints = BTreeSet::new();
     for loan in &receiver.loans {
-      inputs.entry(loan.loan).and_modify(|op| {
-        if *op != loan.operand { *op = StoredOperand::Carrier; }
-      }).or_insert(loan.operand);
+      if receiver.stored_arguments.contains(&loan.argument) {
+        inputs.entry(loan.loan).and_modify(|op| {
+          if *op != loan.operand { *op = StoredOperand::Carrier; }
+        }).or_insert(loan.operand);
+      } else if receiver.extends_vec {
+        iterator_constraints.insert(loan.loan);
+        inputs.insert(loan.loan, StoredOperand::Carrier);
+        self.row_layout.holder_constraint_loans.insert((*rcvr.hash(), loan.loan));
+      } else {
+        constraints.insert(loan.loan);
+      }
     }
+    constraints.retain(|id| !inputs.contains_key(id));
+    let to = ResourceTy::Value(rcvr.clone());
+    let mut constraint_lenders = Vec::new();
+    for &id in &constraints {
+      let Some(loan) = facts.loans.iter().find(|l| l.loan == id) else { continue };
+      self.row_layout.holder_constraint_loans.insert((*rcvr.hash(), id));
+      let Some(local) = loan.lender_local else { continue };
+      let name = loan.through.as_deref().unwrap_or(&loan.lender);
+      let Some(lender) = self.raps.place(local, name)
+        .or_else(|| loan.part_of.iter().find_map(|column| self.raps.place(local, column))) else { continue };
+      let from = ResourceTy::Value(lender.rap.clone());
+      let via = BorrowVia {
+        func: seg.ident.as_str().to_owned(), lenders: Vec::new(), also_unnamed: false,
+        tie: ArgTie::default(), carrier: ViaCarrier::StoredBy, passed_on: Vec::new(),
+      };
+      use crate::svg_generator::hover_messages as hover;
+      let event = *self.unique_id;
+      let mutable = matches!(loan.kind, "mut" | "unique");
+      let place = loan.projected.as_ref().map(hover::projected_place_html);
+      let binding = lender.rap.is_ref() && loan.through.is_none();
+      let title = hover::call_constraint_borrow(&via, &from, &to, mutable, place.as_deref());
+      self.row_layout.aggregate_titles.insert(event, title);
+      self.add_borrow_ev_of_ref_var(line, if mutable { Evt::MBorrow } else { Evt::SBorrow },
+        to.clone(), from.clone(), loan.through.is_some(), binding);
+      constraint_lenders.push(from);
+    }
+    self.mark_borrow_kept_by_result(call, &constraint_lenders);
     let operands: Vec<_> = self.aggregate_loan_operands(&receiver.operands, true).into_iter()
       .filter(|b| b.loan.projected.is_none() || inputs.contains_key(&b.loan.loan)).collect();
     struct Store {
@@ -8712,6 +8775,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       binding: bool,
       unique_capture: bool,
       operand: StoredOperand,
+      iterator_constraint: bool,
       projected: Option<(usize, crate::facts::ProjectedPlace)>,
     }
     let mut stored: Vec<Store> = Vec::new();
@@ -8746,9 +8810,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         prior.exclusive |= exclusive;
         prior.binding &= binding;
         prior.unique_capture &= loan.kind == "unique";
+        prior.iterator_constraint |= iterator_constraints.contains(&id);
         if prior.operand != operand { prior.operand = StoredOperand::Carrier; }
       } else {
-        stored.push(Store { place, exclusive, binding, unique_capture: loan.kind == "unique", operand, projected });
+        stored.push(Store { place, exclusive, binding, unique_capture: loan.kind == "unique", operand,
+          iterator_constraint: iterator_constraints.contains(&id), projected });
       }
     }
     let mut lenders = Vec::new();
@@ -8803,26 +8869,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       func: seg.ident.as_str().to_owned(),
       lenders: lenders.iter().map(|l| l.name()).collect(),
       also_unnamed: false,
-      tie: ArgTie { storage_constraint_only: receiver.unchanged, ..ArgTie::default() },
+      tie: ArgTie::default(),
       carrier: ViaCarrier::StoredBy,
       passed_on: Vec::new(),
     };
-    let to = ResourceTy::Value(rcvr.clone());
     let aggregate: Vec<_> = lenders.iter().filter(|l| operands.iter().any(|b| b.lender == **l)).cloned().collect();
     if !aggregate.is_empty() {
       let rd = self.borrow_map[rcvr.name()].clone();
-      self.draw_holder_borrows(&to, &aggregate, &rd, &operands, line, Some(&via));
+      self.draw_holder_borrows(&to, &aggregate, &rd, &operands, line, Some(&via), None);
     }
-    for Store { place: lender, exclusive: is_mut, binding: of_ref_var, unique_capture, operand, projected } in stored.into_iter().filter(|s| {
+    for Store { place: lender, exclusive: is_mut, binding: of_ref_var, unique_capture, operand, iterator_constraint, projected } in stored.into_iter().filter(|s| {
       match &s.projected {
         Some((id, _)) => !operands.iter().any(|b| b.lender == s.place && b.loan.loan == *id),
         None => !aggregate.contains(&s.place),
       }
     }) {
       let id = *self.unique_id;
-      if let Some(projected) = projected {
-        self.row_layout.projected_loan_places.insert(id, projected);
-      }
       let detail = if unique_capture {
         Some(crate::event_order::StoredLoan::UniqueCapture)
       } else if operand == StoredOperand::Carrier {
@@ -8832,6 +8894,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       } else { None };
       if let Some(detail) = detail {
         self.row_layout.stored_loans.insert(id, detail);
+        if iterator_constraint {
+          use crate::svg_generator::hover_messages as hover;
+          let part = projected.as_ref().map(|(_, place)| hover::projected_place_html(place));
+          let title = hover::stored_loan_message(detail, &to, &lender, Some(&via.func), false, part.as_deref());
+          self.row_layout.aggregate_titles.insert(id, title);
+        }
+      }
+      if let Some(projected) = projected {
+        self.row_layout.projected_loan_places.insert(id, projected);
       }
       *self.unique_id += 1;
       let ev = if is_mut {
@@ -9797,6 +9868,10 @@ fn pattern_ref_borrows(
       ResourceTy::Deref(r) if r.is_mutref() => (ResourceTy::Value(r), true),
       l => (l, false),
     };
+    if !via.as_ref().unwrap().tie.variant_lenders.is_empty() {
+      let title = crate::svg_generator::hover_messages::call_constraint_borrow(via.as_ref().unwrap(), &lender, &to, is_mut, None);
+      self.row_layout.aggregate_titles.insert(id, title);
+    }
     out.push(if is_mut {
       ExternalEvent::MutableBorrow { from: lender, to: to.clone(), is_partial: false, is_reborrow, break_alt: None, via, id, of_ref_var: false }
     } else {
@@ -9848,8 +9923,16 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   // an `if` / `match` initializer, `borrow_map` holds the union over
   // all branches (#337).
   let Some(rd) = self.borrow_map.get(lhs_rap.name()).cloned() else { return false };
-  let own = self.enum_call_borrows(call)
-    .map(|operands| operands.into_iter().map(|operand| operand.lender).collect())
+  let root = lhs_rap.owner_local().or_else(|| self.raps.root_local(lhs_rap.name()));
+  let closure_loans = self.closure_result(root, call).and_then(|r| r.holders.get(lhs_rap.name()));
+  let enum_borrows = self.enum_call_borrows(call).map(|mut borrows| {
+    if let Some(closure) = closure_loans {
+      borrows.retain(|b| !closure.loans.contains(&b.loan.loan));
+    }
+    borrows
+  });
+  let own = enum_borrows.as_ref()
+    .map(|operands| operands.iter().map(|operand| operand.lender.clone()).collect())
     .unwrap_or_else(|| self.call_lenders(call));
   // `self.items.first_mut().unwrap()`: only the field (#1073), or
   // fields (#1080).
@@ -9859,7 +9942,7 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   };
   let lenders: Vec<_> = rd.all_lenders().into_iter()
     .filter(|l| matches!(l, ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) && own.contains(l))
-    .filter(|l| !self.closure_result_supplies_lender(lhs_rap.owner_local().or_else(|| self.raps.root_local(lhs_rap.name())), lhs_rap.name(), call, l))
+    .filter(|l| !self.closure_result_supplies_lender(root, lhs_rap.name(), call, l))
     .collect();
   if lenders.is_empty() {
     return false;
@@ -9900,7 +9983,13 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
       passed_on,
     },
   };
-  self.draw_holder_borrows(lhs, &lenders, &rd, &self.aggregate_borrows(call).unwrap_or_default(), line_num, Some(&via));
+  let proven_lender = self.call_relationship(call).and_then(|record| record.return_lender.as_ref())
+    .and_then(|place| self.raps.place(Local::from_usize(place.local), &place.name)).map(|column| *column.rap.hash());
+  let borrows = enum_borrows.or_else(|| self.aggregate_borrows(call)).unwrap_or_default();
+  if let Some(holds) = via.tie.enum_holds_reference {
+    self.row_layout.enum_reference_holders.entry(*lhs.hash()).and_modify(|prior| *prior &= holds).or_insert(holds);
+  }
+  self.draw_holder_borrows(lhs, &lenders, &rd, &borrows, line_num, Some(&via), proven_lender);
   self.mark_borrow_kept_by_result(call, &lenders);
   true
 }
@@ -9908,7 +9997,8 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
 /// Each new loan gets its own event, including repeated borrows of one place.
 /// A carried reference instead arrives on the row where the value is built.
 fn draw_holder_borrows(&mut self, lhs: &ResourceTy, lenders: &[ResourceTy], rd: &RefData,
-                       operands: &[crate::ref_flow::OperandBorrow<'a>], line_num: usize, via: Option<&BorrowVia>) {
+                       operands: &[crate::ref_flow::OperandBorrow<'a>], line_num: usize, via: Option<&BorrowVia>,
+                       proven_lender: Option<u64>) {
   let alternatives = operands.iter().any(|b| b.conditional);
   // The aggregate's fresh reborrow and its siblings share a construction.
   // Keep the legacy ends of unrelated holder operations outside this path.
@@ -9933,11 +10023,12 @@ fn draw_holder_borrows(&mut self, lhs: &ResourceTy, lenders: &[ResourceTy], rd: 
       ResourceTy::Deref(r) if r.is_mutref() => (ResourceTy::Value(r.clone()), true),
       l => (l.clone(), false),
     };
+    let enum_result = via.is_some_and(|v| v.tie.enum_holds_reference.is_some());
     if let Some(b) = operand {
       if b.issued {
         self.aggregate_issues.insert(id, b.loan.loan);
       }
-      if b.conditional || (tracks_ends && b.issued && self.body_facts.is_some_and(|f| f.conditional_ends.contains(&b.loan.loan))) {
+      if !enum_result && (b.conditional || (tracks_ends && b.issued && self.body_facts.is_some_and(|f| f.conditional_ends.contains(&b.loan.loan)))) {
         self.conditional_aggregate_ends.push((lhs.clone(), lender.clone(), b.loan.loan));
       }
       let projected = via.filter(|v| v.carrier == ViaCarrier::StoredBy).and(b.loan.projected.as_ref());
@@ -9947,14 +10038,25 @@ fn draw_holder_borrows(&mut self, lhs: &ResourceTy, lenders: &[ResourceTy], rd: 
           self.row_layout.uncertain_projected_stores.insert((*lhs.hash(), b.loan.loan));
         }
       }
-      let title = if b.issued && b.loan.two_phase {
+      let title = if enum_result && b.conditional {
+        use crate::svg_generator::hover_messages as hover;
+        self.row_layout.holder_constraint_loans.insert((*lhs.hash(), b.loan.loan));
+        let place = b.loan.projected.as_ref().map(hover::projected_place_html);
+        Some(hover::call_constraint_borrow(via.unwrap(), &from, lhs, is_mut, place.as_deref()))
+      } else if b.issued && b.loan.two_phase {
         Some(crate::svg_generator::hover_messages::aggregate_reservation(&from.name(), &lhs.name()))
-      } else if alternatives {
+      } else if alternatives && !enum_result {
         use crate::svg_generator::hover_messages as hover;
         let place = projected.map_or_else(|| hover::styled_name_html(&lender.name()), hover::projected_place_html);
         Some(hover::aggregate_arm_borrow(&place, &lhs.name(), is_mut, b.conditional))
       } else { None };
       if let Some(title) = title { self.row_layout.aggregate_titles.insert(id, title); }
+    }
+    if let Some(via) = via.filter(|v| v.carrier == ViaCarrier::Reference) {
+      if !from.is_ref() && proven_lender.is_some_and(|lender| lender != *from.hash()) {
+        let title = crate::svg_generator::hover_messages::call_constraint_borrow(via, &from, lhs, is_mut, None);
+        self.row_layout.aggregate_titles.insert(id, title);
+      }
     }
     let ev = if is_mut {
       ExternalEvent::MutableBorrow { from, to: lhs.clone(), is_partial: false, is_reborrow, break_alt: None, via: via.cloned(), id, of_ref_var: false }
