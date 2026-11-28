@@ -10,7 +10,7 @@ use rustc_middle::mir::{
     START_BLOCK, StatementKind, TerminatorKind,
 };
 use rustc_middle::ty::{TyCtxt, TyKind};
-use rustc_span::sym;
+use rustc_span::{sym, Symbol};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -296,7 +296,7 @@ pub(super) fn collect<'tcx>(
             .or_else(|| callee.filter(|def| tcx.trait_of_assoc(*def).is_none()))
             .and_then(DefId::as_local)
             .filter(|id| tcx.hir_maybe_body_owned_by(*id).is_some());
-        let (return_sources, mut return_payloads, (capture_fates, borrowed_captures)) = local
+        let (mut return_sources, mut return_payloads, (capture_fates, borrowed_captures)) = local
             .map(|id| {
                 summaries
                     .entry((id, kind == CallKind::FnOnce))
@@ -315,6 +315,11 @@ pub(super) fn collect<'tcx>(
                     .clone()
             })
             .unwrap_or_default();
+        if direct.is_some_and(|(def, _)| tcx.is_diagnostic_item(Symbol::intern("string_as_str"), def)) {
+            return_sources = Some(BTreeSet::from([ReturnSource::Input {
+                index: 0, projection: Vec::new(), string_contents: true,
+            }]));
+        }
         let enum_holds_reference = (!return_payloads.is_empty()).then(|| {
             let result_ty = destination.ty(&body.local_decls, tcx).ty;
             let variants_with_reference: BTreeSet<_> = return_payloads.iter()
@@ -343,7 +348,11 @@ pub(super) fn collect<'tcx>(
             let mut at = location;
             let place = loop {
                 let (issue, place) = operand_borrow(body, at, arg)?;
-                if !place.is_indirect() { break place; }
+                if !place.is_indirect() || place.iter_projections().all(|(prefix, elem)|
+                    elem != ProjectionElem::Deref || prefix.ty(&body.local_decls, tcx).ty.is_box())
+                {
+                    break place;
+                }
                 if place.projection.as_slice() != [ProjectionElem::Deref] { return None; }
                 arg = Place::from(place.local);
                 at = issue;
@@ -688,15 +697,16 @@ fn return_sources<'tcx>(
                     && (!address || place.projection[destination.projection.len()..].contains(&ProjectionElem::Deref))
                 {
                     // The standard String deref returns its own contents.
-                    let string_deref = func.const_fn_def().is_some_and(|(method, generics)| {
-                        tcx.trait_of_assoc(method) == tcx.lang_items().deref_trait()
+                    let string_view = func.const_fn_def().is_some_and(|(method, generics)| {
+                        tcx.is_diagnostic_item(Symbol::intern("string_as_str"), method)
+                            || tcx.trait_of_assoc(method) == tcx.lang_items().deref_trait()
                             && generics
                                 .types()
                                 .next()
                                 .and_then(|t| t.ty_adt_def())
                                 .is_some_and(|d| tcx.is_lang_item(d.did(), rustc_hir::LangItem::String))
                     });
-                    let Some(arg) = args.first().and_then(|arg| arg.node.place()).filter(|_| string_deref) else {
+                    let Some(arg) = args.first().and_then(|arg| arg.node.place()).filter(|_| string_view) else {
                         sources.insert(ReturnSource::Unknown);
                         continue;
                     };

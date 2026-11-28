@@ -2064,6 +2064,11 @@ pub struct RowLayout {
     /// Projected moves into `?` whose residual edge drops the remaining Box.
     pub(crate) try_box_drops: BTreeSet<usize>,
     pub(crate) call_store_notes: BTreeMap<usize, String>,
+    pub(crate) reference_arguments: BTreeMap<usize, crate::facts::call_wording::ReferenceArgument>,
+    pub(crate) mem_transfers: BTreeMap<usize, String>,
+    pub(crate) checked_index_stores: BTreeSet<usize>,
+    pub(crate) returned_loan_ends: BTreeSet<usize>,
+    pub(crate) named_loan_ends: BTreeMap<usize, bool>,
     pub(crate) argument_results: BTreeSet<usize>,
     pub(crate) transfer_stack: BTreeSet<usize>,
     transfer_order: BTreeSet<(usize, usize)>,
@@ -2206,6 +2211,11 @@ impl RowLayout {
         self.returned_call_titles.append(&mut other.returned_call_titles);
         self.try_box_drops.append(&mut other.try_box_drops);
         self.call_store_notes.append(&mut other.call_store_notes);
+        self.reference_arguments.append(&mut other.reference_arguments);
+        self.mem_transfers.append(&mut other.mem_transfers);
+        self.checked_index_stores.append(&mut other.checked_index_stores);
+        self.returned_loan_ends.append(&mut other.returned_loan_ends);
+        self.named_loan_ends.append(&mut other.named_loan_ends);
         self.argument_results.append(&mut other.argument_results);
         self.transfer_stack.append(&mut other.transfer_stack);
         self.transfer_order.append(&mut other.transfer_order);

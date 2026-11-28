@@ -131,18 +131,20 @@ pub fn event_dot_closure_go_out_of_scope(my_name: &String, move_capture_count: u
 // A `Box` whose whole contents were moved out (`take(*b)`, #609) goes
 // out of scope without dropping the value that was moved. Its heap
 // allocation is freed; a zero-sized payload has none (#1608).
-pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String) -> String {
+pub fn event_dot_box_contents_moved_go_out_of_scope(my_name: &String, has_allocation: bool) -> String {
+    let hedge = if has_allocation { "" } else { ", if it has one," };
     format!(
-        "{} goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
+        "{} goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation{hedge} is freed.",
         styled_name_html(my_name)
     )
 }
 
 // A Box can be empty, refilled, replaced, or moved away on different paths.
 // Only the value still present at the actual drop or overwrite is dropped.
-pub fn event_dot_box_payload_conditional(my_name: &str, tested: bool) -> String {
+pub fn event_dot_box_payload_conditional(my_name: &str, tested: bool, has_allocation: bool) -> String {
     let flag = if tested { " A runtime drop flag tracks whether the Box still holds its contents." } else { "" };
-    format!("{} goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here.{flag}", styled_name_html(my_name))
+    let hedge = if has_allocation { "" } else { ", if it has one," };
+    format!("{} goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation{hedge} is freed here.{flag}", styled_name_html(my_name))
 }
 
 pub fn event_dot_box_maybe_moved_go_out_of_scope(my_name: &str, contents_need_drop: bool) -> String {
@@ -518,6 +520,10 @@ pub fn event_dot_replace_at_place(place: &str) -> String {
     format!("The old value at {} is dropped and the replacement is stored there", styled_name_html(place))
 }
 
+pub(crate) fn after_index_check(title: &str) -> String {
+    format!("{}. This effect occurs only if indexing succeeds. An out-of-bounds index panics first", title.trim_end_matches('.'))
+}
+
 pub fn event_dot_owner_drop_at_reassign(my_name: &String, note: &str) -> String {
     let my_name_fmt = styled_name_html(my_name);
     let (holds, rest) = split_drop_note(note);
@@ -607,6 +613,9 @@ pub fn moved_above(by_cond: bool) -> &'static str {
 // "no branch above" after a branch, #597). "Its previous t.0" names
 // the old value's part, not the new one.
 pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate::svg_generator::data::ReassignParts) -> String {
+    if parts.previous_none {
+        return format!("{} acquires ownership of a new resource. The previous value was None, which carries no payload.", styled_name_html(my_name));
+    }
     fn join(names: &[String]) -> (String, bool) {
         let fmt: Vec<String> = names.iter().map(|n| styled_name_html(n)).collect();
         let s = match fmt.len() {
@@ -622,7 +631,8 @@ pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate
         } else {
             event_dot_owner_drop_at_reassign_box_paths(my_name)
         };
-        out.push_str("&lt;br&gt;The old Box frees its heap allocation, if it had one.");
+        let hedge = if parts.box_has_allocation { "" } else { ", if it had one" };
+        out.push_str(&format!("&lt;br&gt;The old Box frees its heap allocation{hedge}."));
         if parts.flag {
             out.push_str(" A runtime drop flag tracks whether the previous contents still need to be dropped.");
         }
@@ -644,7 +654,8 @@ pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate
         out.push_str(" A runtime drop flag tracks whether the field still needs to be dropped.");
     }
     if parts.box_parts {
-        out.push_str(" The old Box frees its heap allocation, if it had one.");
+        let hedge = if parts.box_has_allocation { "" } else { ", if it had one" };
+        out.push_str(&format!(" The old Box frees its heap allocation{hedge}."));
     }
     if parts.moved.is_empty() && not_refilled.is_empty() {
         if !parts.dropped.is_empty() {
@@ -703,6 +714,13 @@ pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate
 pub fn event_dot_unbound_temporary_acquire(from_name: &String) -> String {
     format!(
         "A temporary holds the value that {0}. Rust drops it as soon as its statement (or enclosing expression) is done",
+        temporary_source(from_name)
+    )
+}
+
+pub fn event_dot_loop_iterator_acquire(from_name: &String) -> String {
+    format!(
+        "A temporary holds the iterator that {}. The iterator lives through the loop and is dropped when the loop exits",
         temporary_source(from_name)
     )
 }
@@ -4058,14 +4076,14 @@ pub fn state_moved_out(name: &str, holds_value: bool) -> String {
 /// RustViz 3: a value that borrows (an iterator, a `Vec<&str>`, an
 /// `Option<&T>`), not a reference itself, with the places whose loans the
 /// borrow checker counts in it here.
-pub fn state_holder_borrows_from(name: &str, sources: &[Option<String>]) -> String {
+pub fn state_holder_borrows_from(name: &str, sources: &[Option<String>], value: bool) -> String {
     let me = styled_name_html(name);
-    format!("{me} holds a value that borrows from {} ({me} isn't a reference itself)", place_list(sources, "and"))
+    format!("{me} holds a {} that borrows from {} ({me} isn't a reference itself)", held(value), place_list(sources, "and"))
 }
 
 /// The borrow checker can count loans through a value such as an empty Option.
-pub fn state_value_holds_loans(name: &String, copy: bool, lenders: &[Option<String>], temporary: bool) -> String {
-    let mut title = state_holder_starts_empty(name);
+pub fn state_value_holds_loans(name: &String, copy: bool, lenders: &[Option<String>], temporary: bool, value: bool) -> String {
+    let mut title = state_holder_starts_empty(name, value);
     if copy {
         title.push_str(". ");
         title.push_str(&state_full_privilege_copyable(name));
@@ -4323,22 +4341,22 @@ pub fn state_closure_full_privilege_with_resource(my_name: &String, move_capture
 // v.iter();`, `let third = v.get(2);`; #336). It owns that value (an
 // iterator, an Option), but not the data the value borrows, so the
 // generic "is the owner of the resource" is avoided.
-pub fn state_holder_full_privilege(my_name: &String) -> String {
+pub fn state_holder_full_privilege(my_name: &String, value: bool) -> String {
     let my_name_fmt = styled_name_html(my_name);
     format!(
-        "{0} holds a value that contains a reference ({0} isn't a reference itself)",
-        my_name_fmt
+        "{0} holds a {1} that contains a reference ({0} isn't a reference itself)",
+        my_name_fmt, held(value)
     )
 }
 
 // A holder whose value starts out without a reference (`let mut refs
 // = Vec::new();`, filled later by `refs.push(&s)`; #392). Its type can
 // hold references; whether it holds one depends on the line.
-pub fn state_holder_starts_empty(my_name: &String) -> String {
+pub fn state_holder_starts_empty(my_name: &String, value: bool) -> String {
     let my_name_fmt = styled_name_html(my_name);
     format!(
-        "{0} owns a value that can hold references ({0} isn't a reference itself)",
-        my_name_fmt
+        "{0} owns a {1} that can hold references ({0} isn't a reference itself)",
+        my_name_fmt, held(value)
     )
 }
 
@@ -4379,7 +4397,8 @@ pub(crate) fn stored_loan_message(detail: crate::event_order::StoredLoan, holder
             }
             if matches!(detail, StoredLoan::Carrier { .. }) {
                 let when = method.map_or_else(String::new, |f| format!("After {}, ", styled_name_html(f)));
-                return format!("{when}{h} holds a value that can contain references ({h} isn't a reference itself). The borrow checker keeps the {kind} borrow of {place} live while {h} is in use");
+                let noun = held(crate::svg_generator::data::holds_copy_value(holder));
+                return format!("{when}{h} holds a {noun} that can contain references ({h} isn't a reference itself). The borrow checker keeps the {kind} borrow of {place} live while {h} is in use");
             }
             let start = match method {
                 Some(f) => format!("{} stores a shared reference in {h}", styled_name_html(f)),
@@ -4403,19 +4422,20 @@ pub(crate) fn stored_loan_message(detail: crate::event_order::StoredLoan, holder
 // A field reached through a reference (`self.items` in `let it =
 // self.items.iter();` with `self: &mut Self`; #1080) is named as the
 // place it is.
-pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from: HolderLender, holds_value: bool, option_ref: bool) -> String {
+pub fn event_dot_holder_borrow(my_name: &String, from_name: &String, is_mut: bool, from: HolderLender, holds_value: bool, option_ref: bool, holder_value: bool) -> String {
     let what = match from {
         HolderLender::Pointee => format!("the data {} points to", styled_name_html(from_name)),
         HolderLender::FieldThroughRef => styled_name_html(from_name),
         HolderLender::Own => format!("{}'s {}", styled_name_html(from_name), if holds_value { "value" } else { "resource" }),
     };
     format!(
-        "{0} holds a value that {3}{1} {4} {2} ({0} isn't a reference itself)",
+        "{0} holds a {5} that {3}{1} {4} {2} ({0} isn't a reference itself)",
         styled_name_html(my_name),
         if is_mut { "mutably" } else { "immutably" },
         what,
         if option_ref { "can " } else { "" },
         if option_ref { "borrow" } else { "borrows" },
+        held(holder_value),
     )
 }
 
@@ -7179,7 +7199,8 @@ pub fn arrow_repoint_release(from: &ResourceTy, to: &ResourceTy, kind: &str) -> 
 /// loan supplies its kind and borrowed place. A holder can carry different
 /// loans on different incoming paths.
 pub fn arrow_end_title(from: &ResourceTy, to: &ResourceTy, static_lender: Option<&StaticLender>,
-    of_ref_var: bool, loan: Option<&crate::facts::LoanInfo>, kind: Option<&str>, payload: Option<&(String, &'static str)>) -> String {
+    of_ref_var: bool, loan: Option<&crate::facts::LoanInfo>, kind: Option<&str>,
+    payload: Option<&(String, &'static str)>, named_end: Option<bool>, returned: bool) -> String {
     let holder = styled_name_html(&from.name());
     if from.is_same_underlying(to) {
         if let Some(lender) = static_lender {
@@ -7213,6 +7234,19 @@ pub fn arrow_end_title(from: &ResourceTy, to: &ResourceTy, static_lender: Option
             let plain = temporary.map_or_else(|| of_ref_var || crate::svg_generator::data::holds_copy_value(to), |(_, glue)| !glue);
             let value = if plain { "value" } else { "resource" };
             return format!("{holder}'s {kind} borrow of {place} ends. This borrow no longer restricts access to {place}. Ending the borrow doesn't move the {value}");
+        }
+        let same_owner = to.extract_rap().and_then(|r| r.scope_local())
+            .is_some_and(|local| l.lender_local == Some(local));
+        if l.runs && same_owner && l.whole.contains(&to.name()) && (returned || named_end.is_some())
+        {
+            let path = if named_end == Some(true) || l.issued_on.is_some() || !l.issuance_path.is_empty() {
+                "On this path, "
+            } else { "" };
+            let value = held(of_ref_var || crate::svg_generator::data::holds_copy_value(to));
+            if returned && l.lender != to.name() {
+                return format!("{path}{holder}'s {kind} borrow of the contents of {place} ends. This borrow no longer restricts access to {place}. Ending the borrow doesn't move the {value}");
+            }
+            return format!("{path}{holder}'s {kind} borrow of {place} ends. This borrow no longer restricts access to {place}. Ending the borrow doesn't move the {value}");
         }
     }
     let borrow = kind.map_or_else(|| "borrow".to_string(), |kind| format!("{kind} borrow"));
@@ -7541,7 +7575,8 @@ pub fn event_dot_field_lenders_end(my_name: &String, lenders: &[String]) -> Stri
 /// The title of the call icon on the dot of an argument passed by
 /// reference (`f(&s)`, `f(&mut s)`): `from_variable` is lent to
 /// `function`.
-pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, from_variable: &ResourceTy) -> String {
+pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, from_variable: &ResourceTy,
+    by_value: Option<bool>, projected: Option<&str>) -> String {
     let styled_fn_name = styled_name_html(&function.name);
     let styled_from_name = styled_name_html(&from_variable.name());
     if function.mutable_call_receiver {
@@ -7684,7 +7719,16 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
             _ => None,
         };
         let alt_suffix = alt.map_or(String::new(), break_alt_if_suffix);
-        if interior_mut_through_ref {
+        if let Some(mutable) = by_value {
+            let kind = if mutable { "mutable" } else { "shared" };
+            let place = projected.unwrap_or(&styled_via);
+            let how = if projected.is_none() && (reborrow || !of_ref_var && from_variable.is_ref()) {
+                "through"
+            } else {
+                "to"
+            };
+            format!("A {kind} reference {how} {place} is passed by value to {styled_fn_name}{alt_suffix}{reborrow_suffix}{stored_suffix}")
+        } else if interior_mut_through_ref {
             let msg = fn_dot_shared_ref_interior_mut(
                 &function.name, &from_variable.name(),
                 matches!(external_event, ExternalEvent::PassByStaticReference { refcell_borrow_mut: true, .. }));
@@ -7735,6 +7779,18 @@ pub fn arrow_call_title(external_event: &ExternalEvent, function: &Function, fro
             };
             format!("{call}{reborrow_suffix}{stored_suffix}")
         }
+}
+
+pub(crate) fn mem_transfer(effect: crate::facts::call_wording::ReferenceArgument, destination: Option<&str>) -> &'static str {
+    use crate::facts::call_wording::ReferenceArgument::*;
+    match (effect, destination.is_some()) {
+        (Replace, true) => "The call stores the replacement in the borrowed place and returns the old value to ",
+        (Replace, false) => "The call stores the replacement in the borrowed place and returns the old value.",
+        (Take, true) => "The call stores the type's default value in the borrowed place and returns the old value to ",
+        (Take, false) => "The call stores the type's default value in the borrowed place and returns the old value.",
+        (Swap, _) => "The values in the two borrowed places exchange places.",
+        (ByValue { .. }, _) => "",
+    }
 }
 
 /// A column's name when no message could be built for it (a fallback the

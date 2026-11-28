@@ -262,6 +262,13 @@ impl ValueFlow {
         }))
     }
 
+    pub fn direct_result_binding(&self, at: Location) -> Option<(Local, &[ReturnPart])> {
+        unique(self.results.get(&at)?.iter().filter_map(|destination| match destination {
+            Destination::Binding(binding, path) => Some((*binding, path.as_slice())),
+            _ => None,
+        }))
+    }
+
     fn try_output(&self, destinations: &BTreeSet<Destination>) -> Option<&BTreeSet<Destination>> {
         unique(destinations.iter().filter_map(|destination| match destination {
             Destination::Argument(at, 0, None) => self.try_outputs.get(at),

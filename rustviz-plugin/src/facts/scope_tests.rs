@@ -231,7 +231,8 @@ fn scope_review_folded_continue_is_excluded_from_the_ordinary_drop() {
         assert_eq!(early.effect, ScopeDrop::Empty);
         let ordinary = ends.iter().find(|e| e.site.is_none()).unwrap();
         assert_eq!(ordinary.effect, ScopeDrop::Whole);
-        assert!(ordinary.flag, "the shared destructor tests the initialization flag");
+        assert!(!ordinary.flag, "the ordinary exit always reaches the shared destructor initialized");
+        assert!(!early.flag, "the continue always reaches the shared destructor uninitialized");
     });
 }
 

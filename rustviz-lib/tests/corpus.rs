@@ -487,8 +487,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s's resource is mutably borrowed by y; s can't be used while the borrow is live",
             "t's resource is immutably borrowed by a; t is read-only while the borrow is live",
-            "If z holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
-            "If b holds a shared borrow affecting t, that borrow ends here. It no longer restricts access to t",
+            "z's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
+            "b's shared borrow of t ends. This borrow no longer restricts access to t. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "s's resource is mutably borrowed by y; s can't be used until y's last use",
@@ -838,7 +838,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquired ownership of a resource (in all branches above)",
             "s goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["s is live in a conditional expression"],
+        must_not_contain: &["s has a separate timeline path for each branch of this conditional"],
     },
 
     // ─── Smart-pointer wrappers (#76) ───────────────────────────────
@@ -972,7 +972,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to s",
             "Closure capture (immutable borrow) from s to f",
             "Closure f captures: s (immutably borrowed)",
-            "If f holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "f's shared borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "f's immutable borrow ends",
             "s's resource is no longer immutably borrowed",
             "f goes out of scope",
@@ -1034,7 +1034,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from String::from to s",
             "Closure capture (mutable borrow) from s to f",
             "Closure f captures: s (mutably borrowed)",
-            "If f holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "f's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "f's mutable borrow ends",
             "s's resource is no longer mutably borrowed",
             "f goes out of scope",
@@ -2246,7 +2246,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a is passed to dbg! by shared reference. dbg! may read it",
             "Move from a to b",
             "Immutable borrow from b to r",
-            "If r holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
+            "r's shared borrow of b ends. This borrow no longer restricts access to b. Ending the borrow doesn't move the value",
             "Move from c to dbg!",
             "Copy from x to dbg!",
             "c goes out of scope",
@@ -3309,7 +3309,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m's value is no longer immutably borrowed",
             "r immutably borrows a value",
             // Q7 (P2-1b, ends from the facts): r and r2 are both read on the last row; r2 (read last) gives m back, r's own borrow ends.
-            "If r2 holds a shared borrow affecting m, that borrow ends here. It no longer restricts access to m",
+            "On this path, r2's shared borrow of m ends. This borrow no longer restricts access to m. Ending the borrow doesn't move the value",
             "r's immutable borrow ends",
             "r's reference is copied (not the value it points to)",
             "r holds an immutable reference; it can read the borrowed value",
@@ -3414,7 +3414,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
         must_not_contain: &[
             // (The plugin emits this one with a trailing space.)
-            "s is live in a conditional expression ",
+            "s has a separate timeline path for each branch of this conditional",
             "s isn't moved in any of the branches above",
         ],
     },
@@ -3591,12 +3591,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // on one line (#333): the moves are conditional. They used to
         // be drawn inline, as unconditional moves.
         must_contain: &[
-            "s is live in a conditional expression ",
+            "s has a separate timeline path for each branch of this conditional",
             "s's resource is moved",
             "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, and execution reaches the end of s's scope with the resource still held, it is dropped there.",
             "s goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
-            "t is live in a conditional expression ",
+            "t has a separate timeline path for each branch of this conditional",
             "t's resource is moved",
             "t was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, and execution reaches the end of t's scope with the resource still held, it is dropped there.",
             "t goes out of scope. Its resource is dropped here only if no branch above moved it \
@@ -3617,7 +3617,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquired ownership of a resource (in all branches above)",
         ],
         must_not_contain: &[
-            "s is live in a conditional expression",
+            "s has a separate timeline path for each branch of this conditional",
             "s was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when s goes out of scope.",
         ],
@@ -3629,7 +3629,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s has no value yet",
             "s acquired ownership of a resource (in all branches above)",
         ],
-        must_not_contain: &["s is live in a conditional expression"],
+        must_not_contain: &["s has a separate timeline path for each branch of this conditional"],
     },
     // ─── Patterns in fn parameters (#331) ───────────────────────────
     TooltipExpect {
@@ -3718,7 +3718,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "a's immutable borrow ends",
             "b's immutable borrow ends",
-            "If b holds a shared borrow affecting x, that borrow ends here. It no longer restricts access to x",
+            "b's shared borrow of x ends. This borrow no longer restricts access to x. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "a's shared borrow of x ends",
@@ -3737,7 +3737,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure capture (move) from p.name to f",
             "p.nick goes out of scope. Its resource is dropped.",
             "q.nick's resource is captured (immutably borrowed) by closure g",
-            "If g holds a shared borrow affecting q.nick, that borrow ends here. It no longer restricts access to q.nick",
+            "g's shared borrow of q.nick ends. This borrow no longer restricts access to q.nick. Ending the borrow doesn't move the resource",
             "Move from q.name to r",
         ],
         must_not_contain: &[
@@ -3762,7 +3762,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Closure capture (move) from t.0 to f",
             "t.1 goes out of scope. Its resource is dropped.",
             "u.1's resource is captured (immutably borrowed) by closure g",
-            "If g holds a shared borrow affecting u.1, that borrow ends here. It no longer restricts access to u.1",
+            "g's shared borrow of u.1 ends. This borrow no longer restricts access to u.1. Ending the borrow doesn't move the resource",
             "Move from u.0 to r",
         ],
         must_not_contain: &[
@@ -3847,7 +3847,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "default goes out of scope. No resource is dropped.",
             "opt goes out of scope. Its resource is dropped (including the String it holds, if any).",
             "trim takes a shared reference (as self, implicitly borrowed). It may read through that reference",
-            "needle is passed to contains by shared reference. contains may read it",
+            "A shared reference to needle is passed by value to contains",
         ],
         must_not_contain: &[
             "n goes out of scope. Its resource is dropped.",
@@ -4345,7 +4345,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (#410), which ends their columns there instead of a bar;
         // `return_drops_what_the_branch_owns` counts the drops.
         must_contain: &[
-            "t goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "t goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[],
     },
@@ -4361,29 +4361,29 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // through".
         must_contain: &[
             // A literal has no source to name; a named place does.
-            "v[0] is assigned a new value",
+            "v[0] is assigned a new value. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             "v's resource is modified through v[1]",
             // `v[2] = v[0]`: an element read is not a modelled source
             // (no arrow), so there is nothing to name.
             "v[2] is assigned a new value",
-            "v[0] is assigned a copy of *z",
-            "Move from s to names[0]",
-            "The old value at names[0] is dropped and the replacement is stored there",
+            "v[0] is assigned a copy of *z. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "Move from s to names[0]. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "The old value at names[0] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             // `+=` on a String calls `add_assign`: nothing is overwritten.
             "names's resource is modified through names[0]",
             "s's resource is moved",
             "s goes out of scope. No resource is dropped.",
-            "Move from String::from to names[0]",
+            "Move from String::from to names[0]. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             "grid[1][0] is assigned a new value",
             // Nested collections read the same at any depth: the place
             // is the subject, not the outermost collection.
             "grid[0][1] is assigned a copy of y",
             "Copy from y to grid[0][1]",
             "grid's value is modified through grid[1][1]",
-            "cube[0][0][1] is assigned a new value",
-            "The old value at rows[0][0] is dropped and the replacement is stored there",
-            "Move from p to ps[0]",
-            "The old value at ps[0] is dropped and the replacement is stored there",
+            "cube[0][0][1] is assigned a new value. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "The old value at rows[0][0] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "Move from p to ps[0]. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "The old value at ps[0] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             "p.name's resource is moved",
             "p.name goes out of scope. No resource is dropped.",
         ],
@@ -4424,15 +4424,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // parameters' borrows still end on the write's line (another
         // arrow on that line used to hide that event).
         must_contain: &[
-            "Copy from x to xs[i]",
-            "xs[i] is assigned a copy of x",
+            "Copy from x to xs[i]. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "xs[i] is assigned a copy of x. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             "xs's mutable borrow ends",
-            "Move from s to dst[0]",
-            "The old value at dst[0] is dropped and the replacement is stored there",
+            "Move from s to dst[0]. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "The old value at dst[0] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             "dst's mutable borrow ends",
             "s goes out of scope. No resource is dropped.",
-            "Move from String::from to r[0]",
-            "The old value at r[0] is dropped and the replacement is stored there",
+            "Move from String::from to r[0]. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "The old value at r[0] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             "r's mutable borrow of v ends. This borrow no longer restricts access to v. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
@@ -4462,19 +4462,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // (an i32), a "resource" when it does (a String) (#484).
         must_contain: &[
             "the value slots[0] points to is modified through *slots[0]",
-            "*slots[1] is assigned a new value",
+            "*slots[1] is assigned a new value. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             // A named Copy source is named (`*slots[1] = k`).
-            "*slots[1] is assigned a copy of k",
-            "Move from s to *names[0]",
+            "*slots[1] is assigned a copy of k. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "Move from s to *names[0]. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             "the value hs[0].r points to is modified through *hs[0].r",
-            "*boxes[0] is assigned a new value",
+            "*boxes[0] is assigned a new value. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             // Overwriting a String through the stored reference drops the
             // old String; no column shows it, so the tooltip says it.
-            "The old value at *names[0] is dropped and the replacement is stored there",
+            "The old value at *names[0] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             // `vec![Holder { r: &mut z }]` holds a mutable borrow of z
             // (#692), an i32: a value (#719).
             "Mutable borrow from z to hs",
-            "hs holds a value that mutably borrows z's value (hs isn't a reference itself)",
+            "hs holds a resource that mutably borrows z's value (hs isn't a reference itself)",
             "If hs holds a mutable borrow affecting z, that borrow ends here. It no longer restricts access to z",
         ],
         must_not_contain: &[
@@ -5470,7 +5470,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "m goes out of scope. Its resource is dropped.",
             // captures_first
             "Closure capture (immutable borrow) from b to f",
-            "If f holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
+            "f's shared borrow of b ends. This borrow no longer restricts access to b. Ending the borrow doesn't move the resource",
             "b₂ goes out of scope. Its resource is dropped.",
             // fnonce_shadowed: MIR passes g₂ by value and puts b in the result.
             "t acquires ownership of the resource g₂() returns",
@@ -5615,10 +5615,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "i goes out of scope",
         ],
         must_not_contain: &[
-            "x is live in a conditional expression",
+            "x has a separate timeline path for each branch of this conditional",
             "x was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
             "x goes out of scope. No resource is dropped.",
-            "i is live in a conditional expression",
+            "i has a separate timeline path for each branch of this conditional",
             "i was moved in at least one branch above; in branches where it was not, its resource is dropped at the branch's end.",
         ],
     },
@@ -5877,10 +5877,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // Its column forks at the `if let`, one drop per path (#1360).
             "This temporary IntoIter<String> is dropped here, where `return` leaves early",
             "This temporary IntoIter<String> is dropped before the `else` block of this `if let` runs",
-            "(temporary) is live in a conditional expression ",
+            "(temporary) has a separate timeline path for each branch of this conditional",
         ],
         must_not_contain: &[
-            "v is live in a conditional expression ",
+            "v has a separate timeline path for each branch of this conditional",
             "v goes out of scope. Its resource is dropped.",
             "v goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
@@ -5902,13 +5902,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "v's resource is moved",
             "v goes out of scope. No resource is dropped.",
-            "t is live in a conditional expression ",
+            "t has a separate timeline path for each branch of this conditional",
             "t's resource is moved into drop, which drops it",
             "t goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
         ],
         must_not_contain: &[
-            "v is live in a conditional expression ",
+            "v has a separate timeline path for each branch of this conditional",
             "v goes out of scope. Its resource is dropped here only if no branch above moved it \
              (Rust tracks this with a runtime drop flag).",
         ],
@@ -5925,8 +5925,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             // The two matches' `s`s are never in scope together (#598).
             "s₂",
-            "v is live in a conditional expression ",
-            "w is live in a conditional expression ",
+            "v has a separate timeline path for each branch of this conditional",
+            "w has a separate timeline path for each branch of this conditional",
             "v goes out of scope. Its resource is dropped.",
             "w goes out of scope. Its resource is dropped.",
         ],
@@ -5947,7 +5947,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "Move from c to Some",
             "Move from Some to (temporary",
-            "c is live in a conditional expression ",
+            "c has a separate timeline path for each branch of this conditional",
             "c goes out of scope. Its resource is dropped.",
             "d goes out of scope. Its resource is dropped.",
         ],
@@ -6083,7 +6083,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Partial immutable borrow from opt to s",
             "s's immutable borrow ends",
-            "If s holds a shared borrow affecting opt, that borrow ends here. It no longer restricts access to opt",
+            "On this path, s's shared borrow of opt ends. This borrow no longer restricts access to opt. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[],
     },
@@ -6198,7 +6198,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "r's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "s's resource is no longer mutably borrowed",
-            "s is live in a conditional expression ",
+            "s has a separate timeline path for each branch of this conditional",
             "r's borrow has ended on this path",
             "r's borrow ended in each branch above",
         ],
@@ -6244,7 +6244,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // doesn't branch (#583, as #496 for a lone `if let`).
         must_not_contain: &[
             "=x goes out of scope. Its resource is dropped.",
-            "y is live in a conditional expression",
+            "y has a separate timeline path for each branch of this conditional",
             "y isn't moved in any of the branches above",
             // #866: a copy of the value inside, not of the whole.
             "Copy from y to b",
@@ -6368,9 +6368,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from r to r2",
             "Move from r2 to r3",
-            "If r3 holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "r3's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "Move from q to q2",
-            "If q2 holds a mutable borrow affecting t, that borrow ends here. It no longer restricts access to t",
+            "q2's mutable borrow of t ends. This borrow no longer restricts access to t. Ending the borrow doesn't move the resource",
             "If q holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
         ],
         must_not_contain: &[
@@ -7083,7 +7083,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // that reference, so it borrows `s`, not `refs`.
         must_contain: &[
             "Immutable borrow from s to refs",
-            "refs holds a value that immutably borrows s's resource (refs isn't a reference itself)",
+            "refs holds a resource that immutably borrows s's resource (refs isn't a reference itself)",
             "r is a reference copied out of refs. It holds a shared reference. The borrow checker keeps s borrowed while r is in use.",
             "If r holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
             // Q7 (P2-1b, ends from the facts): refs is last used where r copies its element; r gives s back.
@@ -7433,8 +7433,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from text to words: split's signature gives the value it returns the same lifetime as the reference passed as its receiver; collect passes the borrow on; words isn't a reference, but its value holds one",
             "If words holds a shared borrow affecting text, that borrow ends here. It no longer restricts access to text",
             "Immutable borrow from s to refs, stored in refs by push; refs isn't a reference, but its value now holds one",
-            "refs holds a value that immutably borrows s's resource (refs isn't a reference itself)",
-            "refs owns a value that can hold references (refs isn't a reference itself)",
+            "refs holds a resource that immutably borrows s's resource (refs isn't a reference itself)",
+            "refs owns a resource that can hold references (refs isn't a reference itself)",
             "If refs holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
             // A `Vec` needs drop: its resource (the buffer) is dropped (#484).
             "refs goes out of scope. Its resource is dropped, but not the data it borrowed.",
@@ -7472,7 +7472,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Immutable borrow from s to r: id's signature gives the reference it returns the same lifetime as its argument",
             "Immutable borrow from s to o: Some's signature gives the value it returns the same lifetime as its argument; o isn't a reference, but its value holds one",
-            "If r holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "r's shared borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "If o holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
         ],
         must_not_contain: &[
@@ -7863,7 +7863,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope",
         ],
         must_not_contain: &[
-            "y is live in a conditional expression ",
+            "y has a separate timeline path for each branch of this conditional",
             "y has no value yet",
             "y goes out of scope. No resource is dropped.",
             // #866: a copy of the value inside, not of the whole.
@@ -7882,7 +7882,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope",
         ],
         must_not_contain: &[
-            "y is live in a conditional expression ",
+            "y has a separate timeline path for each branch of this conditional",
             "y has no value yet",
         ],
     },
@@ -7896,11 +7896,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z goes out of scope. Its resource is dropped.",
             "n immutably borrows a value",
             "n's immutable borrow ends",
-            "s is live in a conditional expression ",
+            "s has a separate timeline path for each branch of this conditional",
         ],
         must_not_contain: &[
-            "z is live in a conditional expression ",
-            "n is live in a conditional expression ",
+            "z has a separate timeline path for each branch of this conditional",
+            "n has a separate timeline path for each branch of this conditional",
             "z has no value yet",
             "n has no value yet",
         ],
@@ -7913,11 +7913,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "x is initialized with the value inside the Option pop() returns",
             "x goes out of scope",
-            "v is live in a conditional expression ",
+            "v has a separate timeline path for each branch of this conditional",
         ],
         must_not_contain: &[
             "x is initialized with the value pop() returns",
-            "x is live in a conditional expression ",
+            "x has a separate timeline path for each branch of this conditional",
             "x has no value yet",
             "x goes out of scope. No resource is dropped.",
         ],
@@ -7939,7 +7939,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z is assigned a copy of b",
             "z is assigned a copy of a",
             "is a different variable from",
-            "z is live in a conditional expression ",
+            "z has a separate timeline path for each branch of this conditional",
             "z has no value yet",
             // #866: a copy of the value inside, not of the whole.
             "=z is initialized with a copy of a",
@@ -7976,7 +7976,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `Some(y)` arm that doesn't use it.
         must_contain: &[
             "x is initialized with a copy of a value inside a",
-            "x is live in a conditional expression ",
+            "x has a separate timeline path for each branch of this conditional",
             "x holds a copyable value",
         ],
         must_not_contain: &[
@@ -8110,7 +8110,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Partial move from o to s",
             "s goes out of scope. Its resource is dropped.",
-            "o goes out of scope. No payload remains to drop. None carries no payload. Rust tracks this with a runtime drop flag.",
+            "o goes out of scope. No payload remains to drop. None carries no payload.",
             "Partial immutable borrow from r to t",
             "t immutably borrows a resource",
             "r goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is).",
@@ -8203,7 +8203,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "first goes out of scope",
         ],
         must_not_contain: &[
-            "first is live in a conditional expression ",
+            "first has a separate timeline path for each branch of this conditional",
             "first holds an immutable reference; it can read the borrowed resource",
             "first was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when first goes out of scope.",
@@ -8214,11 +8214,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `s` is moved in one arm, so its merge dot may say so; `t` lives
         // in the other arm only, so it never does, and it is dropped there.
         must_contain: &[
-            "s is live in a conditional expression ",
+            "s has a separate timeline path for each branch of this conditional",
             "t goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "t is live in a conditional expression ",
+            "t has a separate timeline path for each branch of this conditional",
             "t was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, its resource is \
              dropped when t goes out of scope.",
             "t goes out of scope. No resource is dropped.",
@@ -9511,7 +9511,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
-            "y is live in a conditional expression",
+            "y has a separate timeline path for each branch of this conditional",
             "y isn't moved in any of the branches above",
             // #866: a copy of the value inside, not of the whole.
             "Copy from y to u",
@@ -9528,7 +9528,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x goes out of scope. Its resource is dropped (including the String it holds, if any).",
         ],
         must_not_contain: &[
-            "y is live in a conditional expression",
+            "y has a separate timeline path for each branch of this conditional",
             // #866: a copy of the value inside, not of the whole.
             "Copy from y to b",
             "b is initialized with a copy of y",
@@ -9650,7 +9650,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_contents_move",
         must_contain: &[
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation is freed.",
         ],
         must_not_contain: &[
             "=b goes out of scope. No resource is dropped.",
@@ -9659,7 +9659,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_contents_move_string",
         must_contain: &[
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation is freed.",
         ],
         must_not_contain: &[
             "=b goes out of scope. No resource is dropped.",
@@ -9669,7 +9669,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_contents_move_pattern",
         must_contain: &[
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation is freed.",
         ],
         must_not_contain: &[
             "=b goes out of scope. No resource is dropped.",
@@ -9870,22 +9870,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from other.r to hold.r",
             "other.r's immutable reference is moved (not the resource it points to)",
             "hold.r is bound to an immutable reference",
-            "If hold.r holds a shared borrow affecting t, that borrow ends here. It no longer restricts access to t",
+            "hold.r's shared borrow of t ends. This borrow no longer restricts access to t. Ending the borrow doesn't move the resource",
             "If hold.r holds a borrow affecting a, that borrow ends here. It no longer restricts access to a",
             "If hold.r holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
             // `hold = other;` reads like a plain assignment.
             "hold.r is assigned other.r's immutable reference",
             "other.r's mutable reference is moved (not the resource it points to)",
-            "If hold.r holds a mutable borrow affecting u, that borrow ends here. It no longer restricts access to u",
+            "hold.r's mutable borrow of u ends. This borrow no longer restricts access to u. Ending the borrow doesn't move the resource",
             "Move from o.inner.r to o2.inner.r",
-            "If o2.inner.r holds a shared borrow affecting e, that borrow ends here. It no longer restricts access to e",
+            "o2.inner.r's shared borrow of e ends. This borrow no longer restricts access to e. Ending the borrow doesn't move the resource",
             "If hold.r holds a shared borrow affecting f, that borrow ends here. It no longer restricts access to f",
             "Copy from c1.r to c2.r",
             "c2.r is initialized with a copy of c1.r",
-            "If c2.r holds a shared borrow affecting g, that borrow ends here. It no longer restricts access to g",
-            "If hold.r holds a shared borrow affecting p, that borrow ends here. It no longer restricts access to p",
+            "On this path, c2.r's shared borrow of g ends. This borrow no longer restricts access to g. Ending the borrow doesn't move the resource",
+            "On this path, hold.r's shared borrow of p ends. This borrow no longer restricts access to p. Ending the borrow doesn't move the resource",
             "If other.r holds a shared borrow affecting q, that borrow ends here. It no longer restricts access to q",
-            "If hold.r holds a shared borrow affecting w, that borrow ends here. It no longer restricts access to w",
+            "On this path, hold.r's shared borrow of w ends. This borrow no longer restricts access to w. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             // The moved-from field returning a borrow it no longer holds.
@@ -10183,7 +10183,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary Option<String> is dropped at the end of each iteration of this `while let` loop",
             "This temporary IntoIter<String> is dropped when the `for` loop ends",
             "This temporary String is dropped when the `for` loop ends",
-            "A temporary holds the value that into_iter returns. Rust drops it as soon as its statement (or enclosing expression) is done",
+            "A temporary holds the iterator that into_iter returns. The iterator lives through the loop and is dropped when the loop exits",
         ],
         must_not_contain: &[
             "Move from Some to",
@@ -10409,7 +10409,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "u goes out of scope. Its resource is dropped.",
             // (The plugin emits this one with a trailing space.)
-            "u is live in a conditional expression ",
+            "u has a separate timeline path for each branch of this conditional",
         ],
         must_not_contain: &[],
     },
@@ -10441,7 +10441,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `return` ends the `if` column in `t`'s drop.
         must_contain: &[
             "t goes out of scope. Its resource is dropped.",
-            "t is live in a conditional expression ",
+            "t has a separate timeline path for each branch of this conditional",
             "t isn't moved in any of the branches above",
         ],
         must_not_contain: &[],
@@ -10539,7 +10539,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z's resource is moved into the",
             "w's resource is moved into the",
             // it3 / words don't take part in the `if` around the `return`.
-            "words is live in a conditional expression",
+            "words has a separate timeline path for each branch of this conditional",
             "=words was moved or dropped in every branch", // #694: no join dot (the scope-end tooltip states it instead)
         ],
     },
@@ -10605,7 +10605,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_box_move",
         must_contain: &[
             "*b may have been moved: when the condition moves *b to take and then turns out false, the else branch runs after that move, so *b can't be used here",
-            "b goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
+            "b goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
         ],
         must_not_contain: &[
             // #736: the drop flag decides only the String; the Box's
@@ -10855,11 +10855,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // so the end of each holder's borrow is now a dot of its own.
         // These guard that the right reference returns each lender.
         must_contain: &[
-            "If hold.r holds a shared borrow affecting p, that borrow ends here. It no longer restricts access to p",
+            "On this path, hold.r's shared borrow of p ends. This borrow no longer restricts access to p. Ending the borrow doesn't move the resource",
             "If other.r holds a shared borrow affecting q, that borrow ends here. It no longer restricts access to q",
-            "If h holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
+            "On this path, h's shared borrow of a ends. This borrow no longer restricts access to a. Ending the borrow doesn't move the resource",
             "If o holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
-            "If h2 holds a mutable borrow affecting c, that borrow ends here. It no longer restricts access to c",
+            "On this path, h2's mutable borrow of c ends. This borrow no longer restricts access to c. Ending the borrow doesn't move the resource",
             "If o2 holds a mutable borrow affecting d, that borrow ends here. It no longer restricts access to d",
             "m's mutable borrow of x ends. This borrow no longer restricts access to x. Ending the borrow doesn't move the resource",
             "n's mutable borrow of z ends. This borrow no longer restricts access to z. Ending the borrow doesn't move the resource",
@@ -10953,7 +10953,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If h holds a shared borrow affecting p, that borrow ends here. It no longer restricts access to p",
             "If h holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
             "If h holds a shared borrow affecting c, that borrow ends here. It no longer restricts access to c",
-            "If h holds a shared borrow affecting x, that borrow ends here. It no longer restricts access to x",
+            "On this path, h's shared borrow of x ends. This borrow no longer restricts access to x. Ending the borrow doesn't move the resource",
             "h's immutable borrow ends",
             "s's resource is no longer immutably borrowed",
         ],
@@ -11243,8 +11243,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s's resource is moved to the caller",
             "t's resource is moved to the caller",
-            "s goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
-            "t goes out of scope. Its resource is dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
+            "s goes out of scope. On paths that still hold a resource, it is dropped.",
+            "t goes out of scope. On paths that still hold a resource, it is dropped.",
             "p's resource is moved to the caller",
             "q's resource is moved to the caller",
             "p still owns its resource here: the branch that moved p returned before reaching this point",
@@ -11455,7 +11455,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // k is dropped only on the `break j` path (drawn in that
             // branch's lane); on the `break k` path it is moved, and
             // after #680 that lane no longer gets its own scope-end dot.
-            "k goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "k goes out of scope. Its resource is dropped.",
             "r acquires ownership of a resource (from whichever break ended the loop)",
             "r goes out of scope. Its resource is dropped.",
             "Move from String::from to w, if the loop ended with break String::from(\"one\")",
@@ -11526,13 +11526,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `break` in a branch, a reference declared in the loop, and two
         // `break`s that borrow different Strings.
         must_contain: &[
-            "If r holds a mutable borrow affecting a, that borrow ends here. It no longer restricts access to a",
+            "r's mutable borrow of a ends. This borrow no longer restricts access to a. Ending the borrow doesn't move the resource",
             "a's resource is no longer mutably borrowed",
             "a goes out of scope. Its resource is dropped.",
             "rb's shared borrow of b ends. This borrow no longer restricts access to b. Ending the borrow doesn't move the resource",
-            "If r holds a mutable borrow affecting c, that borrow ends here. It no longer restricts access to c",
+            "r's mutable borrow of c ends. This borrow no longer restricts access to c. Ending the borrow doesn't move the resource",
             "c goes out of scope. Its resource is dropped.",
-            "If r holds a mutable borrow affecting d, that borrow ends here. It no longer restricts access to d",
+            "On this path, r's mutable borrow of d ends. This borrow no longer restricts access to d. Ending the borrow doesn't move the resource",
             "d goes out of scope. Its resource is dropped.",
             "If r holds a shared borrow affecting e, that borrow ends here. It no longer restricts access to e",
             "If r holds a shared borrow affecting f, that borrow ends here. It no longer restricts access to f",
@@ -11614,7 +11614,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from s to refs, stored in refs by extend; refs isn't a reference, but its value now holds one",
             "s's resource is immutably borrowed by refs; s is read-only while the borrow is live",
             "If refs holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
-            "refs owns a value that can hold references (refs isn't a reference itself)",
+            "refs owns a resource that can hold references (refs isn't a reference itself)",
             "Immutable borrow from a to more, stored in more by extend; more isn't a reference, but its value now holds one",
             "a's resource is immutably borrowed by more; a is read-only while the borrow is live",
             "If more holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
@@ -11676,7 +11676,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &["t goes out of scope. Its resource is dropped."],
         must_not_contain: &[
             "t may have been immutably borrowed",
-            "t is live in a conditional expression",
+            "t has a separate timeline path for each branch of this conditional",
             "t isn't moved in any of the branches above",
         ],
     },
@@ -11808,7 +11808,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "pattern_mutref_field_let",
         must_contain: &[
             "Move from p.part to r",
-            "If r holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "r's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "Move from p to r",
@@ -11826,7 +11826,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "pattern_mutref_field_iflet",
         must_contain: &[
             "Move from p.part to r",
-            "If r holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "r's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "Move from p to r",
@@ -11838,8 +11838,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // The pattern matches every Part, so the body always runs: no
             // conditional fork on s, and p.part (moved out at line 5)
             // holds no borrow to return at the `}`.
-            "s is live in a conditional expression",
-            "p.part is live in a conditional expression",
+            "s has a separate timeline path for each branch of this conditional",
+            "p.part has a separate timeline path for each branch of this conditional",
             "p.part's mutable borrow of s ends",
             "p.part's mutable borrow ends",
             // p's only field is gone and a reference needs no drop.
@@ -11853,7 +11853,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "pattern_mutref_field_match",
         must_contain: &[
             "Move from p.part to r",
-            "If r holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "r's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "Move from p to r",
@@ -12046,7 +12046,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from g2 to h2",
             "g2's value is moved",
             "h2 takes over g2's value, and the borrow it holds",
-            "If h2 holds a mutable borrow affecting t, that borrow ends here. It no longer restricts access to t",
+            "h2's mutable borrow of t ends. This borrow no longer restricts access to t. Ending the borrow doesn't move the resource",
             "Move from g3 to h3",
             "g3's resource is moved",
             "h3 takes over g3's value",
@@ -12672,7 +12672,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "The following applies only if the pattern matches. Immutable borrow from s to y.part: y.part is a reference that came with the value moved out of o into y",
             "If y.part holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
-            "If r holds a shared borrow affecting t, that borrow ends here. It no longer restricts access to t",
+            "On this path, r's shared borrow of t ends. This borrow no longer restricts access to t. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "y.part's immutable borrow ends (what it borrows from isn't shown)",
@@ -12686,12 +12686,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "pattern_tuple_ref_elements",
         must_contain: &[
-            "If p holds a shared borrow affecting c, that borrow ends here. It no longer restricts access to c",
-            "If q holds a shared borrow affecting d, that borrow ends here. It no longer restricts access to d",
-            "If x holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
-            "If y holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
-            "If u holds a shared borrow affecting e, that borrow ends here. It no longer restricts access to e",
-            "If v holds a shared borrow affecting f, that borrow ends here. It no longer restricts access to f",
+            "p's shared borrow of c ends. This borrow no longer restricts access to c. Ending the borrow doesn't move the resource",
+            "q's shared borrow of d ends. This borrow no longer restricts access to d. Ending the borrow doesn't move the resource",
+            "x's shared borrow of a ends. This borrow no longer restricts access to a. Ending the borrow doesn't move the resource",
+            "y's shared borrow of b ends. This borrow no longer restricts access to b. Ending the borrow doesn't move the resource",
+            "u's shared borrow of e ends. This borrow no longer restricts access to e. Ending the borrow doesn't move the resource",
+            "v's shared borrow of f ends. This borrow no longer restricts access to f. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "p's immutable borrow ends (what it borrows from isn't shown)",
@@ -12772,7 +12772,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from s to y.e.part: y.e.part is a reference that came with the value moved out of w into y.e",
             "Mutable borrow from k to y.m: y.m is a reference that came with the value moved out of w into y",
             "If y.e.part holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
-            "If y.m holds a mutable borrow affecting k, that borrow ends here. It no longer restricts access to k",
+            "On this path, y.m's mutable borrow of k ends. This borrow no longer restricts access to k. Ending the borrow doesn't move the value",
         ],
         must_not_contain: &[
             "Mutable borrow from s to",
@@ -12786,7 +12786,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Box is dropped; the Box's own heap allocation is freed on every
         // path, so the scope end has to say so.
         must_contain: &[
-            "b goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
+            "b goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
         ],
         must_not_contain: &[
             // Read as "nothing is freed if the branch moved *b".
@@ -13292,7 +13292,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "On a later iteration of the loop, the resource an earlier iteration gave s is dropped here first, if s still holds it (Rust tracks this with a runtime drop flag).",
             "s holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so s can't be used here until it's assigned again. Its resource is dropped when s goes out of scope.",
-            "s goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "s goes out of scope. Its resource is dropped.",
             "On a later iteration of the loop, the resource an earlier iteration gave t is dropped here first, if t still holds it (Rust tracks this with a runtime drop flag).",
             "t may have no value after the loop: the loop may end before assigning it, so it can't be used after the loop (until it's assigned again). If the loop assigned it, its resource is dropped when t is assigned again.",
             "t acquires ownership of a new resource. Its previous resource is dropped here only if the loop above assigned t (Rust tracks this with a runtime drop flag).",
@@ -13377,7 +13377,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f's value is captured (immutably borrowed) by closure g",
             "f's value is being shared by one or more variables",
             "f's value is no longer immutably borrowed",
-            "If g holds a shared borrow affecting f, that borrow ends here. It no longer restricts access to f",
+            "g's shared borrow of f ends. This borrow no longer restricts access to f. Ending the borrow doesn't move the value",
             "pr's value is immutably borrowed by apply; pr is read-only while the borrow is live",
             "pr's value is no longer immutably borrowed",
             "push's value is mutably borrowed by the closure passed to map; push can't be used while the borrow is live",
@@ -13826,13 +13826,13 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v's resource is modified through v[0]",
             "a's value is modified through a[1]",
             // `=` assigns to the place `v[1]`.
-            "v[1] is assigned a new value",
+            "v[1] is assigned a new value. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             "a[2] is assigned a new value",
             // A String element: the old one is dropped, and it says so.
-            "The old value at w[0] is dropped and the replacement is stored there",
-            "Move from String::from to w[0]",
-            "The old value at u[0] is dropped and the replacement is stored there",
-            "The old value at u[1] is dropped and the replacement is stored there",
+            "The old value at w[0] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "Move from String::from to w[0]. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "The old value at u[0] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
+            "The old value at u[1] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
         ],
         must_not_contain: &[
             // An assignment is not an in-place update, and `+=` isn't an assignment.
@@ -14083,7 +14083,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Copy from x to c",
             "c is initialized with a copy of x",
             "Copy from *c to z",
-            "If c holds a shared borrow affecting y, that borrow ends here. It no longer restricts access to y",
+            "c's shared borrow of y ends. This borrow no longer restricts access to y. Ending the borrow doesn't move the value",
             "z is initialized with a copy of *c",
         ],
         must_not_contain: &[
@@ -14102,7 +14102,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's value is mutably borrowed by y; x can't be used while the borrow is live",
             "Move from y to z",
             "z is bound to a mutable reference",
-            "If z holds a mutable borrow affecting x, that borrow ends here. It no longer restricts access to x",
+            "z's mutable borrow of x ends. This borrow no longer restricts access to x. Ending the borrow doesn't move the value",
             "the value z points to is immutably borrowed by println! through z",
         ],
         must_not_contain: &[
@@ -14279,7 +14279,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's resource is moved",
             "x is passed to push by mutable reference (as self, implicitly borrowed). push may read or write it",
             "x's resource is mutably borrowed by push; x can't be used while the borrow is live",
-            "x goes out of scope. No resource is dropped. Rust tracks this with a runtime drop flag.",
+            "x goes out of scope. No resource is dropped.",
             "s acquires ownership from the caller",
             "s is the owner of the resource",
             "s goes out of scope. Its resource is dropped.",
@@ -14474,7 +14474,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's value is mutably borrowed by y; x can't be used while the borrow is live",
             "Move from y to z",
             "z is bound to a mutable reference",
-            "If z holds a mutable borrow affecting x, that borrow ends here. It no longer restricts access to x",
+            "z's mutable borrow of x ends. This borrow no longer restricts access to x. Ending the borrow doesn't move the value",
             "the value z points to is immutably borrowed by println! through z",
             "*y's value is copied",
         ],
@@ -14497,7 +14497,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "x's value is mutably borrowed by y; x can't be used while the borrow is live",
             "Move from y to z",
             "z is bound to a mutable reference",
-            "If z holds a mutable borrow affecting x, that borrow ends here. It no longer restricts access to x",
+            "z's mutable borrow of x ends. This borrow no longer restricts access to x. Ending the borrow doesn't move the value",
             "the value z points to is immutably borrowed by println! through z",
             "*y's value is copied",
         ],
@@ -16680,7 +16680,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y's shared borrow of u ends. This borrow no longer restricts access to u. Ending the borrow doesn't move the resource",
             "y's immutable borrow ends",
             "u's resource is no longer immutably borrowed",
-            "If s holds a shared borrow affecting o, that borrow ends here. It no longer restricts access to o",
+            "On this path, s's shared borrow of o ends. This borrow no longer restricts access to o. Ending the borrow doesn't move the resource",
             "s's immutable borrow ends",
             "o's resource is no longer immutably borrowed",
             "If it holds a shared borrow affecting t, that borrow ends here. It no longer restricts access to t",
@@ -16820,7 +16820,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // not a reborrow. What dv borrows is the reference gv
             // holds, a value (#947).
             "Mutable borrow from gv to dv",
-            "If dv holds a mutable borrow affecting the reference slot gv, that borrow ends here. It no longer restricts access to the reference slot gv",
+            "dv's mutable borrow of the reference slot gv ends. This borrow no longer restricts access to the reference slot gv. Ending the borrow doesn't move the value",
             "gv is mutably borrowed by dv; gv can't be used while the borrow is live",
         ],
         must_not_contain: &[
@@ -16846,7 +16846,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "gd is immutably borrowed by dd; gd is read-only while the borrow is live",
             "gd is no longer immutably borrowed",
             "dd immutably borrows a value",
-            "If dd holds a shared borrow affecting the reference slot gd, that borrow ends here. It no longer restricts access to the reference slot gd",
+            "dd's shared borrow of the reference slot gd ends. This borrow no longer restricts access to the reference slot gd. Ending the borrow doesn't move the value",
             "dd is immutably borrowed by println!; dd is read-only while the borrow is live",
             "dd is no longer immutably borrowed",
             // let dw: &mut dyn Write = &mut gw2; (gw2: &mut Vec<u8>).
@@ -16855,11 +16855,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "gw2 is no longer mutably borrowed",
             "the value dw points to is mutably borrowed by write_all through dw; dw can't be used while the borrow is live",
             "dw mutably borrows a value",
-            "If dw holds a mutable borrow affecting the reference slot gw2, that borrow ends here. It no longer restricts access to the reference slot gw2",
+            "dw's mutable borrow of the reference slot gw2 ends. This borrow no longer restricts access to the reference slot gw2. Ending the borrow doesn't move the value",
             // An owner unsized to a trait object still lends a resource.
             "k2's resource is immutably borrowed by d2; k2 is read-only while the borrow is live",
             "d2 immutably borrows a resource",
-            "If d2 holds a shared borrow affecting k2, that borrow ends here. It no longer restricts access to k2",
+            "d2's shared borrow of k2 ends. This borrow no longer restricts access to k2. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "the resource gd points to",
@@ -16889,8 +16889,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `a_borrow_end_lands_in_the_arm_that_declares_its_reference`; the
         // old plugin printed nothing false that a tooltip check can forbid.
         must_contain: &[
-            "If x holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
-            "If x holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
+            "On this path, x's shared borrow of a ends. This borrow no longer restricts access to a. Ending the borrow doesn't move the resource",
+            "On this path, x's shared borrow of b ends. This borrow no longer restricts access to b. Ending the borrow doesn't move the resource",
             "b's resource is no longer immutably borrowed",
             "r's shared borrow of d ends. This borrow no longer restricts access to d. Ending the borrow doesn't move the resource",
             "q's shared borrow of d ends. This borrow no longer restricts access to d. Ending the borrow doesn't move the resource",
@@ -17148,15 +17148,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "w goes out of scope",
         ],
         must_not_contain: &[
-            "r is live in a conditional expression",
+            "r has a separate timeline path for each branch of this conditional",
             "r has no value yet",
             "r's borrow has ended on this path",
-            "p is live in a conditional expression",
+            "p has a separate timeline path for each branch of this conditional",
             "p has no value yet",
             "p's borrow has ended on this path",
-            "s is live in a conditional expression",
+            "s has a separate timeline path for each branch of this conditional",
             "s has no value yet",
-            "w is live in a conditional expression",
+            "w has a separate timeline path for each branch of this conditional",
             "w has no value yet",
             "w's borrow has ended on this path",
         ],
@@ -17236,7 +17236,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "w goes out of scope. Its resource is dropped",
             "w has no value yet",
-            "w is live in a conditional expression",
+            "w has a separate timeline path for each branch of this conditional",
         ],
     },
     TooltipExpect {
@@ -17248,8 +17248,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // either way. main drew the move as unconditional and said only
         // the allocation was freed there.
         must_contain: &[
-            "e goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
-            "e2 goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
+            "e goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
+            "e2 goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
         ],
         must_not_contain: &[
             "e goes out of scope. Its contents were moved out earlier",
@@ -17277,8 +17277,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s goes out of scope. Its resource is dropped.",
             "opt goes out of scope. No value inside opt remains to drop here. No resource is dropped. None carries no payload.",
-            "k goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
-            "r goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is). Rust tracks this with a runtime drop flag.",
+            "k goes out of scope. Its resource is dropped.",
+            "r goes out of scope. Its resource is dropped (including the String it holds, whichever variant it is).",
             "p.a goes out of scope. No value inside p.a remains to drop here. No resource is dropped. None carries no payload.",
             // The failed and successful pattern exits are pinned separately by dot ID below.
             "s isn't moved in any of the branches above",
@@ -17433,12 +17433,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `a_stored_borrow_keeps_its_lender_shared_until_the_holders_last_use`.
         must_contain: &[
             "x is immutably borrowed by refs; x is read-only while the borrow is live",
-            "refs holds a value that immutably borrows x's value (refs isn't a reference itself)",
+            "refs holds a resource that immutably borrows x's value (refs isn't a reference itself)",
             "x is no longer borrowed by look, but is still immutably borrowed by refs",
             "x is no longer immutably borrowed",
             "If refs holds a shared borrow affecting the reference slot x, that borrow ends here. It no longer restricts access to the reference slot x",
             "m is mutably borrowed by muts; m can't be used while the borrow is live",
-            "muts holds a value that mutably borrows m's value (muts isn't a reference itself)",
+            "muts holds a resource that mutably borrows m's value (muts isn't a reference itself)",
             "m is no longer mutably borrowed",
             "If muts holds a mutable borrow affecting the reference slot m, that borrow ends here. It no longer restricts access to the reference slot m",
         ],
@@ -18356,7 +18356,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "so the body is never skipped",
             "p was moved or dropped in every branch above",
             "q was moved or dropped in every branch above",
-            "p is live in a conditional expression",
+            "p has a separate timeline path for each branch of this conditional",
         ],
     },
     TooltipExpect {
@@ -18462,7 +18462,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "w acquired ownership of a resource in the matching arm",
             "w has no value yet",
-            "w is live in a conditional expression",
+            "w has a separate timeline path for each branch of this conditional",
             "x goes out of scope. Its resource is dropped.",
             "y goes out of scope. Its resource is dropped.",
             "z goes out of scope. Its resource is dropped.",
@@ -18512,9 +18512,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y was assigned a value in only some of the branches above",
             "Rust tracks this with a runtime drop flag",
             "s may have been moved",
-            "f is live in a conditional expression",
-            "a is live in a conditional expression",
-            "s is live in a conditional expression",
+            "f has a separate timeline path for each branch of this conditional",
+            "a has a separate timeline path for each branch of this conditional",
+            "s has a separate timeline path for each branch of this conditional",
             // `g.len()` never runs (#1004)
             "g's resource is immutably borrowed by len",
         ],
@@ -20385,7 +20385,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "struct_field_holder_1088",
         must_contain: &[
             "Immutable borrow from w to shelf.items",
-            "shelf.items holds a value that immutably borrows w's resource (shelf.items isn't a reference itself)",
+            "shelf.items holds a resource that immutably borrows w's resource (shelf.items isn't a reference itself)",
             "w's resource is being shared by one or more variables",
             "w's resource is no longer borrowed by println!, but is still immutably borrowed by shelf.items",
             "first is a reference copied out of shelf.items. It holds a shared reference. The borrow checker keeps w borrowed while first is in use.",
@@ -20446,18 +20446,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // #1095
             "Immutable borrow from a to o",
             "a's resource is immutably borrowed by o; a is read-only while the borrow is live",
-            "o holds a value that immutably borrows a's resource (o isn't a reference itself)",
+            "o holds a resource that immutably borrows a's resource (o isn't a reference itself)",
             "Immutable borrow from c to arr",
             "c's resource is immutably borrowed by arr; c is read-only while the borrow is live",
             "arr holds a value that immutably borrows c's resource (arr isn't a reference itself)",
             // #1096
             "Immutable borrow from e to shelf.items, stored in shelf.items by push; shelf.items isn't a reference, but its value now holds one",
-            "shelf.items holds a value that immutably borrows e's resource (shelf.items isn't a reference itself)",
+            "shelf.items holds a resource that immutably borrows e's resource (shelf.items isn't a reference itself)",
             "first is a reference copied out of shelf.items. It holds a shared reference. The borrow checker keeps e borrowed while first is in use.",
             "e's resource is being shared by one or more variables. e stays borrowed while first is in use. e is read-only while the borrow is live",
             "If first holds a shared borrow affecting e, that borrow ends here. It no longer restricts access to e",
             // #1097
-            "s2.items holds a value that immutably borrows g's resource (s2.items isn't a reference itself)",
+            "s2.items holds a resource that immutably borrows g's resource (s2.items isn't a reference itself)",
         ],
         must_not_contain: &[
             // #1094: w holds copies of the references stored in v, not
@@ -20635,12 +20635,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // A bullet of its dot, after "a is assigned a new value".
             "On this path r was given a new reference on line 30, so r's borrow of a is already over here; a stays borrowed only on paths that skip line 30",
             "d is assigned a new value. On this path q is given a new reference on line 45 before it is used again, so q's borrow of d is already over here; d stays borrowed only on paths that skip line 45",
-            // (m's "m is live in a conditional expression" is on the
+            // (m's "m has a separate timeline path for each branch of this conditional" is on the
             // match's split dot now, #1371, so the note is the write's only
             // bullet.)
             "m is assigned a new value. On this path p is given a new reference on line 59 before it is used again, so p's borrow of m is already over here; m stays borrowed only on paths that skip line 59",
             "s.n is assigned a new value. On this path f is given a new reference on line 75 before it is used again, so f's borrow of s is already over here; s stays borrowed only on paths that skip line 75",
-            "v[0] is assigned a new value. On this path g is given a new reference on line 77 before it is used again, so g's borrow of v is already over here; v stays borrowed only on paths that skip line 77",
+            "v[0] is assigned a new value. This effect occurs only if indexing succeeds. An out-of-bounds index panics first. On this path g is given a new reference on line 77 before it is used again, so g's borrow of v is already over here; v stays borrowed only on paths that skip line 77",
             // The single span is kept (borrow-checker view, #778).
             "x's value is no longer immutably borrowed",
             "s's value is no longer immutably borrowed",
@@ -20903,12 +20903,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "self holds a mutable reference. The borrow checker treats self.n as immutably borrowed here. These places stay borrowed while g is in use. Dropping g can also use the borrow, keeping it live until then",
             "self.n's value is immutably borrowed by g; self.n is read-only while the borrow is live",
-            "g holds a value that immutably borrows self.n (g isn't a reference itself)",
+            "g holds a resource that immutably borrows self.n (g isn't a reference itself)",
             "Immutable borrow from self.n to g: boxed's signature gives the value it returns the same lifetime as its argument; g isn't a reference, but its value holds one",
             "If g holds a shared borrow affecting self.n, that borrow ends here. It no longer restricts access to self.n",
             "self.n's value is no longer immutably borrowed",
             "s's resource is immutably borrowed by g; s is read-only while the borrow is live",
-            "g holds a value that immutably borrows s's resource (g isn't a reference itself)",
+            "g holds a resource that immutably borrows s's resource (g isn't a reference itself)",
             "Immutable borrow from s to g: boxed's signature gives the value it returns the same lifetime as its argument; g isn't a reference, but its value holds one",
             "s's resource is no longer borrowed by println!, but is still immutably borrowed by g",
             "If g holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
@@ -20917,7 +20917,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "h's immutable borrow ends",
             "If h holds a shared borrow affecting t, that borrow ends here. It no longer restricts access to t",
             "u's resource is no longer borrowed by println!, but is still immutably borrowed by k",
-            "m holds a value that immutably borrows the data r points to (m isn't a reference itself)",
+            "m holds a resource that immutably borrows the data r points to (m isn't a reference itself)",
             "Immutable borrow from r to m: boxed's signature gives the value it returns the same lifetime as its argument; m isn't a reference, but its value holds one",
         ],
         must_not_contain: &[
@@ -20947,12 +20947,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the same words on an earlier row, so where they sit is pinned by
         // `a_boxed_closure_borrowing_through_a_reference_keeps_it_until_dropped`.
         must_contain: &[
-            "m holds a value that immutably borrows the data r points to (m isn't a reference itself)",
+            "m holds a resource that immutably borrows the data r points to (m isn't a reference itself)",
             "Immutable borrow from r to m: boxed's signature gives the value it returns the same lifetime as its argument; m isn't a reference, but its value holds one",
             "m's immutable borrow ends",
             "m no longer borrows the resource r points to",
             "If m holds a shared borrow affecting the data behind r, that borrow ends here. It no longer restricts access to the data behind r",
-            "n holds a value that immutably borrows the data q points to (n isn't a reference itself)",
+            "n holds a resource that immutably borrows the data q points to (n isn't a reference itself)",
             "n's immutable borrow ends",
             "n no longer borrows the resource q points to",
             "d's immutable borrow ends",
@@ -21373,7 +21373,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the `?` here returns early, t's resource is dropped. If the `?` succeeds, the assignment runs: t acquires ownership of a new resource; its previous resource is dropped.",
             "If the `?` here returns early, p's resource is dropped. If the `?` succeeds, the assignment to p.f runs.",
             "If the `?` here returns early, p.f's resource is dropped. If the `?` succeeds, the assignment runs: p.f acquires ownership of a new resource; its previous resource is dropped.",
-            "If the `?` here returns early, v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: the old value at v[0] is dropped and the replacement is stored there.",
+            "If the `?` here returns early, v's resource (including every String it holds) is dropped. If the `?` succeeds, the assignment runs: the old value at v[0] is dropped and the replacement is stored there. This effect occurs only if indexing succeeds. An out-of-bounds index panics first.",
             "If the `?` here returns early, u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
             "If the `?` here returns early, x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
             "x's resource is mutably borrowed by push_str; x can't be used while the borrow is live",
@@ -21570,7 +21570,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "g acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
             "a goes out of scope. No resource is dropped.",
             "d goes out of scope. No resource is dropped.",
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation is freed.",
             "g goes out of scope. Its resource is dropped (including the String it holds).",
         ],
         must_not_contain: &[
@@ -21587,7 +21587,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "b goes out of scope. Whatever it still holds (if anything) is dropped here. Rust tracks this with a runtime drop flag.",
             "b was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). The Box may no longer hold its original contents.",
-            "f goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
+            "f goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
             "g goes out of scope. Any contents still in the Box are dropped. On paths where the Box is still here, its heap allocation, if it has one, is freed. Rust tracks this with a runtime drop flag.",
             "g was moved in at least one branch above, so it can't be used after the branches (until it's assigned again). The Box may no longer hold its original contents.",
             "j acquires ownership of a new resource. The old Box drops the String if the earlier path left it initialized.",
@@ -21785,7 +21785,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "*b's resource is moved to the caller",
             "*b's value is copied to the caller",
-            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
+            "b goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation is freed.",
             "Move from *b to _a",
         ],
         must_not_contain: &[
@@ -21885,7 +21885,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from r1 to id",
             "r1's mutable reference is moved (not the resource it points to)",
-            "If k1 holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "k1's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "s's resource is mutably borrowed by k1; s can't be used until the borrow ends. s stays borrowed while k1 is in use",
             "Move from r2 to k2",
             "r2's mutable reference is moved (not the resource it points to)",
@@ -22025,7 +22025,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Mutable borrow from a to ra: downgrade's signature gives the reference it returns the same lifetime as its argument",
             "The borrow checker keeps the mutable borrow of a live while ra, a shared reference, is in use. a can't be used while the borrow is live",
             "a's resource is mutably borrowed; a can't be used until the borrow ends. a stays borrowed while ra is in use",
-            "If ra holds a mutable borrow affecting a, that borrow ends here. It no longer restricts access to a",
+            "ra's mutable borrow of a ends. This borrow no longer restricts access to a. Ending the borrow doesn't move the resource",
             "ra is a shared reference made from a mutable borrow of a resource: ra only gives shared access to it, but the borrow stays mutable while ra is live",
             "ra holds an immutable reference; it can read the borrowed value",
             "b's resource is mutably borrowed; b can't be used until the borrow ends. b stays borrowed while rb is in use",
@@ -22200,7 +22200,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from a13 to take_opt",
             "Move from a14 to o14",
             "Move from a15 to t15.1",
-            "Move from a16 to v16[0]",
+            "Move from a16 to v16[0]. This effect occurs only if indexing succeeds. An out-of-bounds index panics first",
             "Move from s17 to *slot",
             "s18's resource is moved to the caller",
             "s19's resource is moved to the caller",
@@ -22260,10 +22260,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Move from s1.r to s2.r",
             "s1.r's mutable reference is moved (not the resource it points to)",
-            "If s2.r holds a mutable borrow affecting a, that borrow ends here. It no longer restricts access to a",
+            "s2.r's mutable borrow of a ends. This borrow no longer restricts access to a. Ending the borrow doesn't move the resource",
             "Copy from t1.r to t2.r",
             "t2.r is initialized with a copy of t1.r",
-            "If t2.r holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
+            "t2.r's shared borrow of b ends. This borrow no longer restricts access to b. Ending the borrow doesn't move the resource",
             "Move from u1.r to consume_s",
         ],
         must_not_contain: &[
@@ -22304,14 +22304,14 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Immutable borrow from x to h.0",
             "x's resource is immutably borrowed by h.0; x is read-only while the borrow is live",
-            "If h.0 holds a shared borrow affecting x, that borrow ends here. It no longer restricts access to x",
+            "h.0's shared borrow of x ends. This borrow no longer restricts access to x. Ending the borrow doesn't move the resource",
             "Copy from r to h2.0",
             "Immutable borrow from x to p.0",
             "Move from name to p.1",
             "Immutable borrow from x to o.h.0",
             "Move from rm to w.0",
             "rm's mutable reference is moved (not the resource it points to)",
-            "If w.0 holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "w.0's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
             "=Move from name to p",
@@ -22784,9 +22784,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b1 is passed to store_s by shared reference. store_s may read it; store_s's signature lets it store this reference in r1, so b1 stays borrowed while r1 is in use",
             "b2 is passed to store by shared reference. store may read it; store's signature lets it store this reference in r2, so b2 stays borrowed while r2 is in use",
             "b3 is passed to store by shared reference. store may read it; store's signature lets it store this reference in r3, so b3 stays borrowed while r3 is in use",
-            "b4 is passed to std::mem::replace by shared reference. std::mem::replace may read it; std::mem::replace's signature lets it store this reference in r4, so b4 stays borrowed while r4 is in use",
+            "A shared reference to b4 is passed by value to std::mem::replace; std::mem::replace's signature lets it store this reference in r4, so b4 stays borrowed while r4 is in use",
             "b5 is passed to store_s by shared reference. store_s may read it; store_s's signature lets it store this reference in r5, so b5 stays borrowed while r5 is in use",
-            "b6 is passed to std::mem::replace by shared reference. std::mem::replace may read it; std::mem::replace's signature lets it store this reference in r6, so b6 stays borrowed while r6 is in use",
+            "A shared reference to b6 is passed by value to std::mem::replace; std::mem::replace's signature lets it store this reference in r6, so b6 stays borrowed while r6 is in use",
             // Q7 (P2-1b, ends from the facts): _old is never used; r6 gives b6 back where it is last used. (_old holds r6's old reference to a: it never pointed to b6.)
             "_old's immutable borrow ends",
             "If r6 holds a shared borrow affecting b6, that borrow ends here. It no longer restricts access to b6",
@@ -22850,7 +22850,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "r's reference is captured (moved) by closure f; the data it points to is not moved",
             "f's mutable borrow ends",
-            "If f holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "On this path, f's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "f owns a closure",
             "Closure g captures: t (moved)",
             "g owns a closure which owns 1 resource via capture",
@@ -23202,7 +23202,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If u holds a shared borrow affecting k, that borrow ends here. It no longer restricts access to k",
         ],
         must_not_contain: &[
-            "d is live in a conditional expression",
+            "d has a separate timeline path for each branch of this conditional",
         ],
     },
     TooltipExpect {
@@ -24084,7 +24084,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "st[2]'s resource is moved; nothing is left in st",
             // The `if` after `let [a, _] = br;` splits br's column at a dot
             // (br[1] is still in it).
-            "br is live in a conditional expression ",
+            "br has a separate timeline path for each branch of this conditional",
             "br[1] may have been moved out of br in a branch above, so br can't be used as a whole",
             "br goes out of scope. br[0] was moved out earlier. br[1] was moved out in at least one branch above, so it's dropped here only if no branch above moved it (Rust tracks this with a runtime drop flag).",
             "am goes out of scope. am[0] and am[1] were moved out in some of the branches above; each is dropped here only if no branch above moved it (Rust tracks this with runtime drop flags).",
@@ -24209,7 +24209,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "the resource b points to is mutably borrowed by k through b; b can't be used while the borrow is live",
             "k no longer borrows the resource b points to",
-            "k holds a value that mutably borrows the data b points to (k isn't a reference itself)",
+            "k holds a resource that mutably borrows the data b points to (k isn't a reference itself)",
             "t's resource is mutably borrowed by b; t can't be used while the borrow is live",
             "a's mutable reference is moved (not the resource it points to)",
             // `let k: [&String; 2] = [a, b];`: both immutably reborrowed.
@@ -24540,7 +24540,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary Vec<String> is dropped when the block of this `if let` ends (its pattern matched)",
             "This temporary Vec<String> is dropped when the pattern of this `if let` doesn't match (before the code after the `if` runs)",
             "If the `?` here returns early, (temporary)'s resource is dropped. If the `?` succeeds, nothing happens to (temporary) here.",
-            "(temporary) is live in a conditional expression ",
+            "(temporary) has a separate timeline path for each branch of this conditional",
         ],
         must_not_contain: &[
             // Each said both paths, on a column that also had the exit's
@@ -24557,7 +24557,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "This temporary Vec<String> is dropped here, where `return` leaves early",
             "This temporary Vec<String> is dropped before the `else` block of this `if` runs",
             "This temporary Vec<String> is dropped when the block its let chain matched ends",
-            "(temporary) is live in a conditional expression ",
+            "(temporary) has a separate timeline path for each branch of this conditional",
         ],
         must_not_contain: &[
             "This temporary Vec<String> is dropped before the `else` block of this `if` runs, or when the block its let chain matched ends",
@@ -24593,11 +24593,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // use).
         must_contain: &[
             "Move from x to r",
-            "If r holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "On this path, r's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "x goes out of scope",
             "r's mutable borrow ends",
             "Move from x2 to r2",
-            "If r2 holds a mutable borrow affecting s2, that borrow ends here. It no longer restricts access to s2",
+            "On this path, r2's mutable borrow of s2 ends. This borrow no longer restricts access to s2. Ending the borrow doesn't move the resource",
             "x2's mutable reference is moved (not the resource it points to)",
             "Move from y3 to r3",
             "If r3 holds a mutable borrow affecting s3, that borrow ends here. It no longer restricts access to s3",
@@ -24812,7 +24812,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from t1 to refs",
             "If refs holds a shared borrow affecting t1, that borrow ends here. It no longer restricts access to t1",
             "t1's resource is immutably borrowed by refs; t1 is read-only while the borrow is live",
-            "refs holds a value that immutably borrows t1's resource (refs isn't a reference itself)",
+            "refs holds a resource that immutably borrows t1's resource (refs isn't a reference itself)",
             "Mutable borrow from t1 to refs",
             "If refs holds a mutable borrow affecting t1, that borrow ends here. It no longer restricts access to t1",
         ],
@@ -24848,11 +24848,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // invariant). main put both texts on other dots: the fork's on the
         // arm's first dot, the join's on the next dot after the `if let`.
         must_contain: &[
-            "v is live in a conditional expression ",
+            "v has a separate timeline path for each branch of this conditional",
             "v isn't moved in any of the branches above",
             "v's resource is no longer mutably borrowed",
             "v's resource is modified through e",
-            "s is live in a conditional expression ",
+            "s has a separate timeline path for each branch of this conditional",
         ],
         must_not_contain: &["v has no value yet"],
     },
@@ -25111,7 +25111,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from t1 to refs",
             "If refs holds a shared borrow affecting t1, that borrow ends here. It no longer restricts access to t1",
             "t1's resource is immutably borrowed by refs; t1 is read-only while the borrow is live",
-            "refs holds a value that immutably borrows t1's resource (refs isn't a reference itself)",
+            "refs holds a resource that immutably borrows t1's resource (refs isn't a reference itself)",
             "Mutable reborrow from tr to refs",
             "If refs holds a mutable borrow affecting the data behind tr, that borrow ends here. It no longer restricts access to the data behind tr",
         ],
@@ -25414,7 +25414,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // again on those paths). On main c had no fork and b's "no longer
         // borrowed" sat between b's arm legs (geometry: `event-on-dead-column`).
         must_contain: &[
-            "c is live in a conditional expression ",
+            "c has a separate timeline path for each branch of this conditional",
             "c isn't moved in any of the branches above",
             "c's immutable borrow ends",
             "c's mutable borrow ends",
@@ -25434,7 +25434,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "s's resource is no longer immutably borrowed",
             "s's resource is no longer mutably borrowed",
-            "s is live in a conditional expression ",
+            "s has a separate timeline path for each branch of this conditional",
             "v's resource is no longer immutably borrowed",
             "o's resource is no longer mutably borrowed",
             "s is the owner of the resource",
@@ -25483,12 +25483,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "h.r's mutable borrow ends",
             "r2's mutable borrow ends",
-            "If r2 holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
+            "On this path, r2's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
             "Mutable borrow from s to t.0: downgrade's signature gives the reference it returns the same lifetime as its argument",
             "t.0's mutable borrow ends",
             "r's mutable borrow ends",
             "The mutable borrow of s3 ends after the last use of r2. This borrow no longer restricts access to s3",
-            "If h2.r holds a shared borrow affecting s3, that borrow ends here. It no longer restricts access to s3",
+            "On this path, h2.r's shared borrow of s3 ends. This borrow no longer restricts access to s3. Ending the borrow doesn't move the resource",
             "s3's resource is no longer mutably borrowed",
         ],
         must_not_contain: &[
@@ -25849,7 +25849,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from g to pairs",
             "If pairs holds a mutable borrow affecting f, that borrow ends here. It no longer restricts access to f",
             "If pairs holds a shared borrow affecting g, that borrow ends here. It no longer restricts access to g",
-            "pairs holds a value that mutably borrows f's resource (pairs isn't a reference itself)",
+            "pairs holds a resource that mutably borrows f's resource (pairs isn't a reference itself)",
             "Immutable borrow from g to shared",
             "On each pass, r holds a shared reference to either e or g.",
             "Immutable borrow from g to r",
@@ -25997,7 +25997,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from u to v",
             "If v holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
             "If v holds a shared borrow affecting u, that borrow ends here. It no longer restricts access to u",
-            "v holds a value that immutably borrows s's resource (v isn't a reference itself)",
+            "v holds a resource that immutably borrows s's resource (v isn't a reference itself)",
             "v's immutable borrow ends",
             "Immutable borrow from s to m: Some's signature gives the value it returns the same lifetime as its argument; m isn't a reference, but its value holds one",
             "Immutable borrow from u to m: Some's signature gives the value it returns the same lifetime as its argument; m isn't a reference, but its value holds one",
@@ -26229,8 +26229,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If v holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
             "Copy from k to n",
             // #1463: q gets each branch's value in that branch.
-            "q is live in a conditional expression ",
-            "v is live in a conditional expression ",
+            "q has a separate timeline path for each branch of this conditional",
+            "v has a separate timeline path for each branch of this conditional",
         ],
         must_not_contain: &[
             "to Some",
@@ -26304,8 +26304,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // `w = if c { let r3 = &a; W { o: Some(r3) } } ..`'s w.o as ending
         // its borrow where it got it, with r3 giving a back after its scope.
         must_contain: &[
-            "q is live in a conditional expression ",
-            "m is live in a conditional expression ",
+            "q has a separate timeline path for each branch of this conditional",
+            "m has a separate timeline path for each branch of this conditional",
             "If q holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
             "If m holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
             "If w.o holds a borrow affecting a, that borrow ends here. It no longer restricts access to a",
@@ -26652,12 +26652,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from a to pair: pair holds the borrows its argument holds: a and b, and both stay borrowed while pair is in use; pair isn't a reference, but its value holds one",
             "The following applies only if the pattern matches. Immutable borrow from a to x: x is a reference copied out of pair",
             "The following applies only if the pattern matches. Immutable borrow from b to y: y is a reference copied out of pair",
-            "If x holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
-            "If y holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
+            "On this path, x's shared borrow of a ends. This borrow no longer restricts access to a. Ending the borrow doesn't move the resource",
+            "On this path, y's shared borrow of b ends. This borrow no longer restricts access to b. Ending the borrow doesn't move the resource",
             "Immutable borrow from c to x1: x1 is a reference copied out of cd",
-            "If x1 holds a shared borrow affecting c, that borrow ends here. It no longer restricts access to c",
+            "On this path, x1's shared borrow of c ends. This borrow no longer restricts access to c. Ending the borrow doesn't move the resource",
             "Immutable borrow from e to r: r holds the borrows its argument holds: e and g, and both stay borrowed while r is in use; r isn't a reference, but its value holds one",
-            "If y2 holds a shared borrow affecting g, that borrow ends here. It no longer restricts access to g",
+            "On this path, y2's shared borrow of g ends. This borrow no longer restricts access to g. Ending the borrow doesn't move the resource",
             "Mutable borrow from h to hk: hk holds the borrows its argument holds: h and k, and both stay borrowed while hk is in use; hk isn't a reference, but its value holds one",
             "If hk holds a mutable borrow affecting h, that borrow ends here. It no longer restricts access to h",
             "The following applies only if the pattern matches. Mutable borrow from k to y3: y3 is a reference moved out of hk",
@@ -27087,7 +27087,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // in the branch that borrows s1.
         must_contain: &[
             "Immutable borrow from a to v",
-            "v holds a value that immutably borrows a's resource (v isn't a reference itself)",
+            "v holds a resource that immutably borrows a's resource (v isn't a reference itself)",
             "If v holds a shared borrow affecting a, that borrow ends here. It no longer restricts access to a",
             "If v holds a shared borrow affecting b, that borrow ends here. It no longer restricts access to b",
             "Immutable borrow from b to w",
@@ -27304,8 +27304,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &[
             "x2 still has no value here",
             "s4 still has no value here",
-            "x2 is live in a conditional expression",
-            "s4 is live in a conditional expression",
+            "x2 has a separate timeline path for each branch of this conditional",
+            "s4 has a separate timeline path for each branch of this conditional",
             "x2 has no value yet",
             "s4 has no value yet",
         ],
@@ -27405,7 +27405,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so s can't be used here until it's assigned again. Its resource is dropped when s goes out of scope.",
             "s may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when s goes out of scope.",
             "t holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so t can't be used here until it's assigned again. Its resource is dropped when t goes out of scope.",
-            "t goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "t goes out of scope. Its resource is dropped.",
             "u may have no value after the branches: it may have had none where they start, and only some of them assign it, so it can't be used after the branches (until it's assigned again). If it has one, its resource is dropped when u goes out of scope.",
             "w was moved in at least one branch above, so it can't be used after the branches until it's assigned again. If w still holds a value, its resource is dropped when w goes out of scope.",
         ],
@@ -27427,7 +27427,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s acquires ownership of a new resource; its previous resource is dropped. Rust tracks this with a runtime drop flag. This assignment runs on only some paths through this expression.",
             "s holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so s can't be used here until it's assigned again. Its resource is dropped when s goes out of scope.",
             "t holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so t can't be used here until it's assigned again. Its resource is dropped when t goes out of scope.",
-            "t goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "t goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "t may have no value after the branches",
@@ -27519,15 +27519,15 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[
-            "h2.r is live in a conditional expression",
+            "h2.r has a separate timeline path for each branch of this conditional",
             "h2.r still has no value here",
-            "k2.r is live in a conditional expression",
+            "k2.r has a separate timeline path for each branch of this conditional",
             "k2.r still has no value here",
-            "w2.r is live in a conditional expression",
+            "w2.r has a separate timeline path for each branch of this conditional",
             "w2.r still has no value here",
-            "m2.m is live in a conditional expression",
+            "m2.m has a separate timeline path for each branch of this conditional",
             "m2.m still has no value here",
-            "g2.r is live in a conditional expression",
+            "g2.r has a separate timeline path for each branch of this conditional",
         ],
     },
     TooltipExpect {
@@ -27546,11 +27546,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "q goes out of scope. Its resource is dropped (including the String it holds, if any).",
         ],
         must_not_contain: &[
-            "x is live in a conditional expression",
+            "x has a separate timeline path for each branch of this conditional",
             "x still has no value here",
-            "y is live in a conditional expression",
+            "y has a separate timeline path for each branch of this conditional",
             "y still has no value here",
-            "z is live in a conditional expression",
+            "z has a separate timeline path for each branch of this conditional",
             "z still has no value here",
         ],
     },
@@ -27564,7 +27564,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "s isn't moved in any of the branches above",
             "s2 goes out of scope. Its resource is dropped.",
             "s2 isn't moved in any of the branches above",
-            "s3 goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "s3 goes out of scope. Its resource is dropped.",
             "s3 isn't moved in any of the branches above",
             "If the `?` here returns early, s4's resource is dropped. If the `?` succeeds, nothing happens to s4 here.",
         ],
@@ -28081,7 +28081,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "v's resource is no longer immutably borrowed",
             "o's resource is no longer immutably borrowed",
             "The following applies only if the pattern matches. If x holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
-            "If x holds a shared borrow affecting s2, that borrow ends here. It no longer restricts access to s2",
+            "On this path, x's shared borrow of s2 ends. This borrow no longer restricts access to s2. Ending the borrow doesn't move the resource",
         ],
         must_not_contain: &[],
     },
@@ -28618,7 +28618,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "known_bugs/1632_extend_field_loan",
         must_contain: &[
-            "z holds a value that borrows from the `.0` of an element of p2.0 (z isn't a reference itself)",
+            "z holds a resource that borrows from the `.0` of an element of p2.0 (z isn't a reference itself)",
             "Mutable borrow of the `.0` of an element of p2.0 stored in z by extend. z isn't a reference itself. Its value holds the reference",
             "z's mutable borrow of the `.0` of an element of p2.0 ends",
         ],
@@ -28633,7 +28633,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "known_bugs/1689_kept_field_loans",
         must_contain: &[
             "s.0 is immutably borrowed by extend; s.0 is read-only while the borrow is live",
-            "After extend, v holds a value that can contain references (v isn't a reference itself). The borrow checker keeps the shared borrow of the reference-valued field s.0 live while v is in use",
+            "After extend, v holds a resource that can contain references (v isn't a reference itself). The borrow checker keeps the shared borrow of the reference-valued field s.0 live while v is in use",
         ],
         must_not_contain: &[
             "the value s.0 points to is immutably borrowed by extend",
@@ -28663,9 +28663,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push stores a shared reference in v (v isn't a reference itself). While that reference is in use, the borrow checker keeps the mutable borrow of the `.0` of an element of a.0 live",
             "push stores a shared reference in refs (refs isn't a reference itself). While that reference is in use, the borrow checker keeps the mutable borrow of the `.0` of an element of b.0 live",
             "The shared reference in v stops keeping the mutable borrow of the `.0` of an element of a.0 live",
-            "After extend, empty holds a value that can contain references (empty isn't a reference itself). The borrow checker keeps the shared borrow of the `.0` of an element of a.0 live while empty is in use",
+            "After extend, empty holds a resource that can contain references (empty isn't a reference itself). The borrow checker keeps the shared borrow of the `.0` of an element of a.0 live while empty is in use",
             "The borrow checker keeps the shared borrow of the `.0` of an element of a.0 live while empty is in use. While the borrow is live, you can't overwrite or move the `.0` of an element of a.0",
-            "empty owns a value that can hold references (empty isn't a reference itself). The borrow checker tracks borrowed data from the `.0` of an element of a.0 through empty",
+            "empty owns a resource that can hold references (empty isn't a reference itself). The borrow checker tracks borrowed data from the `.0` of an element of a.0 through empty",
             "out immutably borrows the value inside an element of a. While the borrow is live, you can't overwrite or move the value inside an element of a",
             "Immutable borrow of the value inside an element of a stored in out by push. out isn't a reference itself. Its value holds the reference",
             "out's shared borrow of the value inside an element of a ends",
@@ -28768,7 +28768,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // E0382. Only the first if's assignment can replace the drop.
         name: "rv3_issues/1584_maybe_held_two_returning_ifs",
         must_contain: &["The borrow checker can't prove that s holds a value at this branch decision."],
-        must_not_contain: &["s is live in a conditional expression"],
+        must_not_contain: &["s has a separate timeline path for each branch of this conditional"],
     },
     TooltipExpect {
         name: "one_line_diamond_1306_1308_1309",
@@ -28894,7 +28894,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "Calling c consumes it on the branch that exits here",
             "c was consumed on every path that completes the block at runtime. The borrow checker rejects uses of c after the block",
-            "c goes out of scope. No resource is dropped. Rust tracks this with a runtime drop flag.",
+            "c goes out of scope. No resource is dropped.",
         ],
         must_not_contain: &["c isn't moved in any of the branches above", "c goes out of scope. Its 1 captured resource is dropped."],
     },
@@ -28911,7 +28911,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "issue_1909_true_assignment",
         must_contain: &[
             "s holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so s can't be used here until it's assigned again. Its resource is dropped when s goes out of scope.",
-            "s goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &["s may have no value after the branches", "only if s still holds it"],
     },
@@ -28925,8 +28925,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "At runtime, the block skips its last expression, tp.0. The borrow checker still checks the move of tp.0's resource, so tp.0 can't be used after the block",
             // MIR guards the drop of tp.0 with a flag, although the flag is
             // always set when the scope ends.
-            "tp goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
-            "tp.0 goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "tp goes out of scope. Its resource is dropped.",
+            "tp.0 goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "from whichever break or last expression ended the block",
@@ -28971,7 +28971,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b goes out of scope. Its resource is dropped (including the String it holds).",
             "The borrow checker treats p as possibly moved here, so p can't be used here. No resource remains in p on the paths that run.",
             "r holds a value here on every path that runs. The borrow checker still considers paths that leave it without a usable value, so r can't be used here. Its resource is dropped when r goes out of scope (for an Rc, that lowers the reference count; the shared value is dropped only if that was its last Rc).",
-            "s goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+            "s goes out of scope. Its resource is dropped.",
         ],
         must_not_contain: &[
             "The old value at *b is dropped",
@@ -28991,7 +28991,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "issue_1909_review_closure",
         must_contain: &[
             "The call to c is skipped at runtime",
-            "c goes out of scope. Its 1 captured resource is dropped. Rust tracks this with a runtime drop flag.",
+            "c goes out of scope. Its 1 captured resource is dropped.",
             "c is moved into the call (FnOnce::call_once takes its receiver by value). After the move, c cannot be called again unless it is reinitialized. s, which c captured, is moved out of the closure as the call's result",
             "z acquires ownership of a Some value holding the resource c() returns, when the block ends with break 'blk Some(c())",
             "c was consumed on every path that completes the block at runtime. The borrow checker rejects uses of c after the block",
@@ -29174,7 +29174,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "moved's contents were moved out, so moved can't be used as a whole; the Box itself wasn't moved: its heap allocation, if it has one, is freed when moved is dropped",
             "nested is partially moved: **nested was moved out, so nested can't be used as a whole",
             "maybe_nested may be partially moved: **maybe_nested may have been moved out, so maybe_nested can't be used as a whole",
-            "moved goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
+            "moved goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation is freed.",
             "text acquires ownership of the resource the `?` takes out of *moved's `Ok`",
         ],
         must_not_contain: &[
@@ -30104,8 +30104,8 @@ fn scope_exit_sites_1904() {
     let exits = rv_elements(&svg, "p@L107:dot:owner_go_out_of_scope");
     let texts: Vec<_> = exits.iter().map(|(_, text, ..)| text.as_str()).collect();
     assert_eq!(texts, [
-        "p goes out of scope. p.a was moved out earlier, so only p.b is dropped. Rust tracks this with a runtime drop flag.",
-        "p goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.",
+        "p goes out of scope. p.a was moved out earlier, so only p.b is dropped.",
+        "p goes out of scope. Its resource is dropped.",
     ]);
     // The private u8 has no destructor. In MIR the only String was moved.
     check_review_tip(&svg, "p@L119:dot:owner_go_out_of_scope",
@@ -32269,7 +32269,7 @@ fn borrow_end_in_arm_is_drawn_in_the_arm() {
         };
         let lent = dots_with_tooltip(&timeline, &format!("{var}'s resource is {kind} borrowed by r; {restriction}"));
         let back = dots_with_tooltip(&timeline, &format!("{var}'s resource is no longer {kind} borrowed"));
-        let mut splits = dots_with_tooltip(&timeline, &format!("{var} is live in a conditional expression "));
+        let mut splits = dots_with_tooltip(&timeline, &format!("{var} has a separate timeline path for each branch of this conditional"));
         splits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         assert_eq!((lent.len(), back.len()), (1, 1), "{}: dots {:?} {:?}", name, lent, back);
         assert!(!splits.is_empty(), "{}: no split dot", name);
@@ -32885,7 +32885,7 @@ fn irrefutable_iflet_moving_a_mutref_field_returns_once() {
     let rv = run_with_local_backend("pattern_mutref_field_iflet");
     let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     let row = code_row_y(&code, "r.push('x');");
-    let arrows = arrow_points(&timeline, "If r holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s");
+    let arrows = arrow_points(&timeline, "r's mutable borrow of s ends. This borrow no longer restricts access to s. Ending the borrow doesn't move the resource");
     assert_eq!(arrows.len(), 1, "returns of s's borrow: {:?}", arrows);
     let stray = arrow_points(&timeline, "p.part's mutable borrow of s ends. This borrow no longer restricts access to s");
     assert!(stray.is_empty(), "p.part was moved out and holds no borrow to return: {:?}", stray);
@@ -32895,7 +32895,7 @@ fn irrefutable_iflet_moving_a_mutref_field_returns_once() {
     );
     let back = dots_with_tooltip(&timeline, "s's resource is no longer mutably borrowed");
     assert_eq!(back.len(), 1, "s's dots where the borrow ends: {:?}", back);
-    assert!(dots_with_tooltip(&timeline, "s is live in a conditional expression").is_empty());
+    assert!(dots_with_tooltip(&timeline, "s has a separate timeline path for each branch of this conditional").is_empty());
 }
 
 /// #681 / #692: a reference bound by a pattern keeps what it borrows
@@ -33073,7 +33073,7 @@ fn assert_arm_starts_on_split_line(name: &str, var: &str, line: &str, bind_text:
     let bind = dots_with_tooltip(&timeline, bind_text);
     let arrow = arrow_points(&timeline, arrow_text);
     // (`dots_listing`: a condition's event on the line shares the split dot, #509.)
-    let split = dots_listing(&timeline, &format!("{} is live in a conditional expression ", var));
+    let split = dots_listing(&timeline, &format!("{} has a separate timeline path for each branch of this conditional", var));
     assert_eq!((bind.len(), arrow.len(), split.len()), (1, 1, 1), "{} {}: dots / arrow", name, var);
     let (bind, split) = (bind[0], split[0]);
     // The binding is on its own source row, and its arrow runs level
@@ -33127,7 +33127,7 @@ fn copying_out_of_an_if_let_scrutinee_doesnt_branch_it() {
     let rv = run_with_local_backend("if_let_binding_copy");
     let timeline = rv.timeline_panel_string();
     for text in [
-        "y is live in a conditional expression",
+        "y has a separate timeline path for each branch of this conditional",
         "y isn't moved in any of the branches above",
     ] {
         assert!(!timeline.contains(text), "y has a branch: {:?}", text);
@@ -33203,7 +33203,7 @@ fn outer_borrow_end_is_drawn_in_each_arm() {
         // While `r = &mut s` is live, no line of s's column reaches the
         // split, so s has no split dot there (#702): r's marks its row.
         let split_of = if kind == "mutably" { "r" } else { "s" };
-        let mut splits = dots_with_tooltip(&timeline, &format!("{split_of} is live in a conditional expression "));
+        let mut splits = dots_with_tooltip(&timeline, &format!("{split_of} has a separate timeline path for each branch of this conditional"));
         splits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         let mut joins = dots_with_tooltip(&timeline, "s isn't moved in any of the branches above");
         joins.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -33255,7 +33255,7 @@ fn a_condition_event_on_the_split_line_is_on_the_raised_split_dot() {
     ] {
         assert_arm_starts_on_split_line(name, var, line, bind_text, arrow_text);
         let timeline = run_with_local_backend(name).timeline_panel_string();
-        let split = dots_listing(&timeline, &format!("{} is live in a conditional expression ", var));
+        let split = dots_listing(&timeline, &format!("{} has a separate timeline path for each branch of this conditional", var));
         assert_eq!(dots_listing(&timeline, cond), split, "{}: {:?} is not on the split dot", name, cond);
     }
 }
@@ -33277,7 +33277,7 @@ fn an_if_let_arm_that_moves_out_on_the_split_row_starts_there() {
     let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
     let row = code_row_y(&code, "if let Msg::Pair(n, s) = msg {");
     let moved = dots_with_tooltip(&timeline, "msg's resource is moved");
-    let split = dots_listing_tooltip(&timeline, "msg is live in a conditional expression ");
+    let split = dots_listing_tooltip(&timeline, "msg has a separate timeline path for each branch of this conditional");
     let copied = dots_listing_tooltip(&timeline, "a value inside msg is copied");
     assert_eq!((moved.len(), split.len(), copied.len()), (1, 1, 1), "dots: {:?} {:?} {:?}", moved, split, copied);
     let (moved, split) = (moved[0], split[0]);
@@ -33374,7 +33374,7 @@ fn copying_out_of_a_let_chain_scrutinee_doesnt_branch_it() {
     ] {
         let rv = run_with_local_backend(name);
         let (timeline, code) = (rv.timeline_panel_string(), rv.code_panel_string());
-        for text in ["y is live in a conditional expression", "y isn't moved in any of the branches above"] {
+        for text in ["y has a separate timeline path for each branch of this conditional", "y isn't moved in any of the branches above"] {
             assert!(!timeline.contains(text), "{}: y has a branch: {:?}", name, text);
         }
         assert_eq!(dots_with_tooltip(&timeline, "a value inside y is copied").len(), 1, "{}", name);
@@ -33483,7 +33483,7 @@ fn arm_calls_add_no_blank_rows() {
 fn else_if_is_drawn_in_the_else_branch() {
     let rv = run_with_local_backend("else_if_chain");
     let timeline = rv.timeline_panel_string();
-    let mut splits = dots_with_tooltip(&timeline, "s is live in a conditional expression ");
+    let mut splits = dots_with_tooltip(&timeline, "s has a separate timeline path for each branch of this conditional");
     splits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
     assert_eq!(splits.len(), 2, "{:?}", splits);
     let (outer, inner) = (splits[0], splits[1]);
@@ -33554,7 +33554,7 @@ fn one_line_condition_events_are_drawn_before_the_split() {
         ("u", "chars takes a shared reference (as self, implicitly borrowed). It may read through that reference"),
         ("w", "w is passed to len by shared reference (as self, implicitly borrowed). len may read it"),
     ] {
-        let split = one(&format!("{} is live in a conditional expression ", var));
+        let split = one(&format!("{} has a separate timeline path for each branch of this conditional", var));
         let join = one(&format!("{} isn't moved in any of the branches above", var));
         let event = one(cond);
         assert_eq!(event.0, split.0, "{:?} is not on {}'s column", cond, var);
@@ -36653,7 +36653,7 @@ fn return_drops_what_the_branch_owns() {
         ("diverging_branch_stops", &[("s", 2), ("t", 1)][..]),
         ("return_in_arm_drops", &[("v", 2), ("w", 1)][..]),
         // `consume`'s parameter `s` is dropped once more.
-        ("match_diverging_arm", &[("s", 3), ("t:SharedFlag", 1)][..]),
+        ("match_diverging_arm", &[("s", 3), ("t", 1)][..]),
         ("exit_panic_drops", &[("s", 3), ("t", 3)][..]),
         ("exit_unreachable_else", &[("s", 2), ("t", 2)][..]),
         // `b`: at the `break 'outer` and at the end of the outer body
@@ -36663,7 +36663,7 @@ fn return_drops_what_the_branch_owns() {
         // `guess`: at the `continue`, at the `break` in the `if` without
         // `else` (#429) and at the end of the loop body (#256).
         ("exit_continue_in_match", &[("guess", 3), ("secret", 1)][..]),
-        ("exit_return_borrowed_value", &[("s", 2), ("t", 2), ("u", 2), ("v", 1), ("v:SharedFlag", 1)][..]),
+        ("exit_return_borrowed_value", &[("s", 2), ("t", 2), ("u", 2), ("v", 2)][..]),
         ("exit_return_after_nested_if", &[("s", 2), ("t", 2)][..]),
         // `m` (moved on one path above): the drop-flag wording at the
         // `return` (#1194: main drew nothing there) and at the end of `g`.
@@ -36720,8 +36720,6 @@ fn return_drops_what_the_branch_owns() {
                 format!("{} goes out of scope. No resource is dropped.", v)
             } else if let Some(v) = var.strip_suffix(":Strings") {
                 format!("{} goes out of scope. Its resource is dropped (including every String it holds).", v)
-            } else if let Some(v) = var.strip_suffix(":SharedFlag") {
-                format!("{v} goes out of scope. Its resource is dropped. Rust tracks this with a runtime drop flag.")
             } else if let Some(v) = var.strip_suffix(":Flag") {
                 format!(
                     "{} goes out of scope. Its resource is dropped here only if no branch above \
@@ -37860,7 +37858,7 @@ fn ref_borrow_outlasts_pattern_reborrow() {
         // from `s` would cross it.
         let (ends_x, _) = first_dot(&tl, &format!("{}'s {}e borrow ends", outer, kind));
         let (back_x, _) = first_dot(&tl, &format!("s no longer borrows the resource {} points to", outer));
-        let (split_x, _) = first_dot(&tl, &format!("{} is live in a conditional expression", outer));
+        let (split_x, _) = first_dot(&tl, &format!("{} has a separate timeline path for each branch of this conditional", outer));
         assert!(ends_x == back_x && ends_x != split_x,
             "{}: {}'s borrow-end dot is at x={}; the arm's column is x={}, the match diamond's x={}",
             name, outer, ends_x, back_x, split_x);
@@ -39163,7 +39161,7 @@ fn reassign_from_a_loop_drops_where_the_loop_ends() {
 /// - the split of a lender while `r = &mut s` is live across the
 ///   conditional: its column draws no line there (only the dotted
 ///   lent-out line since #722, which no split dot goes on), and the arms
-///   start from nothing ("s is live in a conditional expression");
+///   start from nothing ("s has a separate timeline path for each branch of this conditional");
 /// - the join in a loop body after arms that `break` / `return`, where
 ///   the reference's borrow ended in every arm ("v's borrow ended in
 ///   each branch above", and an empty join dot on x's column).
@@ -39207,7 +39205,7 @@ fn no_split_or_join_dot_floats_off_its_column() {
         ("deep_nested_if", MAYBE_MOVED, DROP_FLAG, 1),
         ("else_if_chain", MAYBE_MOVED, DROP_FLAG, 1),
         // (outer_mut_ref_end_in_if_arm's and reassign_through_ref_in_branch's
-        // "s / t is live in a conditional expression" were here, on each
+        // "s / t has a separate timeline path for each branch of this conditional" were here, on each
         // arm's first dot: the dotted legs of a column mutably lent across
         // the conditional now start at a split dot of its own, #1371.)
         // (join_after_early_exit's `mixed` was here: v's borrow ended in
@@ -39750,7 +39748,7 @@ fn copied_reference_ends_with_its_scope() {
         assert!(svg.contains(&format!("data-rv-id=\"{id}")), "no {id}");
     }
     let w4_end = dots_listing_tooltip(&svg, "w4's immutable borrow ends");
-    assert!(!w4_end.is_empty() && w4_end == dots_listing_tooltip(&svg, "A shared reference through w4 is passed to push. push may read through it"), "w4's end on its push dot");
+    assert!(!w4_end.is_empty() && w4_end == dots_listing_tooltip(&svg, "A shared reference through w4 is passed by value to push"), "w4's end on its push dot");
 }
 
 /// #904: a `&mut` reference that `*r = &t` writes through has one line
@@ -40356,11 +40354,11 @@ fn a_holder_overwrite_ends_the_old_borrow_before_the_new_one() {
         &[
             "s2.items's immutable borrow ends",
             "s2.items acquires ownership of a new resource; its previous resource is dropped",
-            "s2.items holds a value that immutably borrows g's resource (s2.items isn't a reference itself)",
+            "s2.items holds a resource that immutably borrows g's resource (s2.items isn't a reference itself)",
         ],
         &[
             "o acquires ownership of a new resource; its previous resource is dropped",
-            "o holds a value that immutably borrows a's resource (o isn't a reference itself)",
+            "o holds a resource that immutably borrows a's resource (o isn't a reference itself)",
         ],
         &[
             "arr is assigned a new value",
@@ -44045,7 +44043,7 @@ fn mir_review_ends_on_each_taken_arm() {
         let h = drawn_clauses(&svg, holder, "4");
         let o = drawn_clauses(&svg, owner, "4");
         let fork = |dots: &[(i32, i32, String)]| dots.iter()
-            .find(|(_, _, t)| t.contains("is live in a conditional")).unwrap().0;
+            .find(|(_, _, t)| t.contains("has a separate timeline path for each branch of this conditional")).unwrap().0;
         let ends = h.iter().filter(|(_, _, t)| t == &format!("{holder}'s mutable borrow ends")).collect::<Vec<_>>();
         assert_eq!(ends.len(), 2, "{fixture}: {h:?}");
         assert!(ends.iter().any(|e| e.0 < fork(&h)));
@@ -44838,7 +44836,7 @@ fn review_end_before_a_fork_on_the_same_row() {
     let svg = render_cell("rv3_issues/1586_repoint_after_if_cond_read").unwrap().timeline_panel_string();
     let title = tooltip_of_id(&svg, "s@L3:dot:").unwrap();
     let end = title.find("s's resource is no longer immutably borrowed").unwrap();
-    let fork = title.find("s is live in a conditional expression").unwrap();
+    let fork = title.find("s has a separate timeline path for each branch of this conditional").unwrap();
     assert!(end < fork, "{title}");
 }
 
@@ -45065,7 +45063,7 @@ fn projected_receiver_loan_kinds_and_ends_1898() {
     let svg = run_with_local_backend("known_bugs/projected_receiver_loans_1898").timeline_panel_string();
     let part = "the `.0` of an element of a.0";
     assert_eq!(tooltip_of_id(&svg, "a.0@L5:dot:").unwrap(), format!(
-        "A mutable borrow of {part} is live while push uses a shared reference. a.0 can't be used as a whole while the borrow is live push may read {part} through this borrow The stored shared reference keeps the original mutable borrow of {part} live"
+        "A mutable borrow of {part} is live while push uses a shared reference. a.0 can't be used as a whole while the borrow is live A shared reference to {part} is passed by value to push The stored shared reference keeps the original mutable borrow of {part} live"
     ));
     for (place, row, holder, method) in [("p", 28, "out", "extend"), ("pair", 64, "refs", "push")] {
         for (field, kind, event) in [(0, "shared", "static"), (1, "mutable", "mutable")] {
@@ -45442,7 +45440,7 @@ fn holder_return_waits_for_destructor_1884() {
 #[test]
 fn conditional_forks_use_their_own_init_state_1916() {
     let uncertain = "The borrow checker can't prove that s holds a value at this branch decision.";
-    let live = "s is live in a conditional expression";
+    let live = "s has a separate timeline path for each branch of this conditional";
     let early = "when this conditional begins";
     for (name, inner, must_contain, must_not_contain) in [
         // E0382 before each if when both paths still carry the maybe-move.
@@ -45649,7 +45647,7 @@ fn fork_after_condition_evaluation_1916() {
     // The assignment's String::new() result now arrives as its own acquire
     // event on the same row, so the dot's id carries it.
     assert_review_title(&tip, &["The borrow checker can't prove that s holds a value at this branch decision."],
-        &["when this conditional begins", "s is live in a conditional expression"]);
+        &["when this conditional begins", "s has a separate timeline path for each branch of this conditional"]);
 }
 
 #[test]
@@ -45657,7 +45655,7 @@ fn unassigned_at_fork_1916() {
     // A borrow before the conditional gives E0381. The write is in its arm.
     let svg = run_with_local_backend("deferred_init_one_branch").timeline_panel_string();
     let tip = tooltip_of_id(&svg, "s@L9:dot:branch").expect("fork");
-    assert_review_title(&tip, &["s has no value yet"], &["s is live in a conditional expression"]);
+    assert_review_title(&tip, &["s has no value yet"], &["s has a separate timeline path for each branch of this conditional"]);
 }
 
 #[test]
@@ -46868,13 +46866,15 @@ fn closure_capture_ends_follow_their_own_loan_1909() {
     let svg = run_with_local_backend("rv3_issues/1758_closure_two_field_captures").timeline_panel_string();
     for (field, row) in [("p.a", 7), ("p.b", 5)] {
         let id = format!("g>{field}@L{row}:arrow:static_die");
-        assert!(tooltip_of_id(&svg, &id).unwrap().contains(&format!("shared borrow affecting {field}")), "{id}");
+        check_review_tip(&svg, &id, &[&format!("g's shared borrow of {field} ends. This borrow no longer restricts access to {field}")],
+            &["borrow affecting"]);
     }
     assert!(tooltip_of_id(&svg, "g>p.b@L7:arrow:static_die").is_none());
 
     // g exists only in the then arm. The other arm calls f on line 11.
     let svg = run_with_local_backend("rv3_issues/1759_closure_moved_in_one_arm").timeline_panel_string();
-    assert!(tooltip_of_id(&svg, "g>s@L8:arrow:static_die").unwrap().contains("shared borrow affecting s"));
+    check_review_tip(&svg, "g>s@L8:arrow:static_die",
+        &["g's shared borrow of s ends. This borrow no longer restricts access to s"], &["borrow affecting"]);
     assert!(tooltip_of_id(&svg, "g>s@L11:arrow:static_die").is_none());
 }
 
@@ -46885,7 +46885,7 @@ fn shared_scope_drop_flags_follow_the_exit_operand() {
     // returns it to the caller. Both go through the same flag switch in
     // ElaborateDrops. Normal continuation has its own unconditional drop.
     check_review_tip(&svg, "spare@L12:dot:owner_go_out_of_scope",
-        &["Its resource is dropped.", "runtime drop flag"], &["only if spare still holds it"]);
+        &["Its resource is dropped."], &["runtime drop flag", "only if spare still holds it"]);
     assert!(rv_elements(&svg, "spare@L13:dot:owner_go_out_of_scope").is_empty());
     check_review_tip(&svg, "spare@L18:dot:owner_go_out_of_scope",
         &["Its resource is dropped."], &["drop flag"]);
@@ -46896,7 +46896,7 @@ fn shared_scope_drop_flags_follow_the_exit_operand() {
             &["only if maybe was assigned", "runtime drop flag"], &["Its resource is dropped."]);
     }
     check_review_tip(&svg, "pair@L12:dot:owner_go_out_of_scope",
-        &["pair.a was moved out earlier", "only pair.b is dropped", "runtime drop flag"], &["only pair.a is dropped"]);
+        &["pair.a was moved out earlier", "only pair.b is dropped"], &["only pair.a is dropped", "runtime drop flag"]);
     check_review_tip(&svg, "pair@L18:dot:owner_go_out_of_scope",
         &["pair.b was moved out earlier", "only pair.a is dropped"], &["only pair.b is dropped"]);
     let doc = roxmltree::Document::parse(&svg).unwrap();
@@ -46957,8 +46957,8 @@ fn scope_review_box_allocation_and_payload_have_separate_drops() {
         &["The Box's heap allocation, if it has one, is freed here."]);
     let svg = run_with_local_backend("box_maybe_moved_branch").timeline_panel_string();
     check_review_tip(&svg, "b@L15:dot:owner_go_out_of_scope",
-        &["contents are dropped only if they are still in the Box", "allocation, if it has one, is freed here", "runtime drop flag"],
-        &["Whatever it still holds"]);
+        &["contents are dropped only if they are still in the Box", "allocation is freed here", "runtime drop flag"],
+        &["Whatever it still holds", "if it has one"]);
 }
 
 #[test]
@@ -50128,5 +50128,124 @@ fn p4_owner_review_interval_with_iterator_and_item_has_its_own_title() {
     for id in ["v@L7-8:line:revoked_privilege", "v@L8-9:line:revoked_privilege"] {
         assert_eq!(tooltip_of_id(&svg, id).as_deref(),
             Some("v's resource is mutably borrowed; v can't be used until the borrow ends"));
+    }
+}
+
+#[test]
+fn issue_1969_generic_reference_argument() {
+    let svg = run_with_local_backend("edition2024/rv3_1969_00000").timeline_panel_string();
+    // take_gen's definition takes T, and MIR instantiates it with &mut String.
+    // A caller probe can use s again after take_gen returns.
+    check_review_tip(&svg, "s@L20:dot:", &[
+        "A mutable reference to s is passed by value to take_gen",
+        "s can't be used while the borrow is live", "s's resource is no longer mutably borrowed",
+    ], &["take_gen may read or write it"]);
+}
+
+#[test]
+fn issue_1969_indexing_precedes_the_store_and_drop() {
+    let svg = run_with_local_backend("edition2024/rv3_1969_00002").timeline_panel_string();
+    // The empty vector panics. A Drop-printing control stores the new
+    // element and drops the old one only when indexing succeeds.
+    for (id, previous) in [
+        ("v@L17:dot:acquire", "The old value at v[0] is dropped and the replacement is stored there"),
+        ("String::from>v@L17:arrow:move", "Move from String::from to v[0]"),
+    ] {
+        check_review_tip(&svg, id, &[previous, "only if indexing succeeds", "An out-of-bounds index panics first"], &[]);
+        assert!(rv_elements(&svg, id).iter().all(|(_, text, ..)| text != previous));
+    }
+}
+
+#[test]
+fn issue_1969_flags_follow_the_exit() {
+    let svg = run_with_local_backend("edition2024/rv3_1969_00009").timeline_panel_string();
+    // The only move is on the false edge of the constant-true switch.
+    check_review_tip(&svg, "p.a@L18:dot:owner_go_out_of_scope",
+        &["p.a goes out of scope. Its resource is dropped."], &["runtime drop flag"]);
+    let svg = run_with_local_backend("edition2024/rv3_1969_00108").timeline_panel_string();
+    // This return is reached exclusively from the None discriminator edge.
+    check_review_tip(&svg, "o@L24:dot:owner_go_out_of_scope", &["None carries no payload"], &["runtime drop flag"]);
+    let svg = run_with_local_backend("edition2024/rv3_1969_00277").timeline_panel_string();
+    // Both tests read the same unchanged argument. The return can only
+    // see true at the inner test, where the already-dropped pair stays absent.
+    for place in ["p", "p.a", "p.b"] {
+        check_review_tip(&svg, &format!("{place}@L19:dot:"),
+            &[&format!("The borrow checker can't prove that {place} holds a value"), "nothing to drop here"],
+            &["Its resource is dropped here", "runtime drop flag"]);
+    }
+    let svg = run_with_local_backend("edition2024/rv3_1969_00283").timeline_panel_string();
+    // On the normal exit, the repeated flag skips the only path moving s4.
+    check_review_tip(&svg, "s4@L62:dot:owner_go_out_of_scope", &["Its resource is dropped."], &["runtime drop flag"]);
+}
+
+#[test]
+fn issue_1969_option_replacement_after_none_join() {
+    let svg = run_with_local_backend("edition2024/rv3_1969_00101").timeline_panel_string();
+    // On Some the payload is moved out and None is stored. The other
+    // predecessor enters with None. The overwrite drops no payload.
+    check_review_tip(&svg, "o@L20:dot:", &["o acquires ownership of a", "The previous value was None, which carries no payload"],
+        &["Rust drops the initialized parts", "runtime drop flag"]);
+}
+
+#[test]
+fn issue_1969_initialized_box_allocation() {
+    let svg = run_with_local_backend("edition2024/rv3_1969_00272").timeline_panel_string();
+    // ElaborateDrops puts the String drop behind the flag. Both successors
+    // free the initialized Box's nonzero-size heap allocation.
+    check_review_tip(&svg, "b2@L32:dot:", &["The old Box frees its heap allocation.",
+        "runtime drop flag tracks whether the previous contents still need to be dropped"], &["if it had one"]);
+    check_review_tip(&svg, "b2@L40:dot:", &["The Box's heap allocation is freed here.",
+        "Its contents are dropped only if they are still in the Box", "runtime drop flag"], &["if it has one"]);
+}
+
+#[test]
+fn issue_1969_reference_holder_with_drop_glue() {
+    let svg = run_with_local_backend("edition2024/rv3_1969_00030").timeline_panel_string();
+    // rustc gives vr the type Vec<&str>, which needs drop.
+    check_review_tip(&svg, "vr@L28:dot:", &["vr holds a resource that immutably borrows s's resource"],
+        &["vr holds a value"]);
+    check_review_tip(&svg, "vr@L28-30:line:", &["vr holds a resource that borrows from s"], &["vr holds a value"]);
+}
+
+#[test]
+fn issue_1969_fork_explains_timeline_paths() {
+    let svg = run_with_local_backend("edition2024/rv3_1969_00001").timeline_panel_string();
+    // This MIR switch reads flag. The m dot labels the fork in m's timeline.
+    check_review_tip(&svg, "m@L32:dot:branch", &["m has a separate timeline path for each branch of this conditional"],
+        &["live in a conditional expression"]);
+}
+
+#[test]
+fn issue_1969_named_borrow_end() {
+    let svg = run_with_local_backend("edition2024/rv3_1969_00067").timeline_panel_string();
+    // NLL issues the loan on p. Mutating p.a between the shared borrow and
+    // the format call fails with E0502 even though r projects to p.b.
+    check_review_tip(&svg, "r>p@L21:arrow:static_die",
+        &["r's shared borrow of p ends. This borrow no longer restricts access to p"], &["If r holds"]);
+    let svg = run_with_local_backend("edition2024/rv3_1969_00002").timeline_panel_string();
+    check_review_tip(&svg, "c>s@L18:arrow:static_die",
+        &["c's shared borrow of s ends. This borrow no longer restricts access to s"], &["If c holds"]);
+}
+
+#[test]
+fn issue_1969_loop_iterator_acquisition() {
+    let svg = run_with_local_backend("edition2024/rv3_1969_00113").timeline_panel_string();
+    // MIR uses the acquired iterator at next and on the backedge.
+    check_review_tip(&svg, "(temporary)@L9:dot:acquire",
+        &["A temporary holds the iterator that into_iter returns", "The iterator lives through the loop and is dropped when the loop exits"],
+        &["statement (or enclosing expression)"]);
+}
+
+#[test]
+fn issue_1969_mem_operations_explain_ownership() {
+    // Runtime witnesses follow the two values after swap, and the old
+    // value and the replacement after replace and take, respectively.
+    for (fixture, id, effect) in [
+        ("edition2024/rv3_1969_00008", "s@L24:dot:", "The values in the two borrowed places exchange places."),
+        ("edition2024/rv3_1969_00011", "s2@L14:dot:", "The call stores the replacement in the borrowed place and returns the old value to s3."),
+        ("edition2024/rv3_1969_00016", "s2@L34:dot:", "The call stores the type's default value in the borrowed place and returns the old value"),
+    ] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        check_review_tip(&svg, id, &[effect, "may read or write it", "no longer mutably borrowed"], &[]);
     }
 }
