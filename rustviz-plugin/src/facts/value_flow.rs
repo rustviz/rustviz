@@ -102,6 +102,7 @@ pub(crate) struct Call {
     pub returns_unit: bool,
     pub copyable: bool,
     pub result_is_resource: bool,
+    pub result_needs_drop: bool,
     pub drops_arg: bool,
     pub try_branch: bool,
     pub callable_result: bool,
@@ -313,6 +314,11 @@ impl ValueFlow {
 
     pub fn call(&self, span: Span, callee: Option<DefId>) -> Option<Call> {
         self.operands.call(span, callee)
+    }
+
+    pub fn call_sites(&self, span: Span, callee: DefId) -> impl Iterator<Item = Site> + '_ {
+        self.operands.calls.get(&span.with_parent(None)).into_iter().flatten()
+            .filter(move |call| call.callee == Some(callee)).filter_map(|call| call.site)
     }
 
     pub fn constructor(&self, span: Span) -> bool {
@@ -877,6 +883,7 @@ fn collect_blocks<'tcx>(
             returns_unit: ty.is_unit(),
             copyable,
             result_is_resource: type_owns_resource(tcx, ty, true),
+            result_needs_drop: ty.needs_drop(tcx, body.typing_env(tcx)),
             drops_arg: def.is_some_and(|id| tcx.is_diagnostic_item(sym::mem_drop, id)),
             try_branch,
             callable_result,

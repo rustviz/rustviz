@@ -323,8 +323,13 @@ pub(crate) fn payload_borrow<'tcx>(
         return None;
     }
     let mut ty = body.local_decls[p.local].ty;
-    let parent =
-        super::places::name_projections(bindings.locals.get(&p.local)?.clone(), &mut ty, prefix);
+    let root = bindings.locals.get(&p.local)?.clone();
+    let parent = if let Some(first) = prefix.iter().position(|step| matches!(step, ProjectionElem::Downcast(..))) {
+        let base = super::places::name_projections(root, &mut ty, &prefix[..first]);
+        format!("the inner {} of {base}", adt.variant(*variant).name)
+    } else {
+        super::places::name_projections(root, &mut ty, prefix)
+    };
     let kind = match kind {
         rustc_middle::mir::BorrowKind::Shared => "shared",
         rustc_middle::mir::BorrowKind::Mut { .. } => "mutable",

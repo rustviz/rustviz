@@ -915,14 +915,16 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             ResourceTy::Value(r) => r.name().to_owned(),
             _ => String::new(),
           };
-          // A binding lent mutably changes the variable only if a later
-          // part writes or lends on through it.
-          let changes = *mutable && (!*binding || match to {
+          let call_receiver = matches!(to, ResourceTy::Value(ResourceAccessPoint::Function(f)) if f.call_receiver.is_some());
+          // A mutable receiver can write through a capture without changing
+          // the closure itself. A mutable binding can change the place if a
+          // later part writes or lends through it.
+          let changes = *mutable && !call_receiver && (!*binding || match to {
             ResourceTy::Value(b) => self.chain_writes_through(chain_lo, b),
             _ => false,
           });
-          let use_ = ChainUse { to: to_name, mutable: *mutable, binding: *binding, changes };
           let definite = *binding && eff.checks_before == 0 && !guard;
+          let use_ = ChainUse { to: to_name, mutable: *mutable, binding: *binding, changes, call_receiver, definite };
           match uses.iter_mut().find(|u| u.rap == *rap) {
             Some(u) => {
               u.definite |= definite;
@@ -1061,7 +1063,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           let id = *self.unique_id;
           *self.unique_id += 1;
           evs.push(ExternalEvent::ChainFailUse { ro: l.clone(),
-            uses: vec![ChainUse { to: r.rap.name().to_owned(), mutable: r.mutable, binding: false, changes: r.changes }],
+            uses: vec![ChainUse { to: r.rap.name().to_owned(), mutable: r.mutable, binding: false, changes: r.changes, call_receiver: false, definite: false }],
             definite: false, path, id });
         }
         for (l, ..) in old.iter().filter(|(_, loan, ..)| loan.1 >= r.line) {
@@ -5260,7 +5262,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             self.callee_text(fn_expr)
           }
         };
-        self.add_fn(fn_name.clone());
+        self.add_callee(fn_expr, &fn_name);
         self.closure_call_events(expr, fn_expr, &fn_name);
         let defer = args.iter().skip(1).any(|a| holds_try(a));
         let manually_takes = self.facts.is_some_and(|b| b.take_calls.contains(&expr.span.with_parent(None)));
@@ -5292,7 +5294,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             }
           }
         }
-        self.swap_ref_vars(fn_expr, args, expr_to_line(expr, &self.tcx));
+        self.swap_ref_vars(expr, fn_expr, args);
         // `std::panic::panic_any(…)` written out (#410): it unwinds
         // once its argument has been passed.
         self.note_panic(expr);

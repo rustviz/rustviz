@@ -27,6 +27,7 @@ pub(super) struct Origins<'tcx> {
     pub loans: BTreeSet<usize>,
     pub retained: BTreeMap<usize, bool>,
     pub unknown: bool,
+    pub through_swap: bool,
     /// At least one path does not initialize this slot.
     may_be_absent: bool,
     /// An actual reference was issued with no pictured lender, such as
@@ -209,6 +210,11 @@ impl<'tcx> DirectHolders<'_, 'tcx> {
                 continue;
             };
             if let Some(next) = site.successor {
+                if let Some(source) = self.stores.swap_source(at, slot) {
+                    out.through_swap = true;
+                    work.push((at, source, None, path));
+                    continue;
+                }
                 if !value_path {
                     continue;
                 }

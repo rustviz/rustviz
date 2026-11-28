@@ -367,6 +367,10 @@ pub struct BodyFacts {
     /// Borrowck loans at MIR assignments to pattern bindings.
     #[serde(skip)]
     pub binding_loans: BTreeMap<rustc_middle::mir::Local, BTreeMap<rustc_middle::mir::Location, Vec<usize>>>,
+    /// The reaching reference of a single-slot holder initialized from a
+    /// swapped value. `None` means that a lender could not be proved.
+    #[serde(skip)]
+    pub(crate) swapped_holder_bindings: BTreeMap<(rustc_middle::mir::Location, rustc_middle::mir::Local), Option<usize>>,
     pub rows: Vec<Row>,
     /// Drop elaboration at individual residual edges, including named
     /// fields covered by a whole-place drop and unnamed temporaries.

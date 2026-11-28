@@ -3489,14 +3489,31 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         tcx, body, runs: &runs,
         borrowed_slots: rustc_mir_dataflow::impls::borrowed_locals(body).iter().collect(),
     };
-    let stores = {
+    let mut stores = {
         let addressed = super::repoints::addressed_slots(tcx, body);
         let mut preds: BTreeMap<Location, Vec<Location>> = BTreeMap::new();
         for &loc in cx.rows.row.keys().filter(|l| executes_at(l.block)) {
             for next in executed_successors(loc) { preds.entry(next).or_default().push(loc); }
         }
-        super::repoints::IncomingStores { tcx, body, preds, addressed, moves: &move_data }
+        super::repoints::IncomingStores { tcx, body, preds, addressed, swaps: BTreeMap::new(), moves: &move_data }
     };
+    for &block in &runs {
+        let at = body.terminator_loc(block);
+        let TerminatorKind::Call { func, args, target: Some(_), .. } = &body[block].terminator().kind else { continue };
+        if !func.const_fn_def().is_some_and(|(def, _)| tcx.is_diagnostic_item(rustc_span::sym::mem_swap, def)) {
+            continue;
+        }
+        let [left, right] = &args[..] else { continue };
+        let slot = |arg: &Operand<'tcx>| {
+            super::call_stores::swap_slot(&stores, &source_slots, at, tcx.mk_place_deref(arg.place()?))
+        };
+        if let (Some(left), Some(right)) = (slot(&left.node), slot(&right.node)) {
+            if !rustc_borrowck::consumers::places_conflict(tcx, body, left, right,
+                rustc_borrowck::consumers::PlaceConflictBias::Overlap) {
+                stores.swaps.insert(at, [left, right]);
+            }
+        }
+    }
     let mut direct = DirectHolders { stores: &stores, paths: &source_slots, tracked: base, issues: BTreeMap::new() };
     for l in &loans {
         let place = if l.loan < base {
@@ -3543,6 +3560,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         Some((shown, cx.name(shown)?))
     };
     let mut installations = Vec::new();
+    let mut swapped_holder_bindings = BTreeMap::new();
     for &bb in body.basic_blocks.reverse_postorder().iter().filter(|bb| runs.contains(bb)) {
         for (i, stmt) in body[bb].statements.iter().enumerate() {
             let StatementKind::Assign(pair) = &stmt.kind else { continue };
@@ -3550,10 +3568,31 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let Some(dst) = stores.slot_before(at, pair.0).filter(|p| cx.is_user(*p)) else { continue };
             let mut slots = Vec::new();
             direct_holders::reference_slots(tcx, body, dst, &array_offsets, &mut slots);
+            let single_slot_holder = dst.projection.is_empty()
+                && !decl_place_ty(tcx, body, dst).is_ref() && slots.len() == 1;
             for place in slots {
                 let origins = direct.installed(at, place);
+                if single_slot_holder && origins.through_swap {
+                    swapped_holder_bindings.insert((at, dst.local), origins.definite_loan());
+                }
                 installations.push(Installation {
                     place, occurrence: Occurrence { at, exit: None, successor: None },
+                    complete: !origins.unknown && !origins.unpictured && origins.calls.is_empty(),
+                    retained: origins.retained, loans: origins.loans,
+                });
+            }
+        }
+    }
+    for (&at, slots) in &stores.swaps {
+        let TerminatorKind::Call { target: Some(target), .. } = body[at.block].terminator().kind else { continue };
+        let occurrence = Occurrence { at, exit: None, successor: Some(target.start_location()) };
+        for &slot in slots.iter().filter(|&&slot| cx.is_user(slot)) {
+            let mut fields = Vec::new();
+            direct_holders::reference_slots(tcx, body, slot, &array_offsets, &mut fields);
+            for place in fields {
+                let origins = direct.reaching(&[occurrence], place);
+                installations.push(Installation {
+                    place, occurrence,
                     complete: !origins.unknown && !origins.unpictured && origins.calls.is_empty(),
                     retained: origins.retained, loans: origins.loans,
                 });
@@ -3648,7 +3687,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let mut callees = std::collections::HashMap::new();
         let mut no_indirect_writes = std::collections::HashMap::new();
         let mut write_sources = Vec::new();
-        let mut strong_stores = BTreeMap::<_, Vec<_>>::new();
+        let mut strong_stores: BTreeMap<_, _> = stores.swaps.iter()
+            .map(|(&at, &[left, right])| (at, vec![(left, right), (right, left)]))
+            .collect();
         let writable_addresses = super::call_stores::writable_addresses(body);
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             let term = data.terminator();
@@ -3663,7 +3704,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 for write in writes.iter() {
                     let operand = |index: usize| args.get(index).and_then(|a| a.node.place());
                     let (Some(dst), Some(source)) = (operand(write.destination), operand(write.source)) else { continue };
-                    let source = if let Some(path) = &write.through_source {
+                    let swap = stores.swaps.get(&loc);
+                    let source = if let Some(slots) = swap {
+                        slots[write.source]
+                    } else if let Some(path) = &write.through_source {
                         let p = resolve_write_deref(tcx, body, tcx.mk_place_deref(source));
                         let Some(p) = super::call_relationships::project(tcx, body, p, path) else { continue };
                         p
@@ -3671,18 +3715,22 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         source
                     };
                     if !decl_place_ty(tcx, body, dst).is_mutable_ptr() { continue; }
-                    let argument = resolve_write_deref(tcx, body, tcx.mk_place_deref(dst));
+                    let argument = swap.map_or_else(
+                        || resolve_write_deref(tcx, body, tcx.mk_place_deref(dst)),
+                        |slots| slots[write.destination],
+                    );
                     let Some(target) = super::call_relationships::project(tcx, body, argument, &write.projection) else { continue };
                     let Some((root, skip, _)) = cx.names.root(target) else { continue };
-                    if !column_projection(body, target, skip) { continue; }
-                    let Some(holder) = cx.name(target) else { continue };
-                    if write.replaces && !target.is_indirect() {
+                    let visible = column_projection(body, target, skip);
+                    if !visible && swap.is_none() { continue; }
+                    let holder = if visible { cx.name(target).unwrap_or_default() } else { String::new() };
+                    if write.replaces && !target.is_indirect() && swap.is_none() {
                         strong_stores.entry(loc).or_default().push((target, source));
                     }
                     let kept = held_by_place(target, t.mid_index(loc));
                     let carried = held_by_place(source, t.start_index(loc));
                     let ids: BTreeSet<_> = kept.intersection(&carried).filter(|id| published.contains(id)).copied().collect();
-                    if !ids.is_empty() {
+                    if !ids.is_empty() || swap.is_some() && decl_place_ty(tcx, body, source).is_ref() {
                         let sibling_use = target.projection.iter().enumerate().skip(skip).any(|(i, elem)| {
                             if !matches!(elem, ProjectionElem::Field(..)) { return false; }
                             let prefix = Place { local: target.local, projection: tcx.mk_place_elems(&target.projection[..i]) };
@@ -3705,12 +3753,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                     && body.local_decls[p.local].ty.is_ref()).then(|| cx.name(p)).flatten()
                             });
                         let stores = &mut call_holders.entry(loc).or_default().stores;
-                        write_sources.push((loc, stores.len(), source));
+                        write_sources.push((loc, stores.len(), source, swap.is_some()));
                         stores.push(CallStore {
                             argument: write.source,
                             destination_argument: write.destination,
                             source: EndPlace::new(tcx, source, source_name.unwrap_or_default()),
-                            target_argument: EndPlace::new(tcx, argument, cx.name(argument).unwrap_or_default()),
+                            target_argument: EndPlace::new(tcx, argument, if visible { cx.name(argument).unwrap_or_default() } else { String::new() }),
                             destination: EndPlace::new(tcx, target, holder),
                             holder: root,
                             sibling_use,
@@ -3824,14 +3872,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 });
             }
         }
-        for (loc, index, source) in write_sources {
+        for (loc, index, source, swap) in write_sources {
             if !decl_place_ty(tcx, body, source).is_ref() { continue; }
-            let Some(issue) = super::call_stores::reaching_issue(tcx, body, &runs, loc, source, &strong_stores, &writable_addresses) else { continue };
-            let Some(loan) = loans.iter().find(|loan| loan.issue == Some(issue)) else { continue };
+            let loan = swap.then(|| direct.before(loc, source).definite_loan()).flatten().or_else(|| {
+                let issue = super::call_stores::reaching_issue(tcx, body, &runs, loc, source, &strong_stores, &writable_addresses)?;
+                loans.iter().find(|loan| loan.issue == Some(issue)).map(|loan| loan.loan)
+            });
             let store = &mut call_holders.get_mut(&loc).unwrap().stores[index];
-            if store.loans.contains(&loan.loan) {
-                store.effective_loan = Some(loan.loan);
-            }
+            store.effective_loan = loan.filter(|loan| swap || store.loans.contains(loan));
         }
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             if !runs.contains(&bb) { continue; }
@@ -4457,7 +4505,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
 
     let projected_stores: BTreeMap<_, _> = installations.iter().filter_map(|install| {
         let at = install.occurrence.at;
-        let StatementKind::Assign(write) = &body[at.block].statements[at.statement_index].kind else { return None };
+        let StatementKind::Assign(write) = &body[at.block].statements.get(at.statement_index)?.kind else { return None };
         (!write.0.projection.is_empty() && write.0.projection.len() == install.place.projection.len())
             .then_some((at, install))
     }).collect();
@@ -8731,6 +8779,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         closure_captures,
         iterators: for_loops,
         binding_loans,
+        swapped_holder_bindings,
         rows: out_rows,
         promoted_operands,
         temps,

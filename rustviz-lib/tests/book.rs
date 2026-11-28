@@ -1051,11 +1051,11 @@ const BOOK: &[Snippet] = &[
         id: "c13_01_closure_param",
         must_contain: &[
             "Closure add_one is bound",
-            "L3 Calling add_one borrows add_one by shared reference as the receiver. The call may read through it. When the call returns, its receiver borrow ends",
+            "L3 add_one is passed to add_one by shared reference; add_one may read it. The reference is the call's receiver. When the call returns, its receiver borrow ends",
             "L3 y is initialized with the value add_one() returns",
             "y receives the value add_one() returns",
         ],
-        must_not_contain: &["add_one's resource is copied", "Copy of the value add_one() returns to y", "add_one is passed to add_one by shared reference"],
+        must_not_contain: &["add_one's resource is copied", "Copy of the value add_one() returns to y", "add_one is passed to add_one by shared reference. add_one may read it"],
         ..E
     },
     Snippet {
@@ -1101,11 +1101,11 @@ const BOOK: &[Snippet] = &[
         note: "the closure's capture of k when passed as an argument is missing (#298)",
         must_contain: &[
             "f acquires ownership from the caller",
-            "L2 Calling f borrows f by shared reference as the receiver. The call may read through it. When the call returns, its receiver borrow ends",
+            "L2 f is passed to f by shared reference; f may read it. The reference is the call's receiver. When the call returns, its receiver borrow ends",
             "f goes out of scope. Rust drops the callable value if its concrete type needs drop.",
             "r receives the value apply() returns",
         ],
-        must_not_contain: &["f is initialized with a copy of Anonymous resource", "f is the owner of the resource", "f goes out of scope. Its resource is dropped.", "f is passed to f by shared reference"],
+        must_not_contain: &["f is initialized with a copy of Anonymous resource", "f is the owner of the resource", "f goes out of scope. Its resource is dropped.", "f is passed to f by shared reference. f may read it"],
         ..E
     },
     Snippet {
