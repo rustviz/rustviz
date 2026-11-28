@@ -134,9 +134,8 @@ impl<'a, 'tcx> Rows<'a, 'tcx> {
         // right-hand side is done: on the assignment's row.
         if l.statement_index == data.statements.len() {
             if let TerminatorKind::Drop { place, target, .. } = &data.terminator().kind {
-                let t = &self.body.basic_blocks[*target];
-                if matches!(t.statements.first().map(|s| &s.kind), Some(StatementKind::Assign(asg)) if asg.0 == *place) {
-                    return self.raw_row(Location { block: *target, statement_index: 0 });
+                if let Some(store) = super::places::replacement_store(self.body, *place, *target) {
+                    return self.raw_row(store);
                 }
             }
         }

@@ -1750,12 +1750,18 @@ fn render_branch_dots(
             // It may have held nothing as the conditional started,
             // and only some branches assign it (#1034): it may hold
             // the new value, the old one, or nothing.
-            Some(hover_messages::event_dot_branch_merge_maybe_held(
+            let mut title = hover_messages::event_dot_branch_merge_maybe_held(
                 &is.real_name(),
                 is.extract_rap().map_or(false, |r| r.drops_nothing()),
                 rap.is_mut(),
                 reassigned,
-            ))
+            );
+            if join.is_some_and(|j| j.cell.init == Init::Maybe && j.cell.cause == Some("moved")) {
+                title.push_str("&lt;br&gt;");
+                title.push_str(&hover_messages::state_maybe(rap.name(), Some("moved")));
+                title.push('.');
+            }
+            Some(title)
         } else if !staged && join.is_some_and(|j| j.cell.always_assigned) {
             Some(hover_messages::state_imaginary_unassigned(rap.name()))
         } else if !staged && join.is_some_and(|j| j.cell.init == Init::Unassigned) {
@@ -2669,6 +2675,8 @@ fn render_dot(
                         let drop = visualization_data.fn_source_lines.get(hash).zip(local).and_then(|(&function, local)|
                             visualization_data.state_table.staged_try_drop(function, &name, local, span));
                         hover_messages::event_dot_staged_drop_if_try_returns(&name, &note, drop.unwrap_or(&crate::facts::StagedDrop::Value))
+                    } else if matches!(event, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::IfInitialized), .. }) {
+                        hover_messages::event_dot_owner_drop_at_reassign_if_initialized(&name, &note)
                     } else if matches!(event, Event::OwnerDropAtReassign { payload: true, parts: None, maybe_moved: false, maybe_init: None, contents_gone: false, .. }) {
                         hover_messages::event_dot_replace_at_place(&name)
                     } else if box_paths {
@@ -2859,6 +2867,11 @@ fn render_dot(
                             title.push_str(note);
                         }
                     }
+                    if matches!(event, Event::OwnerDropAtReassign { flag: true, .. })
+                        && !title.contains("runtime drop flag") {
+                        if !title.ends_with('.') { title.push('.'); }
+                        title.push_str(hover_messages::runtime_drop_flag());
+                    }
                     if conditional_drop.is_some() {
                         title = format!("{}. This assignment runs on only some paths through this expression.", title.trim_end_matches('.'));
                     }
@@ -2866,7 +2879,7 @@ fn render_dot(
                     // is overwritten drops nothing: a plain dot that says
                     // so, no drop triangle (#1138).
                     let drops_nothing = matches!(event, Event::OwnerDropAtReassign { parts: Some(p), .. }
-                        if p.dropped.is_empty() && p.maybe_moved.is_empty());
+                        if !p.other_drops && p.dropped.is_empty() && p.maybe_moved.is_empty());
                     if staged_drop_site.is_some() || has_staged_drop {
                         // The source column explains the staged drop. A
                         // triangle there belongs to the binding's own drop.
@@ -2908,7 +2921,7 @@ fn render_dot(
                     // join, say when its value, if any, is dropped.
                     let rap = &visualization_data.timelines[hash].resource_access_point;
                     let later = &history[i + 1..];
-                    let reassigned = if later.iter().any(|(_, e)| matches!(e, Event::OwnerDropAtReassign { maybe_init: Some(InitBy::Branch | InitBy::Loop), .. })) {
+                    let reassigned = if later.iter().any(|(_, e)| matches!(e, Event::OwnerDropAtReassign { skipped: false, .. })) {
                         Some(true)
                     } else if later.iter().any(|(_, e)| reassigns_maybe_init(e)) {
                         // Only in a branch of a later conditional.
@@ -3293,6 +3306,11 @@ fn render_dot(
                 data.title.push_str(". ");
                 data.title.push_str(clause);
             }
+        }
+        if matches!(event, Event::Acquire { .. })
+            && visualization_data.row_layout.staged_replacements.contains(&event.get_id())
+        {
+            data.title.push_str(". The right-hand side moved this place's old value before the stores.");
         }
         let mut event_kind = rv_attrs::event_name(event);
         if matches!(event, Event::StaticLend { .. } | Event::MutableLend { .. }
@@ -10608,16 +10626,22 @@ fn render_branches(
                     let nested_join = (matches!(end_state, State::FullPrivilege { s: LineState::Gray }) && !rap.is_ref())
                         .then(|| {
                             let table = &visualization_data.state_table;
+                            let function = *visualization_data.fn_source_lines.get(rap.hash())?;
+                            let source = branch.source?;
+                            if rap.is_member() && i == 1 && branch.source_span.is_none()
+                                && matches!(ty, BranchType::If(..)) && branch.e_data.is_empty() {
+                                return table.implicit_arm_cell(function, rap.name(), source);
+                            }
                             let span = branch.source_span.filter(|s| s.start.0 == s.end.0)?;
                             let row = span.start.0;
                             if *fork_above && i == 1 && branch_history.len() == 2 && branch.e_data.is_empty() {
                                 let other = branch_history[0].source?;
-                                table.empty_sibling_cell(*visualization_data.fn_source_lines.get(rap.hash())?, rap.name(), row, branch.source?, other)
+                                table.empty_sibling_cell(function, rap.name(), row, source, other)
                             } else {
-                                table.continuing_arm_cell(*visualization_data.fn_source_lines.get(rap.hash())?, rap.name(), row, branch.source?)
+                                table.continuing_arm_cell(function, rap.name(), row, source)
                             }
                         }).flatten()
-                        .filter(|c| c.init == crate::facts::table::Init::Own && c.parts.is_none() && c.lent.is_empty())
+                        .filter(|c| c.init == crate::facts::table::Init::Own && c.parts.is_none() && !c.may_lend && c.lent.is_empty())
                         .map(|_| (State::FullPrivilege { s: LineState::Full }, None));
                     match diagonal.filter(|(st, _)| lined(st) && lined(&end_state)).or(nested_join) {
                         Some((st, Some(title))) => segs.push(BranchSeg {
@@ -10847,6 +10871,15 @@ fn render_branches(
                     } else {
                         hover_messages::state_maybe_uninitialized(rap.name())
                     };
+                }
+            }
+            // A variable that held a value before the conditional isn't one
+            // with no value yet: the dashed leg is a path the borrow checker
+            // considers (a move on a path that never runs, or a real move).
+            if !entry_maybe_init && had_value && !rap.is_ref() {
+                let no_value = hover_messages::state_uninitialized(rap.name());
+                for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {
+                    seg.title = hover_messages::state_maybe(rap.name(), None);
                 }
             }
             let mut segs = trim_dashes_under_solid(segs);

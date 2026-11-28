@@ -1052,83 +1052,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         out
     }
 
-    /// What the user variable (or field of one) `name` holds where the
-    /// assignment `assign` (its span; `lhs`, its left-hand side's)
-    /// overwrites it (#1027): rustc's dataflow just before the `Drop` of
-    /// the old value that the assignment starts with (MIR gives it the
-    /// left-hand side's span), or, failing that, the write itself.
-    /// `None` when no such place in the MIR is found.
-    pub fn ownership_before_assign(&self, name: &str, lhs_expr: &'tcx rustc_hir::Expr<'tcx>, assign: Span) -> Option<Ownership> {
-        use rustc_middle::mir::StatementKind;
-        use rustc_mir_dataflow::impls::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
-        use rustc_mir_dataflow::move_paths::MoveData;
-        let body = &self.bwf.body;
-        let move_data = MoveData::gather_moves(body, self.tcx, |_| true);
-        let paths = self.move_path_names(&move_data);
-        let root = name.split('.').next().unwrap_or(name);
-        let (base, false) = self.place_root(lhs_expr)? else { return None };
-        let id = crate::expr_visitor_utils::local_of_path(base)?;
-        let local = *self.raps.bindings.declarations.get(&id)?;
-        let lhs = lhs_expr.span;
-        let paths: Vec<_> = paths.into_iter().filter(|(mpi, _)| move_data.move_paths[*mpi].place.local == local).collect();
-        let mpi = paths.iter().find(|(_, n)| n == name).or_else(|| paths.iter().find(|(_, n)| n == root))?.0;
-        let blocks = || body.basic_blocks.iter_enumerated();
-        let dropped = blocks().find_map(|(bb, data)| {
-            let t = data.terminator.as_ref()?;
-            matches!(&t.kind, TerminatorKind::Drop { place, .. } if place.local == local && t.source_info.span == lhs)
-                .then(|| Location { block: bb, statement_index: data.statements.len() })
-        });
-        let at = dropped.or_else(|| blocks().find_map(|(bb, data)| {
-            data.statements.iter().position(|st| matches!(&st.kind,
-                StatementKind::Assign(b) if b.0.local == local && st.source_info.span == assign))
-                .map(|i| Location { block: bb, statement_index: i })
-        }));
-        let at = at?;
-        let mut init = MaybeInitializedPlaces::new(self.tcx, body, &move_data)
-            .iterate_to_fixpoint(self.tcx, body, None)
-            .into_results_cursor(body);
-        let mut uninit = MaybeUninitializedPlaces::new(self.tcx, body, &move_data)
-            .iterate_to_fixpoint(self.tcx, body, None)
-            .into_results_cursor(body);
-        init.seek_before_primary_effect(at);
-        uninit.seek_before_primary_effect(at);
-        Some(match (init.get().contains(mpi), uninit.get().contains(mpi)) {
-            (true, false) => Ownership::Held,
-            (false, _) => Ownership::None,
-            (true, true) => Ownership::Maybe,
-        })
-    }
-
     /// Whether compiler MIR has any executable edge back to this head.
     pub fn loop_never_rounds(&self, id: rustc_hir::HirId) -> Option<bool> {
         let loop_state = self.body_facts?.loops.get(&id)?;
         Some(!loop_state.edges.iter().any(|e| e.runs && e.kind == crate::facts::LoopEdgeKind::Backedge))
-    }
-
-    /// The move paths of `move_data` that are a user variable, or a
-    /// field of one (`p.name`, `t.0`), each with the name of its column.
-    fn move_path_names(&self, move_data: &rustc_mir_dataflow::move_paths::MoveData<'tcx>) -> Vec<(rustc_mir_dataflow::move_paths::MovePathIndex, String)> {
-        let body = &self.bwf.body;
-        let names = &self.raps.bindings.locals;
-        let mut out = Vec::new();
-        for (mpi, path) in move_data.move_paths.iter_enumerated() {
-            let Some(mut name) = names.get(&path.place.local).cloned() else { continue };
-            let mut ty = body.local_decls[path.place.local].ty;
-            let mut is_field_path = true;
-            for elem in path.place.projection {
-                let ProjectionElem::Field(f, fty) = elem else { is_field_path = false; break };
-                match ty.kind() {
-                    TyKind::Adt(def, _) if def.is_struct() => name = format!("{}.{}", name, def.non_enum_variant().fields[f].name),
-                    TyKind::Tuple(_) => name = format!("{}.{}", name, f.index()),
-                    _ => { is_field_path = false; break }
-                }
-                ty = fty;
-            }
-            if is_field_path {
-                out.push((mpi, name));
-            }
-        }
-        out
     }
 
     /// Whether a loan issued inside `within` (a closure literal passed

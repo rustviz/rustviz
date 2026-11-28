@@ -416,7 +416,7 @@ pub struct RapData {
 /// How the value of a branch of an `if` / `match` is bound, once the
 /// branch has been visited (`deferred_arm_binds`, #994).
 #[derive(Debug, Clone)]
-pub enum ArmBind<'tcx> {
+pub(crate) enum ArmBind<'a, 'tcx> {
   /// To one variable (`let v = if …`, `v = if …`).
   Rhs(ResourceTy, Evt),
   /// Taken apart by a pattern whose variables are already declared
@@ -424,9 +424,8 @@ pub enum ArmBind<'tcx> {
   Pat(&'tcx Pat<'tcx>),
   /// To a variable that may hold a value already (`v = if …` with v
   /// owning a String, #1010): its old value is dropped where the
-  /// branch's value arrives, if the branch left it there (and its
-  /// type needs drop: the `bool`).
-  Reassign(ResourceTy, Evt, ResourceAccessPoint, bool),
+  /// branch's value arrives, when the replacement facts prove a drop.
+  Reassign(ResourceTy, Evt, ResourceAccessPoint, Option<(&'a crate::facts::AssignmentWrite, &'static str)>),
   /// Taken apart by a destructuring assignment (`(x, n) = if …`, the
   /// block it desugars to; #1253).
   Assign(&'tcx rustc_hir::Block<'tcx>),
@@ -584,7 +583,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// branches take the events), `Some(false)` only the others, after it,
   /// as a call passes its arguments once they're visited.
   pub literal_parts: Option<bool>,
-  pub deferred_arm_binds: HashMap<rustc_hir::HirId, (&'tcx Expr<'tcx>, Vec<ArmBind<'tcx>>)>,
+  pub(crate) deferred_arm_binds: HashMap<rustc_hir::HirId, (&'tcx Expr<'tcx>, Vec<ArmBind<'a, 'tcx>>)>,
   /// For a branch body whose pairing `deferred_arm_binds` put off: the
   /// reference parts of the value it is bound to whose lenders it adds
   /// to the other branches' (`match_rhs_arms`, #1402), with each one's
@@ -601,7 +600,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // While the branches' values of `v = if …` are paired with a v that
   // may hold a value (#1010): v. Each branch is paired once it has
   // been visited, where v's old value is dropped (see `ArmBind::Reassign`).
-  pub reassign_arms: Option<(ResourceAccessPoint, bool)>,
+  pub(crate) reassign_arms: Option<(ResourceAccessPoint, Option<&'a crate::facts::AssignmentWrite>)>,
   // While a branch's value is paired (`pair_pat_with_value`): the
   // scope that branch body is (its block, or a match arm's body), which
   // owns the temporary of a literal value the pattern leaves parts of
@@ -796,7 +795,6 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // the `lhs` temporaries get no columns. Instead each `a = lhs` is
   // drawn as `a = <the part of the RHS that lhs held>`.
   //   destructure_srcs: `lhs` binding → that RHS part.
-  //   destructure_moved: RAPs whose value the statement moves out
   //     (their old value isn't dropped when they're assigned).
   //   destructure_ref_data: a reference destination's new lender,
   //     computed before any part of the statement is drawn.
@@ -805,11 +803,6 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   /// RHS is a place whose parts have columns (`p.a` in `Pair { a: s, b: t
   /// } = p;`, #1412): `s = p.a`, not `s = p`.
   pub destructure_parts: HashMap<rustc_hir::HirId, String>,
-  pub destructure_moved: HashSet<String>,
-  /// The parts of an assignment's destination that its right-hand
-  /// side moves out (`t.0`, `t.1` in `t = (t.1, t.0)`, #1138): their
-  /// old values aren't dropped by the assignment.
-  pub rhs_self_moved: BTreeSet<String>,
   /// Persistent: (name, first line, last line) of each destination
   /// of a destructuring assignment whose old value the same statement
   /// moves out (`m1` in `(m1, m2) = (m2, m1)`). That move hands the
@@ -1335,8 +1328,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       let_ctor_literals: HashSet::new(),
       destructure_srcs: HashMap::new(),
       destructure_parts: HashMap::new(),
-      destructure_moved: HashSet::new(),
-      rhs_self_moved: BTreeSet::new(),
       destructure_swapped: Vec::new(),
       destructure_ref_data: HashMap::new(),
       destructure_ref_src: HashMap::new(),
@@ -2738,20 +2729,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  /// Non-Copy fields of `parent` (recursively) that currently own a
-  /// resource, i.e. what dropping `parent` right now would drop.
-  pub fn struct_fields_holding_resource(&self, parent: &str) -> Vec<ResourceAccessPoint> {
-    let mut out = Vec::new();
-    for child in self.struct_children(parent) {
-      let name = child.name().clone();
-      if !child.never_drops() && self.rap_holds_resource_now(&name) {
-        out.push(child);
-      }
-      out.extend(self.struct_fields_holding_resource(&name));
-    }
-    out
-  }
-
   /// `to` just received a whole struct value from a source that has
   /// no per-field columns of its own (a call result, the caller, a
   /// dereference): every field now holds its part of that value.
@@ -2789,33 +2766,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // No prior ownership event: the variable was declared but never
     // initialized (`let mut y; y = x;`), so there's nothing to drop.
     ownership_after(self.preprocessed_events, rap_name, None).unwrap_or(Ownership::None)
-  }
-
-  /// Whether the Box `rap_name` holds nothing now because its whole
-  /// contents were moved out (`let s = *b;`) on every path, while the
-  /// Box itself wasn't: its heap allocation is still there to free
-  /// (#1145). Only a move at the top level counts (one in a branch is
-  /// the maybe-moved case, #921).
-  pub fn box_contents_only_moved_now(&self, rap_name: &str) -> bool {
-    for (_, ev) in self.preprocessed_events.iter().rev() {
-      match ev {
-        ExternalEvent::Move { from: ResourceTy::Deref(r), .. } if r.name() == rap_name => return true,
-        ExternalEvent::Move { from, to, .. }
-          if from.extract_rap().is_some_and(|r| r.name() == rap_name) || to.extract_rap().is_some_and(|r| r.name() == rap_name) => return false,
-        ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
-          if to.extract_rap().is_some_and(|r| r.name() == rap_name) => return false,
-        ExternalEvent::InitRefParam { param, .. } if param.name() == rap_name => return false,
-        // A conditional that does something to it: the maybe-moved
-        // case (#921), or a new value.
-        ExternalEvent::Branch { branches, .. }
-          if branches.iter().any(|b| ownership_after(&b.e_data, rap_name, None).is_some()) => return false,
-        ExternalEvent::ClosureCall { closure, .. } if closure.extract_rap().is_some_and(|r| r.name() == rap_name) => return false,
-        ExternalEvent::LoopExitMove { ro, .. } | ExternalEvent::LoopExitKept { ro, .. } | ExternalEvent::OrAltMove { ro, .. }
-          | ExternalEvent::ManuallyDropByHand { ro, .. } if ro.name() == rap_name => return false,
-        _ => {}
-      }
-    }
-    false
   }
 
   /// `rap_ownership_now` as of before `preprocessed_events[end..]`.
@@ -2951,42 +2901,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
     }
     false
-  }
-
-  /// What reassigning the struct or tuple `parent` drops of its
-  /// previous value, when some of its parts were moved out before, on
-  /// every path or on some only (#628): `None` when none were.
-  pub fn reassign_parts(&self, parent: &str) -> Option<ReassignParts> {
-    let mut out = ReassignParts::default();
-    self.collect_reassign_parts(parent, &mut out);
-    (!out.moved.is_empty() || !out.maybe_moved.is_empty()).then_some(out)
-  }
-
-  fn collect_reassign_parts(&self, parent: &str, out: &mut ReassignParts) {
-    for c in self.struct_children(parent) {
-      if c.never_drops() || c.is_plain_value() {
-        continue;
-      }
-      let name = c.name().clone();
-      if self.rhs_self_moved.iter().any(|m| crate::visitor::place_within(&name, m)) {
-        out.moved.push(name);
-        continue;
-      }
-      match self.rap_ownership_now(&name) {
-        Ownership::None => out.moved.push(name),
-        Ownership::Maybe => {
-          out.by_cond |= self.maybe_moved_by_let_now(&name) || self.moved_by_chain_condition(&c);
-          out.maybe_moved.push(name);
-        }
-        Ownership::Held => {
-          if self.struct_children(&name).is_empty() {
-            out.dropped.push(name);
-          } else {
-            self.collect_reassign_parts(&name, out);
-          }
-        }
-      }
-    }
   }
 
   /// Whether `name`, maybe-moved now (`Ownership::Maybe`), is so because
@@ -3262,8 +3176,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     // `v = if …` reassigning v (#1010): each branch is paired after it
     // is visited, when what it did to v is known. (A nested
     // conditional pairs each of its own branches.)
-    if let Some((old, drops)) = self.reassign_arms.clone().filter(|_| !branch_value_is_conditional(body)) {
-      self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push(ArmBind::Reassign(lhs, evt, old, drops));
+    if let Some((old, write)) = self.reassign_arms.clone().filter(|_| !branch_value_is_conditional(body)) {
+      let drop = write.and_then(|w| Some((w, w.replacing.as_ref()?.on_input(branch_value_expr(body)?.span)?)));
+      self.deferred_arm_binds.entry(body.hir_id).or_insert_with(|| (body, Vec::new())).1.push(ArmBind::Reassign(lhs, evt, old, drop));
       return;
     }
     if self.defer_arm_binds.is_some_and(|within| self.arm_value_uses_local_in(body, within)) {
@@ -3644,44 +3559,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// branch of type `!` gives no value and drops nothing; nor does one
   /// whose value is v's own (`v = if c { v } else { g };`): v keeps its
   /// value on that path.
-  fn reassign_from_arm(&mut self, lhs: ResourceTy, body: &'tcx Expr<'tcx>, evt: Evt, old: ResourceAccessPoint, drops: bool) {
+  fn reassign_from_arm(&mut self, lhs: ResourceTy, body: &'tcx Expr<'tcx>, evt: Evt, old: ResourceAccessPoint,
+    drop: Option<(&crate::facts::AssignmentWrite, &'static str)>) {
     let Some(value) = branch_value_expr(body) else { return };
     if self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value).is_none_or(|ty| ty.is_never()) {
       return;
     }
-    if matches!(value.kind, ExprKind::Path(_)) && fetch_rap(value, &self.tcx, &self.raps).is_some_and(|r| r.hash() == old.hash()) {
+    if matches!(value.kind, ExprKind::Path(_)) && fetch_rap(value, &self.tcx, &self.raps).is_some_and(|r| r.hash() == old.hash())
+      && drop.is_none_or(|(_, how)| how == "nothing_to_drop") {
       return;
     }
-    let held = self.rap_ownership_now(old.name());
     let n_events = self.preprocessed_events.len();
-    self.match_rhs(lhs, body, evt);
-    let is_old = |r: &ResourceTy| r.hash() == old.hash();
-    let new = &self.preprocessed_events[n_events..];
-    if !drops || held == Ownership::None {
-      return;
-    }
-    let line = new.iter()
+    self.match_rhs(lhs.clone(), body, evt);
+    let Some((write, how)) = drop else { return };
+    let line = self.preprocessed_events[n_events..].iter()
       .find(|(_, ev)| matches!(ev,
-        ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. } if is_old(to)))
+        ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } | ExternalEvent::Bind { to, .. }
+          if to.hash() == old.hash()))
       .map_or_else(|| span_end_line(&value.span, &self.tcx), |(l, _)| *l);
-    let maybe_moved = held == Ownership::Maybe;
-    let by_cond = maybe_moved && self.moved_by_chain_condition(&old);
-    // Same rule as a plain `v = f;` (see visitor.rs): maybe-moved only
-    // because the loop can come back round with it moved (#992).
-    let loop_head = maybe_moved && self.maybe_moved_by_loop_head_now(old.name());
-    self.add_external_event(line, ExternalEvent::OwnerDropAtReassign {
-      ro: old,
-      id: *self.unique_id,
-      maybe_moved,
-      by_cond,
-      loop_head,
-      parts: None,
-      maybe_init: None,
-      payload: false,
-      contents_gone: false,
-      skipped: false,
-    });
-    *self.unique_id += 1;
+    self.note_assignment_arrivals(n_events, &lhs, write);
+    if let Some(drops) = self.assignment_drops(write, None, None, Some(how)) {
+      self.emit_assignment_drops(line, write, drops);
+    }
   }
 
   /// Removes from `preprocessed_events`, and returns in order, the
@@ -5995,28 +5894,48 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  /// The drop of the Box payload on the normal assignment path.
-  pub(crate) fn box_payload_drop_at(&self, lhs: &Expr<'_>, box_owner: &ResourceAccessPoint) -> Option<&'static str> {
-    use rustc_middle::mir::{ProjectionElem, TerminatorKind};
-    let local = box_owner.owner_local()?;
-    let mut kinds = self.effects.get(&lhs.span.with_parent(None))?.iter().filter_map(|(_, ev)| {
-      let crate::facts::Fact::Drop { how, at_reassign: true, early_exit: None, .. } = ev.fact else { return None };
-      if ev.drop_route != crate::facts::DropRoute::Normal { return None; }
-      let TerminatorKind::Drop { place, .. } = self.mir_body.basic_blocks[ev.location.block].terminator().kind else { return None };
-      (place.local == local && place.projection.as_slice() == [ProjectionElem::Deref]).then_some(how)
-    });
-    let how = kinds.next()?;
-    kinds.all(|other| other == how).then_some(how)
+  pub(crate) fn assignment_write(&self, lhs: &Expr<'_>, span: rustc_span::Span) -> Option<&'a crate::facts::AssignmentWrite> {
+    let facts = self.body_facts?;
+    // rustc uses the LHS span for a separate store and the whole
+    // expression span for an in-place operation. Compiler temporaries
+    // staging the RHS are excluded when the facts are collected.
+    let writes = [lhs.span, span].map(|s| s.with_parent(None));
+    let unique = if writes[0] == writes[1] { 1 } else { 2 };
+    let writes = writes[..unique].iter().flat_map(|s| facts.writes.get(s).into_iter().flatten());
+    let write = writes.clone().find(|w| w.runs && !w.skipped).or_else(|| writes.clone().next())?;
+    // An or-pattern can lower the same guard into distinct blocks.
+    // Reuse its display effect only when every executable occurrence
+    // agrees. The arm's events are still drawn on their own leg.
+    writes.filter(|other| (other.runs && !other.skipped) == (write.runs && !write.skipped))
+      .all(|other| other.dest == write.dest && other.direct == write.direct
+        && other.staged_move == write.staged_move && other.self_assignment == write.self_assignment
+        && other.replacing == write.replacing).then_some(write)
   }
 
-  /// The outgoing value of an assignment drops after its RHS has finished.
-  /// rustc attributes this terminator to the LHS, even for a multiline RHS.
-  pub(crate) fn reassign_drop_at(&self, lhs: &Expr<'_>, target: &ResourceAccessPoint) -> Option<(usize, bool)> {
-    let mut drops = self.effects.get(&lhs.span.with_parent(None))?.iter().filter(|(_, e)|
-      matches!(&e.fact, crate::facts::Fact::Drop { path, at_reassign: true, .. } if path == target.name()));
-    let &(row, e) = drops.next()?;
-    if drops.next().is_some() { return None; }
-    Some((row, !self.body_facts.is_some_and(|b| b.skipped_closure_returns.contains_key(&e.location.block))))
+  pub(crate) fn write_rap(&self, column: &crate::facts::WriteColumn) -> Option<ResourceAccessPoint> {
+    self.raps.place(column.local, &column.name).map(|rd| rd.rap.clone())
+  }
+
+  pub(crate) fn note_assignment_arrivals(&mut self, first: usize, lhs: &ResourceTy, write: &crate::facts::AssignmentWrite) {
+    let mut destinations = BTreeSet::new();
+    destinations.extend(lhs.extract_rap().map(|rap| *rap.hash()));
+    if let Some(drop) = &write.replacing {
+      destinations.extend(drop.fields.iter().filter_map(|field| self.write_rap(&field.column))
+        .map(|rap| *rap.hash()));
+    }
+    let point = self.assignment_occurrence(write);
+    for (_, event) in self.preprocessed_events.get(first..).unwrap_or_default() {
+      if matches!(event, ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. }
+        | ExternalEvent::Bind { to, .. } if to.extract_rap().is_some_and(|r| destinations.contains(r.hash()))) {
+        self.row_layout.assignment_stores.insert(event.get_id(), point);
+      }
+    }
+  }
+
+  pub(crate) fn assignment_occurrence(&self, write: &crate::facts::AssignmentWrite) -> crate::event_order::AssignmentOccurrence {
+    crate::event_order::AssignmentOccurrence {
+      body: self.mir_body.source.def_id(), store: write.at, drop: write.drop_at,
+    }
   }
 
   pub(crate) fn unfinished_vec(&self, expr: &'tcx Expr<'tcx>) -> bool {

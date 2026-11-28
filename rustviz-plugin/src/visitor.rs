@@ -4917,17 +4917,6 @@ fn pat_refutable(pat: &Pat) -> bool {
   }
 }
 
-/// Whether `a` and `b` name the same place: the same local, or the same
-/// field of the same place (`v` and `v`, `p.f` and `p.f`).
-fn same_place(a: &Expr, b: &Expr) -> bool {
-  match (a.kind, b.kind) {
-    (ExprKind::Path(QPath::Resolved(None, pa)), ExprKind::Path(QPath::Resolved(None, pb))) =>
-      matches!((pa.res, pb.res), (Res::Local(x), Res::Local(y)) if x == y),
-    (ExprKind::Field(ra, fa), ExprKind::Field(rb, fb)) => fa.name == fb.name && same_place(ra, rb),
-    _ => false,
-  }
-}
-
 /// `x`, `p.f`, `v[i]`, `*r`: an expression that names a place.
 fn is_place_expr(e: &Expr) -> bool {
   match e.kind {
@@ -4939,7 +4928,175 @@ fn is_place_expr(e: &Expr) -> bool {
 
 
 
+pub(crate) struct AssignmentDot {
+  rap: ResourceAccessPoint,
+  maybe_moved: bool,
+  by_cond: bool,
+  loop_head: bool,
+  parts: Option<ReassignParts>,
+  init: Option<InitBy>,
+  payload: bool,
+  contents_gone: bool,
+  flag: bool,
+}
+
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  pub(crate) fn assignment_drops(&self, write: &crate::facts::AssignmentWrite, init: Option<InitBy>,
+    static_place: Option<&ResourceAccessPoint>, arm_drop: Option<&str>) -> Option<Vec<AssignmentDot>> {
+    let payload = write.dest.as_ref().is_some_and(|p| p.payload);
+    let rap = write.dest.as_ref().and_then(|column| self.write_rap(column)).or_else(|| static_place.cloned())?;
+    if !write.runs || write.skipped {
+      // These stores still affect borrow checking. The skipped-write
+      // title explains that no runtime drop happens on this path.
+      return (!rap.drops_nothing() || write.drop_at.is_some()).then(|| vec![AssignmentDot {
+        rap, maybe_moved: false, by_cond: false, loop_head: false,
+        parts: None, init: None, payload, contents_gone: false, flag: false,
+      }]);
+    }
+    let drop = write.replacing.as_ref()?;
+    let how = arm_drop.unwrap_or(drop.how);
+    if arm_drop == Some("nothing_to_drop") { return None; }
+    if payload && write.direct && matches!(rap, ResourceAccessPoint::Owner(_)) && matches!(how, "drops_if_init" | "nothing_to_drop") {
+      // The write is already on this very column, with its payload
+      // drop (when any) in the title. A second event would duplicate it.
+      return None;
+    }
+    let box_payload = if drop.box_payload_maybe_moved {
+      match &rap {
+        ResourceAccessPoint::Owner(Owner { holds: Some(holds), .. })
+        | ResourceAccessPoint::Struct(Struct { holds: Some(holds), .. }) =>
+          holds.strip_suffix(" it holds").map(str::to_owned),
+        _ => None,
+      }
+    } else { None };
+    let parts_for = |p: &crate::facts::PartialDrop, box_parts, box_payload| {
+      let by_cond = p.conditional.iter().filter_map(|name| self.raps.get(name))
+        .any(|r| self.maybe_moved_by_let_now(r.rap.name()) || self.moved_by_chain_condition(&r.rap));
+      ReassignParts {
+        moved: p.moved.clone(), maybe_moved: p.conditional.clone(), dropped: p.dropped.clone(),
+        refilled: p.refilled.clone(),
+        by_cond, flag: p.flag, box_parts, box_payload,
+        other_drops: p.drops_resource && (p.incomplete || p.moved.is_empty() && p.conditional.is_empty()),
+      }
+    };
+    let conditional = how == "drops_if_init";
+    let first_assignment = init == Some(InitBy::EarlierIteration) || self.given_by_loop_now(&rap);
+    let init = if !conditional {
+      None
+    } else if !drop.flag {
+      Some(InitBy::IfInitialized)
+    } else {
+      init.or_else(|| {
+        if first_assignment { return Some(InitBy::EarlierIteration); }
+        if let Some(nested) = self.maybe_init_by_loop_now(&rap) {
+          return Some(if nested { InitBy::DropFlag } else { InitBy::Loop });
+        }
+        if arm_drop.is_some() { return Some(InitBy::DropFlag); }
+        let entry = drop.may_have_moved.then(|| self.maybe_entry_untouched_now(&rap)).flatten();
+        entry.and_then(|(outer, rounds)| match (outer, rounds) {
+          (Some(moved), _) => Some(InitBy::OuterLoop { moves: moved }),
+          (None, true) => Some(InitBy::EarlierIteration),
+          (None, false) => self.loop_may_end_before(self.mir_body.source_info(write.at).span).then_some(InitBy::FirstPass),
+        }).or_else(|| {
+          ((!drop.may_have_moved || drop.may_be_refilled) && !self.maybe_moved_by_loop_head_now(rap.name()))
+            .then_some(InitBy::DropFlag)
+        })
+      })
+    };
+    let dot = |rap: ResourceAccessPoint, conditional, moved, parts, payload, contents_gone, flag| {
+      let maybe_moved = conditional && moved && !first_assignment;
+      let by_cond = maybe_moved && (self.moved_by_chain_condition(&rap) || self.maybe_moved_by_let_now(rap.name()));
+      let loop_head = maybe_moved && self.maybe_moved_by_loop_head_now(rap.name());
+      AssignmentDot {
+        rap, maybe_moved, by_cond, loop_head, parts,
+        init: if conditional { init } else { None }, payload, contents_gone, flag,
+      }
+    };
+    let mut dots = Vec::new();
+    let parts = drop.partial.as_ref().filter(|p| p.drops_resource || !p.moved.is_empty())
+      .map(|p| parts_for(p, drop.box_parts, box_payload));
+    if how != "nothing_to_drop" || parts.is_some() {
+      dots.push(dot(rap, conditional, drop.may_have_moved, parts, payload, drop.contents_gone, drop.flag));
+    }
+    dots.extend(drop.fields.iter().filter_map(|field| {
+      let rap = self.write_rap(&field.column)?;
+      let parts = field.partial.as_ref().map(|p| parts_for(p, false, None));
+      let refilled = drop.partial.as_ref().is_some_and(|parent| parent.refilled.contains(&field.column.name));
+      let mut event = dot(rap, field.conditional, field.may_have_moved && !refilled, parts, field.column.payload, field.contents_gone, field.flag);
+      if field.conditional {
+        event.init = if !field.flag { Some(InitBy::IfInitialized) }
+          else if refilled { Some(InitBy::DropFlag) }
+          else { event.init };
+      }
+      Some(event)
+    }));
+    Some(dots)
+  }
+
+  pub(crate) fn emit_assignment_drops(&mut self, row: usize, write: &crate::facts::AssignmentWrite, events: Vec<AssignmentDot>) {
+    for AssignmentDot { rap, maybe_moved, by_cond, loop_head, parts, init, payload, contents_gone, flag } in events {
+      self.row_layout.assignment_stores.insert(*self.unique_id, self.assignment_occurrence(write));
+      self.add_external_event(row, ExternalEvent::OwnerDropAtReassign {
+        ro: rap, id: *self.unique_id, maybe_moved, by_cond, loop_head,
+        parts, maybe_init: init, payload, contents_gone, flag, skipped: !write.runs || write.skipped,
+      });
+      *self.unique_id += 1;
+    }
+  }
+
+  pub(crate) fn record_assignment_order(&self, order: &mut BTreeMap<usize, (usize, usize)>) {
+    use crate::event_order::AssignmentOccurrence;
+    fn record(
+      body: &rustc_middle::mir::Body<'_>, events: &[(usize, ExternalEvent)],
+      writes: &BTreeMap<usize, AssignmentOccurrence>, staged: &[usize],
+      order: &mut BTreeMap<usize, (usize, usize)>,
+    ) {
+      let mut rows = BTreeMap::<_, Vec<_>>::new();
+      let mut shared = BTreeSet::new();
+      for (row, event) in events {
+        if let ExternalEvent::Branch { branches, .. } = event {
+          for arm in branches {
+            record(body, &arm.e_data, writes, staged, order);
+          }
+        }
+        if staged.contains(&event.get_id()) {
+          shared.insert(row);
+        }
+        if event.is_var_arrow_ev() {
+          if let Some(point) = writes.get(&event.get_id()) {
+            rows.entry(row).or_default().push((event.get_id(), *point));
+          }
+        }
+      }
+      let dom = body.basic_blocks.dominators();
+      let before = |a: rustc_middle::mir::Location, b: rustc_middle::mir::Location| {
+        if a.block == b.block { a.statement_index < b.statement_index }
+        else { dom.dominates(a.block, b.block) }
+      };
+      // The same arrow can depict an earlier staged move and a later
+      // store. A cycle's source and destination dots need the shared row
+      // so that the outgoing move still precedes the incoming store.
+      for (_, mut effects) in rows.into_iter().filter(|(row, effects)| !shared.contains(row) && effects.len() > 1) {
+        if !effects.iter().any(|(_, effect)| effect.drop.is_some()) || !effects.iter().enumerate().all(|(i, (_, a))| effects[i + 1..].iter().all(|(_, b)|
+          a == b || before(a.store, b.drop.unwrap_or(b.store)) || before(b.store, a.drop.unwrap_or(a.store)))) {
+          continue;
+        }
+        effects.sort_by(|(_, a), (_, b)| {
+          if before(a.store, b.store) { std::cmp::Ordering::Less }
+          else if before(b.store, a.store) { std::cmp::Ordering::Greater }
+          else { std::cmp::Ordering::Equal }
+        });
+        let group = effects[0].0;
+        for (rank, same_store) in effects.chunk_by(|a, b| a.1 == b.1).enumerate() {
+          for (id, _) in same_store {
+            order.insert(*id, (group, rank));
+          }
+        }
+      }
+    }
+    record(self.mir_body, self.preprocessed_events, &self.row_layout.assignment_stores, &self.moves_out_first, order);
+  }
+
   fn visit_expr_at(&mut self, expr: &'tcx Expr<'tcx>) {
     // A value a branch of the returned `if` / `match` yields goes to
     // the caller once it's evaluated, inside its branch (#674).
@@ -5304,7 +5461,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // reference, "the resource r points to is modified through *r".
         // An element (`v[i] += 1`) has no column of its own: the write
         // goes on the receiver's, as an in-place update.
-        match self.resource_of_lhs(lhs_expr) {
+        let write = self.assignment_write(lhs_expr, expr.span);
+        let line_num = write.map_or(line_num, |w| w.row);
+        let named = write.filter(|w| w.direct).and_then(|w| w.dest.as_ref())
+          .filter(|p| !p.payload).and_then(|p| self.write_rap(p)).map(ResourceTy::Value);
+        match named.or_else(|| self.resource_of_lhs(lhs_expr)) {
           Some(lhs_rty @ (ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..))) => {
             let lhs_rty = match lhs_rty {
               ResourceTy::Deref(r) => match self.projected_access(expr.span, &r, |f| match f {
@@ -6021,7 +6182,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     };
     let Some(decl) = self.uninit_locals.remove(&hirid) else {
-      return self.reassign_from_branches(hirid, lhs_expr, cond, rhs_expr);
+      return self.reassign_from_branches(hirid, lhs_expr, cond, rhs_expr, expr.span);
     };
     let prev = self.defer_arm_binds.replace(cond.span);
     self.init_deferred_local(hirid, decl, cond);
@@ -6032,7 +6193,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (An immutable `let x;` can't be assigned twice, E0384: a loop
     // that assigns it leaves right after.)
     if matches!(decl.annotation.1, Mutability::Mut) {
-      self.drop_earlier_iteration(hirid, lhs_expr);
+      self.drop_earlier_iteration(hirid, lhs_expr, expr.span);
     }
     true
   }
@@ -6155,7 +6316,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// as holding a borrow; returns false, having done nothing, for others.
   /// `rhs_expr` is the conditional; `whole`, the right-hand side it is
   /// in (the same, or a constructor around it, #1225).
-  fn reassign_from_branches(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>, whole: &'tcx Expr<'tcx>) -> bool {
+  fn reassign_from_branches(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>, rhs_expr: &'tcx Expr<'tcx>, whole: &'tcx Expr<'tcx>, span: rustc_span::Span) -> bool {
     if self.maybe_init_locals.contains(&hirid) || self.destructure_srcs.contains_key(&hirid) {
       return false;
     }
@@ -6169,12 +6330,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if rap.holds_borrow() || rap.is_union() || !self.struct_children(rap.name()).is_empty() {
       return false;
     }
-    let drops = self.needs_drop(lhs_ty, owner);
-    let prev = self.reassign_arms.replace((rap.clone(), drops));
+    let write = self.assignment_write(lhs_expr, span);
+    let drop = write.filter(|w| w.runs && !w.skipped).and_then(|w| w.replacing.as_ref());
+    let mut arms = Vec::new();
+    conditional_branch_bodies(rhs_expr, &mut arms);
+    let project_into_arms = drop.is_some_and(|drop| arms.iter().filter_map(|arm| branch_value_expr(arm))
+      .filter(|value| self.tcx.typeck(value.hir_id.owner).expr_ty_opt(value).is_some_and(|ty| !ty.is_never()))
+      .all(|value| drop.on_input(value.span).is_some()));
+    let prev = self.reassign_arms.replace((rap.clone(), write.filter(|_| project_into_arms)));
     self.match_rhs(ResourceTy::Value(rap.clone()), rhs_expr, Evt::Move);
     self.reassign_arms = prev;
     self.visit_expr(whole);
     self.bind_left_arms(rhs_expr);
+    if !project_into_arms {
+      if let Some(write) = write {
+        if let Some(drops) = self.assignment_drops(write, None, None, None) {
+          self.emit_assignment_drops(write.row, write, drops);
+        }
+      }
+    }
     true
   }
 
@@ -6410,22 +6584,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // r's column), or as nothing for a place with no column of its own
     // to note it on (`p.r = p.r;`); it used to draw r lending to itself
     // (#1556).
-    if destructure_hid.is_none() && matches!(expr.kind, ExprKind::Assign(..))
-      && !expr.span.from_expansion() && same_place(lhs_expr, rhs_expr) {
+    let write = self.assignment_write(lhs_expr, expr.span);
+    if destructure_hid.is_none() && write.is_some_and(|w| w.self_assignment && !w.dest.as_ref().is_some_and(|d| d.payload)) {
       let owner = lhs_expr.hir_id.owner;
       let ty = self.tcx.typeck(owner).node_type(lhs_expr.hir_id);
       if ty.ref_mutability() == Some(Mutability::Mut) {
+        self.visit_expr(rhs_expr);
         if local_of_path(lhs_expr).is_none() || !self.note_resliced_in_place(lhs_expr, Vec::new()) {
           self.visit_expr(lhs_expr);
         }
         return;
       }
       if (!ty.is_ref() && !self.ty_is_copy(ty, owner)) || ty.ref_mutability() == Some(Mutability::Not) {
+        self.visit_expr(rhs_expr);
         self.visit_expr(lhs_expr);
         return;
       }
     }
-    self.visit_expr(lhs_expr);
     // `s = return;`, `s = panic!()`, `s = break;` (#1142): the right-hand
     // side runs first and never finishes, so the assignment never
     // happens: no new value, and no drop of the old one. What the exit
@@ -6457,6 +6632,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.visit_expr(rhs_expr);
     }
     let rhs_ids = rhs_lo..*self.unique_id;
+    self.visit_expr(lhs_expr);
 
     // `x = rhs` where x came from `let x;` and is still
     // uninitialized here: this initializes x (#234). If only some
@@ -6471,7 +6647,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           // (An immutable `let x;` can't be assigned twice, E0384:
           // a loop that assigns it leaves right after.)
           if matches!(decl.annotation.1, Mutability::Mut) {
-            self.drop_earlier_iteration(hirid, lhs_expr);
+            self.drop_earlier_iteration(hirid, lhs_expr, expr.span);
           }
           return;
         }
@@ -6491,7 +6667,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let lhs_is_union_field = matches!(lhs_expr.kind,
       ExprKind::Field(recv, _) if self.is_union_typed(recv));
     let lhs_ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
-    let is_copyable = self.ty_is_copy(lhs_ty, lhs_expr.hir_id.owner);
+    let is_copyable = write.map_or_else(|| self.ty_is_copy(lhs_ty, lhs_expr.hir_id.owner), |w| w.copy);
     let e = if lhs_ty.is_ref() {
       match lhs_ty.ref_mutability().unwrap() {
         Mutability::Not => Evt::Copy,
@@ -6515,7 +6691,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // `hold.r`, which has a column: drawn as `hold.r = &t;` is (#531),
     // with t's borrow going into hold.r and the old lender kept
     // borrowed while hold is in use (#1361).
-    let lhs_rty = match self.resource_of_lhs(lhs_expr).or_else(|| self.ref_field_through_local_ref(lhs_expr)) {
+    let direct = write.filter(|w| w.direct).and_then(|w| w.dest.as_ref());
+    let drawn = direct.filter(|p| !p.payload && !lhs_ty.is_ref() && !lhs_is_union_field)
+      .and_then(|p| self.write_rap(p)).map(ResourceTy::Value);
+    let lhs_rty = match drawn.or_else(|| self.resource_of_lhs(lhs_expr)).or_else(|| self.ref_field_through_local_ref(lhs_expr)) {
       Some(rty) => rty,
       None => {
         if let ExprKind::AddrOf(..) = rhs_expr.kind {
@@ -6553,42 +6732,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       ResourceTy::Value(rap) if rap.is_static() => false,
       _ => true,
     };
-    let assign_kind = || if is_copyable {
-      PlaceWrite::AssignCopy
-    } else if self.needs_drop(lhs_ty, lhs_expr.hir_id.owner) {
-      PlaceWrite::AssignDropsOld
-    } else {
-      PlaceWrite::AssignOwned
-    };
-    // `*b = v` on a Box `b` whose contents a `let w = *b;` moved out
-    // before (#928): on every path, nothing of the old contents is
-    // left to drop; on some paths only, a drop flag decides.
-    let box_contents_write = |rap: &ResourceAccessPoint, write: PlaceWrite| {
-      let box_deref = !rap.is_ref() && matches!(lhs_expr.kind, ExprKind::Unary(UnOp::Deref, inner)
-        if self.tcx.typeck(inner.hir_id.owner).node_type(inner.hir_id).is_box());
-      match write {
-        PlaceWrite::AssignDropsOld if box_deref => match self.box_payload_drop_at(lhs_expr, rap) {
-          Some("nothing_to_drop") => PlaceWrite::AssignOverMoved,
-          _ => match self.rap_ownership_now(rap.name()) {
-            Ownership::None => PlaceWrite::AssignOverMoved,
-            Ownership::Maybe => PlaceWrite::AssignMaybeMoved {
-              by_cond: self.maybe_moved_by_let_now(rap.name()) || self.moved_by_chain_condition(rap),
-            },
-            Ownership::Held => write,
-          },
-        },
-        _ => write,
-      }
+    let replacing = write.filter(|w| w.runs).and_then(|w| w.replacing.as_ref());
+    let by_cond = lhs_rty.extract_rap().is_some_and(|rap|
+      self.maybe_moved_by_let_now(rap.name()) || self.moved_by_chain_condition(rap));
+    let assign_kind = || match (is_copyable, replacing) {
+      (true, _) => PlaceWrite::AssignCopy,
+      (_, Some(drop)) if drop.how == "nothing_to_drop" => PlaceWrite::AssignOverMoved,
+      (_, Some(drop)) if drop.how == "drops_if_init" => PlaceWrite::AssignMaybeMoved { by_cond, flag: drop.flag },
+      (_, Some(drop)) if drop.how == "drops" => PlaceWrite::AssignDropsOld,
+      _ => PlaceWrite::AssignOwned,
     };
     let lhs_rty = match lhs_rty {
       ResourceTy::Deref(rap) if is_assign && (!lhs_ty.is_ref() || !repoints_ref_var) => {
-        let write = box_contents_write(&rap, assign_kind());
-        ResourceTy::Deref(rap.with_place_write(write))
+        ResourceTy::Deref(rap.with_place_write(assign_kind()))
       }
       // A reference-typed field (`h.r = &x`) is not an owned or Copy
       // value; leave its wording alone.
       ResourceTy::DerefField(rap, place, _, holds) if is_assign && !lhs_ty.is_ref() =>
         ResourceTy::DerefField(rap, place, assign_kind(), holds),
+      ResourceTy::Index(rap, place, _) if is_assign && !lhs_ty.is_ref() =>
+        ResourceTy::Index(rap, place, assign_kind()),
       // A write to a union (`u.f = e`, `u = U { .. }`) is flagged
       // too, with the Copy-ness of the value written, so the dot
       // can say "assigned a copy of y" or "acquires ownership of
@@ -6606,8 +6769,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // (what of it a move left, #628). A part moved out earlier holds
     // a value again, dropped at b's scope end (#893). The Box keeps
     // its heap allocation: the drop names `*b` (`payload`).
-    let box_payload = self.box_payload_write(lhs_expr)
-      .filter(|b| is_assign && self.rap_holds_resource_now(b.name()));
+    let box_payload = direct.filter(|p| p.payload).and_then(|p| self.write_rap(p))
+      .filter(|r| matches!(r, ResourceAccessPoint::Struct(Struct { is_box: true, is_member: false, .. })));
     let lhs_rty = match &box_payload {
       Some(b) => ResourceTy::Value(b.clone()),
       None => lhs_rty,
@@ -7108,31 +7271,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
 
-    // Owned non-Copy reassignment: the previous value is dropped
-    // at this line. Two shapes:
-    //   `y = x`  — drop y's prior resource (its own resource is
-    //              what's being overwritten).
-    //   `*p = x` — drop the resource currently pointed to via p
-    //              (i.e. the lender's resource, found through the
-    //              borrow_map alias chain).
-    // Skip when the type is Copy (i32 etc.) or a reference (the
-    // ref-reassignment branch above already emits the appropriate
-    // SDie / MDie / RefDie events for those).
-    // Decide the drop target BEFORE match_rhs runs, since
-    // match_rhs would update rap_holds_resource_now's state for
-    // the lhs (the new Move-into makes it look like the old
-    // resource is still held). Emit the event AFTER match_rhs so
-    // its dot is drawn over the regular Acquire dot at the same
-    // (x, y) — otherwise the colored Acquire circle paints over
-    // the white down-arrow triangle and the drop becomes
-    // invisible.
-    // Assigning a whole union (`u = U { .. }`) drops nothing unless
-    // the union has its own `Drop` impl: a union never drops its
-    // fields (#191).
-    let union_without_drop = lhs_ty.is_union()
-      && !self.needs_drop(lhs_ty, lhs_expr.hir_id.owner);
-    // Nor does overwriting a `ManuallyDrop<T>` drop the old `T` (#283).
-    let lhs_is_manually_drop = lhs_ty.ty_adt_def().map_or(false, |d| d.is_manually_drop());
     // `*x = …` with x a reference to part of a variable's resource
     // (`v.get_mut(0)`, `&mut v[0]`): only that part is overwritten, and
     // the variable isn't given a new resource (#861).
@@ -7143,229 +7281,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     } else {
       self.part_owner_behind_ref(&lhs_rty, lhs_expr, lhs_ty)
     };
-    let mut payload_behind_ref = false;
-    // `t = (t.1, t.0);`: the right-hand side is evaluated first and
-    // moves t's fields out, so the old value they held isn't dropped
-    // by the assignment (#1138). Seen by `reassign_parts` as moved.
-    // `p = Pair { a: s2, b: p.into_a() }` moves all of p, so each of
-    // its fields (#1509).
-    self.rhs_self_moved = match (&lhs_rty, expr.kind) {
-      (ResourceTy::Value(rap @ ResourceAccessPoint::Struct(_)), ExprKind::Assign(..)) => {
-        let moved = locals_moved_by(self.tcx, rhs_expr);
-        let whole = moved.contains(rap.name());
-        #[expect(clippy::disallowed_methods, reason = "collected into a BTreeSet")]
-        let parts: BTreeSet<String> = self.raps.keys()
-          .filter(|m| *m != rap.name() && place_within(m, rap.name()) && (whole || moved.contains(*m)))
-          .cloned()
-          .collect();
-        parts
-      }
-      _ => BTreeSet::new(),
-    };
-    let drops_old = !lhs_ty.is_ref() && !is_copyable && !lhs_is_union_field && !union_without_drop && !lhs_is_manually_drop && self.needs_drop(lhs_ty, lhs_expr.hir_id.owner);
-    let mut contents_gone: Option<u64> = None;
-    let drop_target: Option<ResourceAccessPoint> =
-      if drops_old {
-        match &lhs_rty {
-          ResourceTy::Value(rap) => {
-            // Plain reassign — only emit the drop if y currently
-            // holds a resource (rules out `let y; y = x;` first
-            // assignment, and `let y = a; let z = y; y = x;` where
-            // y was moved out before reassignment). A value moved
-            // on only some paths above counts; the event says so
-            // (`maybe_moved` below).
-            //
-            // A destructuring assignment that also moves y's old
-            // value out (`(a, b) = (b, a)`) doesn't drop it, even
-            // if that move is drawn after y's new value arrives.
-            let all_moved_by_rhs = !self.rhs_self_moved.is_empty()
-              && self.reassign_parts(rap.name()).is_some_and(|p| p.dropped.is_empty() && p.maybe_moved.is_empty());
-            // A Box whose contents only were moved out still has its
-            // heap allocation, which the assignment frees (#1145).
-            let gone = rap.box_contents_moved() && self.box_contents_only_moved_now(rap.name());
-            if gone {
-              contents_gone = Some(*rap.hash());
-            }
-            if (self.rap_holds_resource_now(rap.name()) || gone)
-              && !self.destructure_moved.contains(rap.name()) && !all_moved_by_rhs {
-              Some(rap.clone())
-            } else {
-              None
-            }
-          }
-          ResourceTy::Deref(p_rap) => {
-            // Deref reassign through a &mut — the owner p points to
-            // (found through its lender, and through reborrows:
-            // `let f = &mut r.a; *f = …` overwrites `s.a`) holds
-            // the resource being overwritten. Borrow checker
-            // guarantees it currently holds (otherwise *p
-            // wouldn't be a valid place to write to), so we don't
-            // need rap_holds_resource_now here. A reference to
-            // part of the owner's resource overwrites only that part:
-            // its drop is stated with the write (`write_part_behind_ref`).
-            //
-            // `**rb = v` with `rb: &mut Box<String>` writes the
-            // Box's contents: only the old String is dropped, the
-            // owner keeps its Box (#941), drawn as `*bx`
-            // (`payload`). A Box deref further in (`***x` through
-            // a `Box<Box<_>>`) isn't modelled: no drop on the owner's
-            // column (the reference's dot says the old value is
-            // dropped).
-            if part_owner.is_some() {
-              None
-            } else {
-              match self.box_deref_through_ref(lhs_expr) {
-                // `*b = v` with b a Box drawn as one column (`Box<String>`):
-                // the old contents are dropped on b's own column, which
-                // keeps its heap allocation, as `**rb = v` draws it on
-                // the owner's (#1345). (Only when b's contents are there
-                // on every path: `AssignDropsOld`, see `box_contents_write`.
-                // Also in a condition, whose events are drawn in its arm:
-                // `mutate_branch_lines` keeps the drop on the write's dot,
-                // #1391.)
-                None if !p_rap.is_ref() && matches!(p_rap.place_write(), PlaceWrite::AssignDropsOld)
-                  && matches!(lhs_expr.kind, ExprKind::Unary(UnOp::Deref, inner)
-                    if self.tcx.typeck(inner.hir_id.owner).node_type(inner.hir_id).is_box()) => {
-                  payload_behind_ref = true;
-                  Some(p_rap.clone())
-                }
-                None => self.owner_behind_ref(p_rap, ""),
-                Some(true) => {
-                  payload_behind_ref = true;
-                  self.owner_behind_ref(p_rap, "")
-                }
-                Some(false) => None,
-              }
-            }
-          }
-          ResourceTy::DerefField(p_rap, _, _, _) => {
-            // `r.a = v` after `let r = &mut s;`: the field being
-            // overwritten is the lender's `s.a`, so that's where
-            // the old value is dropped (#152). Only when the lender
-            // is a local with per-field columns; a parameter's
-            // lender is the caller, which has no column here.
-            self.field_column_behind_ref(lhs_expr, p_rap)
-          }
-          _ => None,
-        }
-      } else {
-        None
-      };
-
-    // Overwriting a whole struct drops the resources its fields
-    // still own too (`d = c;` drops the old `d.data`), also when
-    // the struct is overwritten through a reference (`*r = S {..}`
-    // / `r.inner = I {..}` drop the lender's `s.a` / `s.inner.v`).
-    let field_drop_targets: Vec<ResourceAccessPoint> = match (&drop_target, &lhs_rty) {
-      (Some(rap @ ResourceAccessPoint::Struct(_)),
-       ResourceTy::Value(_) | ResourceTy::Deref(_) | ResourceTy::DerefField(..)) => {
-        self.struct_fields_holding_resource(rap.name()).into_iter()
-          .filter(|f| !self.rhs_self_moved.iter().any(|m| place_within(f.name(), m)))
-          .collect()
-      }
-      _ => Vec::new(),
-    };
-
-    // Whether each old value is there on every path, decided
-    // before match_rhs too (see above). `*p = x` writes through a
-    // live `&mut`, so its lender holds a value.
-    let mut maybe_moved: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
-      .map(|rap| matches!(lhs_rty, ResourceTy::Value(_))
-        && self.rap_ownership_now(rap.name()) == Ownership::Maybe)
+    let moved_parts: Vec<_> = replacing.into_iter().flat_map(|drop| &drop.moved_columns)
+      .filter_map(|part| self.write_rap(part))
+      .filter(|rap| !rap.never_drops() && !rap.is_ref())
       .collect();
-    // Of those, the ones maybe-moved only because the loop can come
-    // back round with them moved (#992).
-    let loop_head: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
-      .zip(maybe_moved.iter())
-      .map(|(rap, maybe)| *maybe && self.maybe_moved_by_loop_head_now(rap.name()))
-      .collect();
-    // And whether a let-chain's condition or a match guard may have
-    // moved it (#281, #247): also before match_rhs, whose new value
-    // for it ends that.
-    let by_conds: Vec<bool> = drop_target.iter().chain(field_drop_targets.iter())
-      .zip(maybe_moved.iter())
-      .map(|(rap, maybe)| *maybe && self.moved_by_chain_condition(rap))
-      .collect();
-    // A struct or tuple some of whose parts were moved out before
-    // (on every path, or some only): only the parts still there are
-    // dropped (#628).
-    let parts: Vec<Option<ReassignParts>> = drop_target.iter().chain(field_drop_targets.iter())
-      .zip(maybe_moved.iter())
-      .map(|(rap, maybe)| match rap {
-        ResourceAccessPoint::Struct(_) if !maybe && matches!(lhs_rty, ResourceTy::Value(_)) => self.reassign_parts(rap.name()),
-        _ => None,
-      })
-      .collect();
-
-    // `s = …` in a loop's body, where s holds nothing on the path from
-    // before the loop (moved before it) but a later time round may
-    // hold what an earlier one gave it (#1001): drawn as a drop on the
-    // assignment, as for a `let x;` local (#786). Its field columns
-    // likewise. And after a loop that may have ended before giving it
-    // a value, a drop flag decides (`InitBy::Loop`).
-    let mut earlier_iteration: Vec<ResourceAccessPoint> = Vec::new();
-    if let (ResourceTy::Value(rap), ExprKind::Assign(..)) = (&lhs_rty, expr.kind) {
-      if drops_old && drop_target.is_none() && maybe_init.is_none() && self.given_by_loop_now(rap) {
-        earlier_iteration.push(rap.clone());
-        for m in self.struct_members_deep(rap.name()) {
-          if !m.never_drops() && !m.is_plain_value() && !m.is_ref() && self.given_by_loop_now(&m) {
-            earlier_iteration.push(m);
-          }
-        }
-      }
-      if drop_target.is_some() && maybe_init.is_none() {
-        // After a loop inside another, every run of which may start
-        // with s holding nothing or a value (#1032), only the drop
-        // flag knows (as #1027's `DropFlag`).
-        maybe_init = match self.maybe_init_by_loop_now(rap) {
-          Some(false) => Some(InitBy::Loop),
-          Some(true) => Some(InitBy::DropFlag),
-          None => None,
-        };
-      }
-      // `s = …` in a loop's body where s only may hold a value as the
-      // loop starts (a branch above moved it, #1012), with nothing in
-      // between: the first time round, the old value is dropped only
-      // if no branch above moved it; a later time round, only if the
-      // time round before left s holding one. Marked as an
-      // `EarlierIteration` drop that's also `maybe_moved`. In a loop
-      // inside another that s was declared before, an earlier run of
-      // this loop may have given s a value too (#1019): `OuterLoop`.
-      if drop_target.as_ref() == Some(rap) && maybe_init.is_none()
-        && maybe_moved.iter().all(|m| *m) && loop_head.iter().all(|l| !*l) {
-        let entries: Option<Vec<(Option<bool>, bool)>> = drop_target.iter().chain(field_drop_targets.iter())
-          .map(|r| self.maybe_entry_untouched_now(r)).collect();
-        if let Some(entries) = entries {
-          maybe_init = if entries.iter().any(|(n, _)| n.is_some()) {
-            Some(InitBy::OuterLoop { moves: entries.iter().any(|(n, _)| *n != Some(false)) })
-          } else if entries.iter().all(|(_, rounds)| !rounds) {
-            // A loop that never comes back round (#1467): there is no
-            // later time round. The loop may end before this runs (a
-            // `while` / `for`, or something before it leaves the loop):
-            // then the old value, if any, is still there after it. Or
-            // not (a bare `loop` gets here first): as if there were no
-            // loop.
-            self.loop_may_end_before(expr.span).then_some(InitBy::FirstPass)
-          } else {
-            Some(InitBy::EarlierIteration)
-          };
-        }
-      }
-      // `s = …` in a loop's body that the drawing reaches with s
-      // holding a value, where rustc says it only may (#1027): a loop
-      // above, inside this one, may have ended before giving s one
-      // after a branch above moved it, and on a later time round the
-      // value it holds may be one the time round before gave it. Only
-      // the drop flag knows. (A struct's field columns go with it.)
-      if drop_target.as_ref() == Some(rap) && maybe_init.is_none()
-        && maybe_moved.iter().all(|m| !*m) && parts.iter().all(|p| p.is_none())
-        && self.exit_frames.iter().any(|f| matches!(f, ExitFrame::Loop { .. }))
-        && drop_target.iter().chain(field_drop_targets.iter())
-          .all(|r| self.ownership_before_assign(r.name(), lhs_expr, expr.span) == Some(Ownership::Maybe)) {
-        maybe_init = Some(InitBy::DropFlag);
-        maybe_moved.iter_mut().for_each(|m| *m = true);
-      }
-    }
+    let static_place = lhs_rty.extract_rap().filter(|rap| rap.is_static());
+    let drops = write.and_then(|w| self.assignment_drops(w, maybe_init, static_place, None));
+    let has_drop = drops.as_ref().is_some_and(|events| !events.is_empty());
 
     // `q = Some(if c { &a } else { &b });` with q holding borrows
     // (#1470): as for `let q = Some(if ..)` (#1225), the constructor takes
@@ -7521,34 +7443,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           self.nest_arm_pairings(cond, rhs_ids.clone());
         }
       }
-      // A field the right-hand side moved out after it was given its
-      // new value (`t.0` in `t = (t.1, t.0)`, whose move into t.1 is
-      // drawn after t.1's into t.0) owns its new value again, as for
-      // a destructuring swap.
-      // A field moved with the whole of p by the right-hand side
-      // (`p = Pair { a: s2, b: p.into_a() }`, #1509): its move, recorded
-      // while the right-hand side was visited, goes before the new value
-      // the literal gives it on its column, as for a destructuring cycle.
-      for m in self.rhs_self_moved.iter() {
-        let Some(h) = self.raps.get(m).map(|rd| *rd.rap.hash()) else { continue };
-        let arrives = self.preprocessed_events[n_events..].iter().any(|(_, ev)| matches!(ev,
+      // An owned member moved out during the RHS before its new value
+      // arrives. On a combined dot its departure must precede the arrival.
+      for rap in moved_parts {
+        let h = rap.hash();
+        let arrives = self.preprocessed_events.get(n_events..).unwrap_or_default().iter().any(|(_, ev)| matches!(ev,
           ExternalEvent::Move { to: ResourceTy::Value(t), .. } | ExternalEvent::Copy { to: ResourceTy::Value(t), .. }
-            if *t.hash() == h));
-        let moved_out = self.preprocessed_events[..n_events].iter().rev()
-          .take_while(|(l, _)| *l == line_num)
-          .find_map(|(_, ev)| match ev {
-            ExternalEvent::Move { from: ResourceTy::Value(f), id, .. } if *f.hash() == h => Some(*id),
+            if t.hash() == h));
+        if arrives {
+          let moved_out = self.preprocessed_events.iter().find_map(|(_, ev)| match ev {
+            ExternalEvent::Move { from: ResourceTy::Value(f), id, .. } if f.hash() == h && rhs_ids.contains(id) => Some(*id),
             _ => None,
           });
-        if let (true, Some(id)) = (arrives, moved_out) {
-          if !self.moves_out_first.contains(&id) {
+          if let Some(id) = moved_out.filter(|id| !self.moves_out_first.contains(id)) {
             self.moves_out_first.push(id);
           }
         }
-      }
-      for m in std::mem::take(&mut self.rhs_self_moved) {
-        let Some(rap) = self.raps.get(&m).map(|rd| rd.rap.clone()) else { continue };
-        if !rap.never_drops() && !rap.is_ref() && !self.rap_holds_resource_now(&m) {
+        if !self.rap_holds_resource_now(rap.name()) {
           self.add_ev(line_num, Evt::Bind, ResourceTy::Value(rap), ResourceTy::Anonymous, false);
         }
       }
@@ -7588,6 +7499,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         // holds tr's borrow (#1384).
         self.store_ref_copy_into_holder(lhs_expr, rhs_expr, n_events);
       }
+      if let Some(write) = write {
+        self.note_assignment_arrivals(n_events, &lhs_rty, write);
+      }
       self.draw_struct_field_borrow_ends(lhs_expr, struct_field_ends, false);
       // `v[1] = v[2]`: match_rhs has nothing to say about some
       // RHS shapes (an index read, a field of a call, …), but the
@@ -7623,7 +7537,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // 2`) also changes the field's own column (#854). When the old
     // value is dropped, that drop is its event; otherwise the field
     // gets an in-place write.
-    if drop_target.is_none() && field_drop_targets.is_empty() {
+    if !has_drop {
       self.write_field_behind_ref(&lhs_rty, lhs_expr, line_num);
     }
     if let Some(owner) = part_owner {
@@ -7644,53 +7558,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
 
-    let n_before_drops = self.preprocessed_events.len();
-    let payload_target = drop_target.as_ref().map(|r| *r.hash());
-    for ((((rap, maybe_moved), parts), loop_head), by_cond) in drop_target.into_iter().chain(field_drop_targets).zip(maybe_moved).zip(parts).zip(loop_head).zip(by_conds) {
-      let drop_line = if crate::facts::is_vec_expansion(self.tcx, rhs_expr.span.ctxt().outer_expn()) {
-        match self.reassign_drop_at(lhs_expr, &rap) {
-          Some((row, true)) => row,
-          Some((_, false)) => continue,
-          None => drop_line,
-        }
-      } else { drop_line };
-      let hash = *rap.hash();
-      let payload = box_payload.as_ref().is_some_and(|b| b.hash() == rap.hash())
-        || (payload_behind_ref && payload_target.is_some_and(|h| h == *rap.hash()));
-      let skipped = self.body_facts.zip(rap.owner_local()).is_some_and(|(facts, local)|
-        facts.reassignment_sites.get(&(lhs_expr.span.with_parent(None), local)) == Some(&false));
-      self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
-        ro: rap,
-        id: *self.unique_id,
-        maybe_moved,
-        by_cond,
-        loop_head,
-        parts,
-        maybe_init,
-        payload,
-        contents_gone: contents_gone.is_some_and(|h| h == hash),
-        skipped,
-      });
-      *self.unique_id += 1;
-    }
-    for ro in earlier_iteration {
-      self.add_external_event(drop_line, ExternalEvent::OwnerDropAtReassign {
-        ro,
-        id: *self.unique_id,
-        maybe_moved: false,
-        by_cond: false,
-        loop_head: false,
-        parts: None,
-        maybe_init: Some(InitBy::EarlierIteration),
-        payload: false,
-        contents_gone: false,
-        skipped: false,
-      });
-      *self.unique_id += 1;
-    }
-    if let Some(i) = drop_at {
-      let n_drops = self.preprocessed_events.len() - n_before_drops;
-      self.preprocessed_events[i..].rotate_right(n_drops);
+    if let (Some(write), Some(events)) = (write, drops) {
+      let projected = drop_at.is_some() || self.branch_value_owner.is_some();
+      let row = if projected { drop_line } else { write.row };
+      let n_before_drops = self.preprocessed_events.len();
+      self.emit_assignment_drops(row, write, events);
+      if let Some(i) = drop_at {
+        let n_drops = self.preprocessed_events.len() - n_before_drops;
+        self.preprocessed_events[i..].rotate_right(n_drops);
+      }
     }
     // `o = vec![&w];` / `o = [&w];` where o holds a borrow: o now
     // borrows w, drawn as for `let o = vec![&w];` (#1095), after the
@@ -11801,48 +11677,36 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let name = expr_to_rap_name(e, &this.tcx)?;
       this.raps.contains_key(&name).then_some(name)
     };
-    let mut moved: HashSet<String> = HashSet::new();
-    for (hid, e) in &pairs {
-      match parts.get(hid) {
-        Some((part, true)) => { moved.insert(part.clone()); }
-        Some((_, false)) => {}
-        None => if let Some(n) = moved_name(self, e) { moved.insert(n); },
-      }
-    }
-    for e in &discarded {
-      if let Some(n) = moved_name(self, e) { moved.insert(n); }
-    }
-
-    // Draw order: an assignment to `x` waits for the assignment that
-    // moves x's old value out (Kahn's algorithm, ties in source
-    // order, so the output is deterministic).
-    let dest_name: Vec<Option<String>> = assigns.iter()
+    let writes: Vec<_> = assigns.iter().map(|(expr, place, _)| self.assignment_write(place, expr.span)).collect();
+    let dest_name: Vec<_> = assigns.iter()
       .map(|(_, place, _)| expr_to_rap_name(place, &self.tcx)).collect();
-    let src_moved: Vec<Option<String>> = assigns.iter()
-      .map(|(_, _, hid)| match parts.get(hid) {
-        Some((part, moves)) => moves.then(|| part.clone()),
-        None => src_of.get(hid).and_then(|e| moved_name(self, e)),
-      }).collect();
-    let n = assigns.len();
-    let mut order: Vec<usize> = Vec::with_capacity(n);
-    let mut done = vec![false; n];
-    while order.len() < n {
-      let ready = (0..n).find(|&i| !done[i] && !(0..n).any(|j| {
-        !done[j] && j != i && dest_name[i].is_some() && src_moved[j] == dest_name[i]
-      }));
-      // Only a cycle is left: take the first one in source order.
-      let i = ready.unwrap_or_else(|| (0..n).find(|&i| !done[i]).unwrap());
-      done[i] = true;
-      order.push(i);
+    let mut order: Vec<_> = (0..assigns.len()).collect();
+    let dom = self.mir_body.basic_blocks.dominators();
+    let before = |a: usize, b: usize| {
+      let (Some(a), Some(b)) = (writes[a], writes[b]) else { return false };
+      if a.at.block == b.at.block { a.at.statement_index < b.at.statement_index }
+      else { dom.dominates(a.at.block, b.at.block) }
+    };
+    // Only writes on one executable sequence admit a total order. The
+    // borrow-checker's lowering still supplies the presentation order for
+    // an unpictured destination.
+    if order.iter().enumerate().all(|(i, a)| order[i + 1..].iter().all(|b| before(*a, *b) || before(*b, *a))) {
+      order.sort_by(|&a, &b| {
+        if before(a, b) { std::cmp::Ordering::Less }
+        else if before(b, a) { std::cmp::Ordering::Greater }
+        else { std::cmp::Ordering::Equal }
+      });
     }
-    // Destinations whose new value is drawn before their old value
-    // moves out (cycles only).
-    let mut reacquire: Vec<String> = Vec::new();
-    for (pos, &i) in order.iter().enumerate() {
-      if let Some(d) = &dest_name[i] {
-        if order[pos + 1..].iter().any(|&j| src_moved[j].as_ref() == Some(d)) && !reacquire.contains(d) {
-          reacquire.push(d.clone());
-        }
+    // The arrows combine stage and store for display. If an early store
+    // arrives on a column whose staged move has a later arrow, its move
+    // still leaves the column before its own new value arrives.
+    let mut reacquire = Vec::new();
+    for (i, &index) in order.iter().enumerate() {
+      let Some(dest) = writes[index].and_then(|w| w.dest.as_ref()) else { continue };
+      if order[i + 1..].iter().any(|&other| writes[other].and_then(|w| w.staged_move.as_ref()) == Some(dest))
+        && !reacquire.contains(&dest.name)
+      {
+        reacquire.push(dest.name.clone());
       }
     }
 
@@ -11874,15 +11738,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     {
       let lo = span_to_line(&local.span, &self.tcx);
       let hi = self.tcx.sess.source_map().lookup_char_pos(local.span.hi()).line;
-      for d in dest_name.iter().flatten() {
-        if moved.contains(d) {
-          self.destructure_swapped.push((d.clone(), lo, hi));
+      for d in writes.iter().filter_map(|w| w.and_then(|w| w.dest.as_ref())) {
+        if writes.iter().any(|w| w.and_then(|w| w.staged_move.as_ref()) == Some(d)) {
+          self.destructure_swapped.push((d.name.clone(), lo, hi));
         }
       }
     }
     self.destructure_srcs = src_of;
     self.destructure_parts = parts.into_iter().map(|(h, (n, _))| (h, n)).collect();
-    self.destructure_moved = moved;
     self.destructure_ref_data = ref_data;
     self.destructure_ref_src = ref_src;
     // Parts nothing is assigned to (`(a, _) = (s, t)`) are moved
@@ -11936,8 +11799,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let n0 = self.preprocessed_events.len();
     self.bind_existing = prev_existing;
-    for &i in &order {
+    for (rank, &i) in order.iter().enumerate() {
+      let before = self.preprocessed_events.len();
       self.visit_expr(assigns[i].0);
+      let replaced = writes[i].and_then(|write| write.dest.as_ref()).filter(|dest|
+        !order[..rank].iter().any(|&earlier| writes[earlier].and_then(|w| w.dest.as_ref()) == Some(dest))
+        && writes.iter().any(|write| write.and_then(|w| w.staged_move.as_ref()) == Some(dest)));
+      if let Some(rap) = replaced.and_then(|dest| self.write_rap(dest)).filter(|rap| !rap.is_ref()) {
+        for (_, event) in self.preprocessed_events.get(before..).unwrap_or_default() {
+          if matches!(event, ExternalEvent::Move { to: ResourceTy::Value(to), .. } if to.hash() == rap.hash()) {
+            self.row_layout.staged_replacements.insert(event.get_id());
+          }
+        }
+      }
     }
     // Every part is read before any is assigned, so in a cycle each
     // destination's old value leaves before its new one arrives, though
@@ -11976,7 +11850,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     self.destructure_srcs.clear();
     self.destructure_parts.clear();
-    self.destructure_moved.clear();
     self.destructure_ref_data.clear();
     self.destructure_ref_src.clear();
   }
@@ -13139,22 +13012,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       _ => std::slice::from_ref(pat),
     };
     alts.iter().any(|p| self.pat_parts(p, &parent, ty).is_some()).then_some(parent)
-  }
-
-  /// `*b = …` with `b` a Box whose payload's parts have columns (`b.0`,
-  /// `b.1`), and whose payload needs drop: `b`'s RAP. The new payload's
-  /// parts go into those columns, as `t = (..)` does for a local tuple,
-  /// so a part moved out earlier holds a value again and is dropped at
-  /// `b`'s scope end (#893).
-  fn box_payload_write(&self, lhs_expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
-    let ExprKind::Unary(UnOp::Deref, _) = lhs_expr.kind else { return None };
-    let ty = self.tcx.typeck(lhs_expr.hir_id.owner).node_type(lhs_expr.hir_id);
-    if !self.needs_drop(ty, lhs_expr.hir_id.owner) {
-      return None;
-    }
-    let place = self.member_place_name(lhs_expr)?;
-    let rap = self.raps.get(&place)?.rap.to_owned();
-    matches!(rap, ResourceAccessPoint::Struct(Struct { is_box: true, is_member: false, .. })).then_some(rap)
   }
 
   /// Borrows made from event id `first_id` on whose borrower is
@@ -14724,39 +14581,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// the loop, the same assignment drops the value an earlier iteration
   /// assigned, if x still holds it. Drawn as a drop on the assignment,
   /// whose text says so.
-  fn drop_earlier_iteration(&mut self, hirid: HirId, lhs_expr: &'tcx Expr<'tcx>) {
-    // (A loop that never comes back round has no later time round,
-    // #1467.)
-    if !self.loop_entry_uninit.iter().any(|(id, s)| s.contains(&hirid)
-      && self.loop_never_rounds(*id) != Some(true)) {
-      return;
+  fn drop_earlier_iteration(&mut self, hirid: HirId, lhs: &'tcx Expr<'tcx>, span: rustc_span::Span) {
+    let Some(write) = self.assignment_write(lhs, span) else { return };
+    let from_earlier_iteration = self.loop_entry_uninit.iter().any(|(id, locals)|
+      locals.contains(&hirid) && self.loop_never_rounds(*id) != Some(true));
+    let init = from_earlier_iteration.then_some(InitBy::EarlierIteration);
+    if let Some(drops) = self.assignment_drops(write, init, None, None) {
+      self.emit_assignment_drops(write.row, write, drops);
     }
-    let Some(facts) = self.facts else { return; };
-    let Some(&local) = facts.bindings.declarations.get(&hirid) else { return; };
-    let has_flag = facts.rows.iter().flat_map(|row| &row.facts).any(|ev| {
-      ev.place_local == Some(local) && self.mir_body.source_info(ev.location).span == lhs_expr.span
-        && matches!(ev.fact, crate::facts::Fact::Drop { how: "drops_if_init", at_reassign: true, .. })
-    });
-    if !has_flag { return; }
-    let Some(rd) = self.raps.binding(hirid) else { return };
-    let ro = rd.rap.clone();
-    if self.skip_raps.contains(ro.name()) {
-      return;
-    }
-    let line = expr_to_line(lhs_expr, &self.tcx);
-    self.add_external_event(line, ExternalEvent::OwnerDropAtReassign {
-      ro,
-      id: *self.unique_id,
-      maybe_moved: false,
-      by_cond: false,
-      loop_head: false,
-      parts: None,
-      maybe_init: Some(InitBy::EarlierIteration),
-      payload: false,
-      contents_gone: false,
-      skipped: false,
-    });
-    *self.unique_id += 1;
   }
 
   /// The first assignment `x = rhs` to a `let x;` binding (#234). It

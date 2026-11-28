@@ -8,7 +8,7 @@
 
 use crate::expr_visitor_utils::{body_binding_names, binding_name};
 use super::schema::BodyBindings;
-use rustc_middle::mir::{Body, Local, Place, PlaceElem, ProjectionElem, VarDebugInfoContents};
+use rustc_middle::mir::{BasicBlock, Body, Local, Location, Place, PlaceElem, ProjectionElem, StatementKind, VarDebugInfoContents};
 use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 
 /// How a closure body sees a captured variable.
@@ -244,6 +244,18 @@ fn same_elem<'tcx>(a: PlaceElem<'tcx>, b: PlaceElem<'tcx>) -> bool {
 pub(super) fn place_under<'tcx>(place: Place<'tcx>, base: Place<'tcx>) -> bool {
     place.local == base.local && place.projection.len() >= base.projection.len()
         && place.projection.iter().zip(base.projection.iter()).all(|(a, b)| same_elem(a, b))
+}
+
+pub(super) fn same_place<'tcx>(a: Place<'tcx>, b: Place<'tcx>) -> bool {
+    a.projection.len() == b.projection.len() && place_under(a, b)
+}
+
+/// The normal store following a replacement drop. A field's type can
+/// carry different region variables at the drop and the store.
+pub(super) fn replacement_store<'tcx>(body: &Body<'tcx>, place: Place<'tcx>, target: BasicBlock) -> Option<Location> {
+    matches!(body[target].statements.first().map(|st| &st.kind),
+        Some(StatementKind::Assign(a)) if same_place(a.0, place))
+        .then_some(Location { block: target, statement_index: 0 })
 }
 
 /// Does this loan select a field or element strictly inside the column?

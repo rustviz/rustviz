@@ -773,6 +773,17 @@ impl StateTable {
             .and_then(|r| agreed(r.indices(source).map(|i| r.arms[i].0.has_exit))) == Some(true)
     }
 
+    /// The exits on an implicit arm have no source body of their own.
+    /// All executable edges of the same compiler arm must agree.
+    pub fn implicit_arm_cell(&self, function: FunctionStart, column: &str, source: SourceArm) -> Option<Cell> {
+        let body = self.bodies.get(&function.body)?;
+        let cell = agreed(body.rows.values().flat_map(|row| row.indices(source).filter_map(move |i| {
+            let (arm, cells) = &row.arms[i];
+            (arm.runs_at_runtime && arm.has_exit).then(|| cells.get(column))
+        })))??;
+        Some(cell.clone())
+    }
+
     pub fn continuing_arm_cell(&self, function: FunctionStart, column: &str, row: usize, source: SourceArm) -> Option<Cell> {
         let r = self.bodies.get(&function.body)?.rows.get(&row)?;
         let mut cell = agreed(r.indices(source).map(|i| r.arms[i].0.continuing.as_ref()?.get(column)))??.clone();
@@ -1145,6 +1156,7 @@ mod tests {
 
     fn body(func: &str, first: usize, cols: &[&str], rows: Vec<Row>) -> BodyFacts {
         BodyFacts {
+            writes: BTreeMap::new(),
             scope_ends: Default::default(),
             value_flow: Default::default(),
             joined_argument_loans: Default::default(),
@@ -1175,7 +1187,6 @@ mod tests {
             evaluated_spans: Vec::new(),
             implicit_mut_reborrows: Default::default(),
             effect_sites: Default::default(),
-            reassignment_sites: Default::default(),
             drop_flags: Default::default(),
             drop_part_flags: Default::default(),
             constructed_vecs: Default::default(),

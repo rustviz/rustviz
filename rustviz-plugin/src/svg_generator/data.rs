@@ -149,7 +149,7 @@ pub enum PlaceWrite {
     /// `*b = e` on a Box whose old contents (which need drop) were
     /// moved out on some paths only (#928): a runtime drop flag decides
     /// whether they are dropped. `by_cond`: see `moved_above`.
-    AssignMaybeMoved { by_cond: bool },
+    AssignMaybeMoved { by_cond: bool, flag: bool },
 }
 
 impl PlaceWrite {
@@ -837,6 +837,18 @@ fn push_history_event(history: &mut Vec<(usize, Event)>, line: usize, event: Eve
         }
     }
     history.push((line, event));
+}
+
+fn move_before_staged_arrival(history: &mut Vec<(usize, Event)>, row: usize, staged: &BTreeSet<usize>) -> bool {
+    if !matches!(history.last(), Some((line, Event::Move { .. })) if *line == row) {
+        return false;
+    }
+    let Some(arrival) = history.iter().position(|(line, event)| {
+        *line == row && matches!(event, Event::Acquire { id, .. } if staged.contains(id))
+    }) else { return false };
+    let moved = history.pop().unwrap();
+    history.insert(arrival, moved);
+    true
 }
 
 pub fn place_assign_copy_message(place: &String, from: &ResourceTy) -> String {
@@ -1740,10 +1752,17 @@ pub enum TupleDropAt {
 /// scope end of such a struct (`event_dot_struct_partial_go_out_of_scope`).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ReassignParts {
+    /// Some dropped components have no column.
+    pub other_drops: bool,
+    pub flag: bool,
+    pub box_parts: bool,
+    pub box_payload: Option<String>,
     /// Moved out on every path.
     pub moved: Vec<String>,
     /// Moved out on some paths only: dropped by a drop flag.
     pub maybe_moved: Vec<String>,
+    /// Parts that only hold a value where they were given one again.
+    pub refilled: Vec<String>,
     /// Leaf parts that still hold a value that needs drop.
     pub dropped: Vec<String>,
     /// Some of `maybe_moved` were moved by a `let` or-pattern (#597) or
@@ -2382,6 +2401,8 @@ pub enum ExternalEvent {
         // every path (`let s = *b;`): only its heap allocation is freed
         // (#1145).
         contents_gone: bool,
+        // The replacement's elaborated MIR tests a runtime drop flag.
+        flag: bool,
         // This assignment appears in the checked CFG but cannot execute.
         skipped: bool,
     },
@@ -3082,7 +3103,7 @@ pub enum Event {
     // FullPrivilege. `maybe_moved`: see ExternalEvent::OwnerDropAtReassign.
     // `maybe_init`: see ExternalEvent::OwnerDropAtReassign.
     // `payload`, `loop_head`: see ExternalEvent::OwnerDropAtReassign.
-    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, loop_head: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool, contents_gone: bool, skipped: bool },
+    OwnerDropAtReassign { maybe_moved: bool, by_cond: bool, loop_head: bool, parts: Option<ReassignParts>, maybe_init: Option<InitBy>, payload: bool, contents_gone: bool, flag: bool, skipped: bool },
     // `ManuallyDrop::drop(&mut md)`: the value inside is dropped by
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
@@ -3528,6 +3549,8 @@ pub enum InitBy {
     /// for … { while … { s = …; } s = …; }`), drawn as a `LoopMaybeInit`
     /// with `nested` at that loop's end (#1032). Only a drop flag knows.
     DropFlag,
+    /// Replacement depends on initialization, with no proved runtime flag.
+    IfInitialized,
     /// As `EarlierIteration` with `maybe_moved`, in a loop that never
     /// comes back round (every pass leaves it, #1467): the old value is
     /// dropped only if no branch above moved it, and the loop may end
@@ -4553,11 +4576,13 @@ impl Event {
                             hover_messages::event_dot_assign_through(r.name(), place),
                         PlaceWrite::AssignCopy => place_assign_copy_message(place, from),
                         PlaceWrite::AssignDropsOld => hover_messages::event_dot_replace_at_place(place),
-                        PlaceWrite::AssignOverMoved | PlaceWrite::AssignMaybeMoved { .. } =>
-                            hover_messages::event_dot_owner_drop_at_reassign(place, ""),
+                        PlaceWrite::AssignMaybeMoved { by_cond, flag: true } =>
+                            hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(place, "", *by_cond),
+                        PlaceWrite::AssignMaybeMoved { flag: false, .. } =>
+                            hover_messages::event_dot_owner_drop_at_reassign_if_initialized(place, ""),
                         // The old element has nothing to drop (that's what makes
                         // it AssignOwned): a plain assignment (#484).
-                        PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(place),
+                        PlaceWrite::AssignOwned | PlaceWrite::AssignOverMoved => hover_messages::event_dot_copyable_assign(place),
                         PlaceWrite::Update | PlaceWrite::UpdateValue => hover_messages::event_dot_write_element(r.name(), place, r.is_ref(), element_update_holds_value(r, place, write)),
                     };
                     with_alternatives(msg, r, place, write, alts)
@@ -4594,8 +4619,8 @@ impl Event {
                         // (#928), on every path or some only.
                         PlaceWrite::AssignOverMoved =>
                             hover_messages::event_dot_box_contents_write_after_move(&self.deref_name(my_name), r.holds_phrase(), None),
-                        PlaceWrite::AssignMaybeMoved { by_cond } =>
-                            hover_messages::event_dot_box_contents_write_after_move(&self.deref_name(my_name), r.holds_phrase(), Some(by_cond)),
+                        PlaceWrite::AssignMaybeMoved { by_cond, flag } =>
+                            hover_messages::event_dot_box_contents_write_after_move(&self.deref_name(my_name), r.holds_phrase(), Some((by_cond, flag))),
                         // The old value has nothing to drop (that's what
                         // makes it AssignOwned): a plain assignment (#484).
                         PlaceWrite::AssignOwned => hover_messages::event_dot_copyable_assign(&self.deref_name(my_name)),
@@ -6282,8 +6307,8 @@ impl Visualizable for VisualizationData {
             }
           }
         },
-        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, skipped, .. } => {
-          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, loop_head: *loop_head, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload, contents_gone: *contents_gone, skipped: *skipped })]
+        ExternalEvent::OwnerDropAtReassign{ maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, flag, skipped, .. } => {
+          vec![(line_num, Event::OwnerDropAtReassign { maybe_moved: *maybe_moved, by_cond: *by_cond, loop_head: *loop_head, parts: parts.clone(), maybe_init: *maybe_init, payload: *payload, contents_gone: *contents_gone, flag: *flag, skipped: *skipped })]
         },
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
@@ -6465,6 +6490,9 @@ impl Visualizable for VisualizationData {
                 let from_elem = matches!(from, ResourceTy::Index(r, _, _) if r == rap);
                 if *from == *is || through_rap(from) || from_elem {
                     b_history.extend(self.event_of_external_event(line_number, event, false));
+                    if self.moves_out_first.contains(&event.get_id()) {
+                        move_before_staged_arrival(b_history, line_number, &self.row_layout.staged_replacements);
+                    }
                     // `p.a` in `p = Pair { a: p.a, .. }` (#1508): moved out
                     // by the right-hand side and back with the new value,
                     // as outside a branch (#1411).
@@ -6587,6 +6615,9 @@ impl Visualizable for VisualizationData {
                 // move goes before the new value it got on this line.
                 if let (true, Some(h)) = (out_first, source) {
                     if let Some(t) = self.timelines.get_mut(&h) {
+                        if move_before_staged_arrival(&mut t.history, line_number, &self.row_layout.staged_replacements) {
+                            return;
+                        }
                         let n = t.history.len();
                         let first_new = t.history.iter().rposition(|(l, e)| *l == line_number
                             && matches!(e, Event::Acquire { .. } | Event::Copy { .. }));
@@ -6809,8 +6840,8 @@ impl Visualizable for VisualizationData {
                     }
                 }
             },
-            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, skipped, ..} => {
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, skipped }, line_number);
+            ExternalEvent::OwnerDropAtReassign{ro, maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, flag, skipped, ..} => {
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::OwnerDropAtReassign { maybe_moved, by_cond, loop_head, parts, maybe_init, payload, contents_gone, flag, skipped }, line_number);
             },
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);

@@ -112,8 +112,8 @@ pub const INVARIANTS: &[(&str, &str)] = &[
      "a struct column is moved away as a whole, but a field's column goes on as if it still \
       held its value"),
     ("drop-of-moved-value-at-reassign",
-     "one dot moves a column's value out and then says its previous value is dropped when it's \
-      assigned: the right-hand side runs first, so there's nothing left to drop"),
+     "one dot moves a column's value out and then drops the previous value without showing \
+      an intervening store"),
     ("column-ends-without-scope-end",
      "an owner's column ends on a dot that neither moves it nor ends its scope, so its drop \
       (or that nothing is dropped) is never stated"),
@@ -566,7 +566,9 @@ pub fn check(fig: &Fig, src: &str) -> Vec<(&'static str, String)> {
             out.push(("owner-after-maybe-moved-join", d.describe()));
         }
         if let (Some(m), Some(r)) = (d.pos("move"), d.pos("owner_drop_at_reassign")) {
-            if m < r && !reboxes_contents(d) {
+            let intervening_store = d.pos("acquire").is_some_and(|a| m < a && a < r)
+                && d.tip.contains("The right-hand side moved this place's old value before the stores.");
+            if m < r && !reboxes_contents(d) && !intervening_store {
                 out.push(("drop-of-moved-value-at-reassign", d.describe()));
             }
         }
@@ -933,6 +935,17 @@ mod unit {
         assert_eq!(invs(&whole), vec!["drop-of-moved-value-at-reassign"]);
         // And so is a contents move whose drop text says the old value is dropped.
         let wrong = b.replace("Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.", "Its previous resource is dropped.");
+        assert_eq!(invs(&wrong), vec!["drop-of-moved-value-at-reassign"]);
+    }
+
+    #[test]
+    fn a_second_destructuring_store_can_drop_the_first_stores_value() {
+        let tip = "• a's resource is moved / • a acquires ownership of a resource. The right-hand side moved this place's old value before the stores. / • a acquires ownership of a new resource; its previous resource is dropped";
+        let figure = [header("a", 1), line("a", 1, 95, 215, "full_privilege"), dot("a", 1, 95, "acquire", false, "a"),
+            dot("a", 1, 155, "move acquire owner_drop_at_reassign", true, tip),
+            dot("a", 1, 215, "owner_go_out_of_scope", true, "o")].concat();
+        assert_eq!(invs(&figure), Vec::<&str>::new());
+        let wrong = figure.replace("move acquire owner_drop_at_reassign", "acquire move owner_drop_at_reassign");
         assert_eq!(invs(&wrong), vec!["drop-of-moved-value-at-reassign"]);
     }
 
