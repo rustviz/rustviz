@@ -21380,7 +21380,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If the `?` here returns early, u's resource is dropped. If the `?` succeeds, the assignment runs: u acquires ownership of a new resource; its previous resource is dropped.",
             "If the `?` here returns early, x's resource is dropped. If the `?` succeeds, x's resource isn't dropped here.",
             "x's resource is mutably borrowed by push_str; x can't be used while the borrow is live",
-            "If the `?` here returns early, it drops the value moved from y into the temporary. If the `?` succeeds, that value isn't dropped by the `?`.",
+            "If the `?` here returns early, it drops the resource moved from y into the temporary. If the `?` succeeds, that resource isn't dropped by the `?`.",
             "y's resource is moved",
         ],
         must_not_contain: &[
@@ -21393,6 +21393,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "nothing happens to u here",
             "nothing happens to x here",
             "nothing happens to y here",
+            "drops the value moved from y into the temporary",
             "If the `?` here returns early, y's resource is dropped",
             // The assignment's own line, as if it happened on both paths.
             "=s acquires ownership of a new resource; its previous resource is dropped",
@@ -43445,7 +43446,8 @@ fn review_vec_staging_and_reachability() {
     assert!(tooltip_of_id(&svg, "r@L14:dot:move").unwrap().contains("held temporarily"));
     assert_eq!(tooltip_of_id(&svg, "parcel.payload@L70:dot:move").unwrap(), "parcel.payload's resource is moved to the caller");
     let count = tooltip_of_id(&svg, "s@L26:dot:move").unwrap();
-    assert!(count.contains("returns early, it drops the staged value") && count.contains("zero count"));
+    assert!(count.contains("returns early, it drops the staged resource") && count.contains("zero count"));
+    assert!(!count.contains("drops the staged value"));
     assert!(!svg.contains("v@L19:dot:acquire"), "the old v is still read by the next element");
     assert!(!svg.contains("v@L18:dot:owner_drop_at_reassign"), "the RHS still uses the old vector");
     assert!(tooltip_of_id(&svg, "v@L21:dot:").unwrap().contains("previous resource"), "the replacement follows the clone");
@@ -43459,9 +43461,26 @@ fn review_vec_staging_and_reachability() {
     assert!(tooltip_of_id(&svg, "cv@L11:dot:").unwrap().contains("never runs"));
     let svg = run_with_local_backend("known_bugs/1682_mixed_vec_elements").timeline_panel_string();
     let first = tooltip_of_id(&svg, "first@L41:dot:").unwrap();
-    assert!(first.contains("returns early, it drops the staged value") && first.contains("becomes a vector element"));
+    assert!(first.contains("returns early, it drops the staged resource") && first.contains("becomes a vector element"));
+    assert!(!first.contains("drops the staged value"));
     assert!(tooltip_of_id(&svg, "head@L30:dot:move").unwrap().contains("iterator yields its elements by value"));
     assert!(tooltip_of_id(&svg, "s2@L6:dot:move").unwrap().contains("can't be used until"));
+}
+
+#[test]
+fn vec_staging_drops_only_the_active_variant_1947() {
+    let svg = run_with_local_backend("staged_residual_drop_1911").timeline_panel_string();
+    // Both residual edges drop an Option<String>. None has no payload.
+    for (id, continuation) in [
+        ("first@L90:dot:move", "If construction finishes, the value becomes a vector element"),
+        ("element@L94:dot:move", "A zero count drops the element and leaves the vector empty"),
+    ] {
+        check_review_tip(&svg, id,
+            &["The value is held temporarily while the vector is being built",
+              "If the `?` returns early, it drops the staged value, including its String field if the staged value was Some",
+              continuation],
+            &["drops the staged resource", "runtime drop flag"]);
+    }
 }
 
 /// Compare the vertical positions of the dots, then the clauses on a shared
@@ -45046,8 +45065,11 @@ fn early_return_drops_values_staged_in_aggregates_1911() {
         (&aggregates, "repeated", "35"),
     ] {
         let clauses = drawn_clauses(svg, source, row);
-        let must_contain = format!("If the `?` here returns early, it drops the value moved from {source} into the temporary. If the `?` succeeds, that value isn't dropped by the `?`.");
-        let must_not_contain = format!("If the `?` here returns early, {source}'s resource is dropped");
+        let must_contain = format!("If the `?` here returns early, it drops the resource moved from {source} into the temporary. If the `?` succeeds, that resource isn't dropped by the `?`.");
+        let must_not_contain = [
+            format!("If the `?` here returns early, {source}'s resource is dropped"),
+            format!("drops the value moved from {source} into the temporary"),
+        ];
         let moved = format!("{source}'s resource is moved");
         let mut in_order = clauses.iter();
         let doc = roxmltree::Document::parse(svg).unwrap();
@@ -45056,13 +45078,19 @@ fn early_return_drops_values_staged_in_aggregates_1911() {
         // destructor runs. The source column must have no drop triangle.
         if !in_order.any(|(_, _, tip)| tip.contains(&moved))
             || !in_order.any(|(_, _, tip)| tip.contains(&must_contain))
-            || clauses.iter().any(|(_, _, tip)| tip.contains(&must_not_contain))
+            || clauses.iter().any(|(_, _, tip)| must_not_contain.iter().any(|text| tip.contains(text)))
             || drops.len() != 1 || drops[0].attribute("data-rv-drop").is_some()
         {
             failures.push(format!("{source} on row {row}: {clauses:?}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+    // Plain is moved, but rustc emits no drop for it on the residual edge.
+    check_review_tip(&aggregates, "plain@L84:dot:move",
+        &["plain's value is moved"], &["plain's resource", "drops the resource", "drops the value"]);
+    let doc = roxmltree::Document::parse(&aggregates).unwrap();
+    assert!(residual_dots(&doc, "plain", "84").is_empty(), "{:?}", drawn_clauses(&aggregates, "plain", "84"));
 }
 
 #[test]
@@ -45087,7 +45115,8 @@ fn residual_drops_the_staged_value_and_the_replacement_1911() {
         let drops = residual_dots(&doc, "s", row);
         assert!(drops.iter().any(|dot| dot.attribute("data-rv-drop") == Some("true")), "{row}: {clauses:?}");
         assert!(clauses.iter().any(|(_, _, tip)| tip.contains(current) && tip.contains("runtime drop flag") == flag), "{row}: {clauses:?}");
-        assert!(clauses.iter().any(|(_, _, tip)| tip.contains("drops the value moved from s into the temporary")), "{row}: {clauses:?}");
+        assert!(clauses.iter().any(|(_, _, tip)| tip.contains("drops the resource moved from s into the temporary")), "{row}: {clauses:?}");
+        assert!(clauses.iter().all(|(_, _, tip)| !tip.contains("drops the value moved from s into the temporary")), "{row}: {clauses:?}");
         assert!(clauses.iter().all(|(_, _, tip)| !tip.contains("If the `?` succeeds, the assignment runs")), "{row}: {clauses:?}");
     }
 }
@@ -45097,22 +45126,28 @@ fn residual_drops_a_staged_value_from_the_operand_binding_1911() {
     let svg = run_with_local_backend("staged_residual_drop_1911").timeline_panel_string();
     let clauses = drawn_clauses(&svg, "s", "66");
     let mut in_order = clauses.iter();
-    // The replacement Err is returned to the caller; the staged Result
-    // is dropped before returning, even though both values came from s.
+    // The replacement Err is returned to the caller. The staged Result
+    // is dropped before returning, and only Err has a String field.
     assert!(in_order.any(|(_, _, tip)| tip.contains("s's resource is moved into the `?`")), "{clauses:?}");
-    assert!(in_order.any(|(_, _, tip)| tip.contains("drops the value") && tip.contains("moved from s into the temporary")), "{clauses:?}");
+    let must_contain = [
+        "If the `?` here returns early, it drops the value moved from s into the temporary, including its String field if the staged value was Err.",
+        "If the `?` succeeds, that value isn't dropped by the `?`.",
+    ];
+    assert!(in_order.any(|(_, _, tip)| must_contain.iter().all(|text| tip.contains(text))), "{clauses:?}");
     let doc = roxmltree::Document::parse(&svg).unwrap();
     let drops = residual_dots(&doc, "s", "66");
     assert_eq!(drops.len(), 1);
     assert_eq!(drops[0].attribute("data-rv-drop"), None);
-    assert!(clauses.iter().all(|(_, _, tip)| !tip.contains("s's resource is dropped")), "{clauses:?}");
+    let must_not_contain = ["drops the resource", "s's resource is dropped", "runtime drop flag"];
+    assert!(clauses.iter().all(|(_, _, tip)| must_not_contain.iter().all(|text| !tip.contains(text))), "{clauses:?}");
 }
 
 #[test]
 fn residual_drops_a_staged_value_after_its_source_scope_ends_1911() {
     let svg = run_with_local_backend("staged_residual_drop_1911").timeline_panel_string();
     let clauses = drawn_clauses(&svg, "s", "76");
-    assert!(clauses.iter().any(|(_, _, tip)| tip.contains("drops the value moved from s into the temporary")), "{clauses:?}");
+    assert!(clauses.iter().any(|(_, _, tip)| tip.contains("drops the resource moved from s into the temporary")), "{clauses:?}");
+    assert!(clauses.iter().all(|(_, _, tip)| !tip.contains("drops the value moved from s into the temporary")), "{clauses:?}");
     assert!(clauses.iter().all(|(_, _, tip)| !tip.contains("s's resource is dropped")), "{clauses:?}");
     let doc = roxmltree::Document::parse(&svg).unwrap();
     let drops = residual_dots(&doc, "s", "76");
@@ -47778,6 +47813,48 @@ fn temp_review_segment_after_or_pattern_depends_on_the_variant() {
 }
 
 #[test]
+fn constructor_articles_follow_pronunciation_1950() {
+    let fixture = run_with_local_backend("constructor_articles_1950").timeline_panel_string();
+    // MIR constructs each of these variants from the call's returned u32.
+    for (row, binding, correct, incorrect) in [
+        (7, "one", "a One", "an One"),
+        (8, "unit", "a Unit", "an Unit"),
+        (9, "onerous", "an Onerous", "a Onerous"),
+        (10, "ok", "an Ok", "a Ok"),
+        (11, "err", "an Err", "a Err"),
+    ] {
+        let must_contain = format!("{correct} value holding the value number() returns");
+        let must_not_contain = format!("{incorrect} value");
+        for id in [format!("{binding}@L{row}:dot:copy"), format!("number>{binding}@L{row}:arrow:copy")] {
+            check_review_tip(&fixture, &id, &[&must_contain], &[&must_not_contain]);
+        }
+    }
+    let review = run_with_local_backend("rv3_temporary_review").timeline_panel_string();
+    let must_contain = "The caller receives a One value holding the resource make() returns";
+    let must_not_contain = "an One value";
+    let tips = rv_elements(&review, "make>caller@L26:arrow:move");
+    assert!(tips.iter().any(|(_, tip, ..)| tip.contains(must_contain)), "{tips:?}");
+    assert!(tips.iter().all(|(_, tip, ..)| !tip.contains(must_not_contain)), "{tips:?}");
+}
+
+#[test]
+fn direct_constructor_dot_uses_the_pronounced_article_1950() {
+    let svg = run_with_local_backend("constructor_articles_1950").timeline_panel_string();
+    // MIR builds Number::One from a constant.
+    check_review_tip(&svg, "direct@L18:dot:acquire",
+        &["direct is initialized with a One value"], &["an One value"]);
+}
+
+#[test]
+fn scrutinee_constructor_dot_uses_the_pronounced_article_1950() {
+    let svg = run_with_local_backend("constructor_articles_1950").timeline_panel_string();
+    // One names Option::Some here. The successful pattern copies its field.
+    check_review_tip(&svg, "inside@L19:dot:copy",
+        &["inside is initialized with the value inside a One value"],
+        &["an One value", "One() returns"]);
+}
+
+#[test]
 fn temp_review_guarded_drop_keeps_scope_and_payload_distinct() {
     let rv = run_with_local_backend("scrutinee_temp_split_1386");
     check_review_tip(&rv.timeline_panel_string(), "(temporary)@L41:dot:branch_join+temporary_drop",
@@ -48068,6 +48145,21 @@ fn p4_iterator_handoff_tracks_the_loan_past_the_item_move() {
     check_review_tip(&svg, "values@L22-24:line:revoked_privilege",
         &["The `for` loop's iterator holds this borrow", "can't be read, moved, or used to access",
           "A mutable binding can still be assigned a new reference"], &["borrowed by first"]);
+}
+
+#[test]
+fn shared_iterator_still_holds_loan_on_continuing_segment_1951() {
+    let svg = run_with_local_backend("for_iter_method_borrow_1347").timeline_panel_string();
+    let sharing = "v's resource is being shared by one or more variables";
+    let iterator = "The `for` loop's iterator holds a shared borrow";
+    // Rustc rejects a mutable borrow on the continuing edge, where MIR
+    // passes the same iterator to next again. It permits one on the break
+    // edge after y's last use and again after the loop.
+    for id in ["v@L10-11:line:partial_privilege", "v@L11-12:line:partial_privilege"] {
+        check_review_tip(&svg, id, &[sharing, iterator], &["while y is in use", "is being shared by y"]);
+    }
+    check_review_tip(&svg, "v@L12-17:line:full_privilege",
+        &["v is the owner of the resource"], &[iterator, sharing]);
 }
 
 #[test]

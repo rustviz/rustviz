@@ -5046,7 +5046,7 @@ pub enum ApproxNote {
     /// rustc checks this transfer after a closure call whose body cannot return.
     UnreachedTransfer { id: usize, scope_ends: Vec<(u64, usize)>, unwind_drop: Option<&'static str> },
     UnreachedValue { hash: u64 },
-    VecElement { id: usize, staged: bool, drops_on_exit: bool, repeat: bool, nested: bool },
+    VecElement { id: usize, staged: bool, residual_drop: Option<crate::facts::StagedDrop>, repeat: bool, nested: bool },
     IteratorElement { id: usize },
     PatternReference { holder: u64 },
     /// A loop whose first line is `head`. It gets one note, on its

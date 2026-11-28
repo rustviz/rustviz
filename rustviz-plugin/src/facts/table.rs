@@ -12,7 +12,7 @@ use super::{SharedReferenceJoin, SourceArm, SwitchEdge};
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Location};
 use rustc_data_structures::fx::FxIndexMap;
-use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, JoinChange, Lent, PartialDrop, Parts, State};
+use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, JoinChange, Lent, PartialDrop, Parts, StagedDrop, State};
 pub use super::schema::MixedInit;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -257,6 +257,7 @@ pub struct TryDrop {
 struct DropWording {
     scope_partials: BTreeMap<usize, ScopePartials>,
     try_drops: BTreeMap<TryDropKey, Option<TryDrop>>,
+    staged_try_drops: BTreeMap<TryDropKey, Option<StagedDrop>>,
 }
 
 impl DropWording {
@@ -277,9 +278,13 @@ impl DropWording {
                 record(parts, (site.map(|s| (s.lo(), s.hi())), *local, name.clone()), partial.clone());
             }
         }
-        for drop in body.residual_drops.iter().filter(|drop| drop.staged.is_none()) {
+        for drop in &body.residual_drops {
             let key = (drop.local, drop.site, drop.path.clone());
-            record(&mut wording.try_drops, key, TryDrop { how: drop.how, only_assigned: drop.only_assigned, flag: drop.flag });
+            if let Some((_, staged)) = &drop.staged {
+                record(&mut wording.staged_try_drops, key, staged.clone());
+            } else {
+                record(&mut wording.try_drops, key, TryDrop { how: drop.how, only_assigned: drop.only_assigned, flag: drop.flag });
+            }
         }
         wording
     }
@@ -634,6 +639,11 @@ impl StateTable {
         let wording = self.drop_wording.get(&function.body)?;
         let key = (local, span, Some(column.to_owned()));
         wording.try_drops.get(&key).or_else(|| wording.try_drops.get(&(local, span, None))).copied().flatten()
+    }
+
+    pub fn staged_try_drop(&self, function: FunctionStart, column: &str, local: rustc_middle::mir::Local, span: rustc_span::Span) -> Option<&StagedDrop> {
+        let wording = self.drop_wording.get(&function.body)?;
+        wording.staged_try_drops.get(&(local, span, Some(column.to_owned())))?.as_ref()
     }
 
     pub fn partial_drop(&self, function: FunctionStart, column: &str, row: usize, local: rustc_middle::mir::Local, site: Option<rustc_span::Span>) -> Option<&PartialDrop> {

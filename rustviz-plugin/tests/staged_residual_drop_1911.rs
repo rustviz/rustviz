@@ -77,3 +77,19 @@ fn ended_source_scope(tail: Option<()>) -> Option<()> {
     drop(value);
     Some(())
 }
+
+struct Plain(u32);
+
+fn plain(plain: Plain, tail: Option<()>) -> Option<()> {
+    let value = ((plain,), tail?);
+    let _ = value.0.0.0;
+    Some(())
+}
+
+fn vec_list(first: Option<String>, next: Option<Option<String>>) -> Option<Vec<Option<String>>> {
+    Some(vec![first, next?])
+}
+
+fn vec_repeat(element: Option<String>, count: Option<usize>) -> Option<Vec<Option<String>>> {
+    Some(vec![element; count?])
+}

@@ -18,7 +18,7 @@ use rustc_middle::mir::{
     AggregateKind, BasicBlock, Body, BorrowKind, Local, Location, MutBorrowKind, Operand, Place, ProjectionElem, Rvalue,
     StatementKind, TerminatorKind, UnwindAction, RETURN_PLACE,
 };
-use rustc_middle::ty::{TyCtxt, TyKind};
+use rustc_middle::ty::{Ty, TyCtxt, TyKind, TypingEnv};
 use rustc_middle::mir::visit::{MutatingUseContext, PlaceContext, Visitor};
 use rustc_mir_dataflow::impls::{
     always_storage_live_locals, EverInitializedPlaces, MaybeBorrowedLocals, MaybeInitializedPlaces, MaybeStorageLive,
@@ -794,16 +794,36 @@ impl BodyFacts {
 
 /// A staged operand is destroyed on the early-return edge of `?` when
 /// the residual conversion dominates the drop of that exact MIR temporary.
-pub(crate) fn dropped_on_residual<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, facts: &BodyFacts, assignment: Location) -> bool {
-    let Some(st) = body.basic_blocks[assignment.block].statements.get(assignment.statement_index) else { return false };
-    let StatementKind::Assign(a) = &st.kind else { return false };
-    facts.rows.iter().flat_map(|row| &row.facts).any(|event| {
+pub(crate) fn staged_residual_drop<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, facts: &BodyFacts, assignment: Location) -> Option<StagedDrop> {
+    let st = body.basic_blocks[assignment.block].statements.get(assignment.statement_index)?;
+    let StatementKind::Assign(a) = &st.kind else { return None };
+    let drops = facts.rows.iter().flat_map(|row| &row.facts).any(|event| {
         event.drop_route != DropRoute::Unwind
             && matches!(&event.fact, Fact::TempDrop { place, .. } if *place == TransientPlace::new(tcx, a.0)) &&
             preceding_call(body, event.occurrence.at, |f| is_residual_conversion(tcx, f)).is_some_and(|call|
                 !facts.skipped_residuals.contains(&body.source_info(call).span.with_parent(None))
                     && !facts.skipped_closure_returns.contains_key(&call.block))
-    })
+    });
+    let env = TypingEnv::post_analysis(tcx, body.source.def_id());
+    drops.then(|| staged_drop_kind(tcx, a.0.ty(&body.local_decls, tcx).ty, env))
+}
+
+/// A MIR Drop of the whole value can dispatch to a variant with no drop
+/// glue. Use the instantiated place type to describe what it can drop.
+fn staged_drop_kind<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, env: TypingEnv<'tcx>) -> StagedDrop {
+    use super::value_flow::always_needs_drop;
+    if always_needs_drop(tcx, ty, env) { return StagedDrop::Resource; }
+    let TyKind::Adt(def, args) = *ty.kind() else { return StagedDrop::Value };
+    if !def.is_enum() { return StagedDrop::Value; }
+    let mut fields = def.variants().iter().flat_map(|variant|
+        variant.fields.iter().map(move |field| (variant.name, field.ty(tcx, args))))
+        .filter(|(_, ty)| ty.needs_drop(tcx, env));
+    let Some((variant, payload_ty)) = fields.next() else { return StagedDrop::Value };
+    if fields.next().is_some() || !always_needs_drop(tcx, payload_ty, env) { return StagedDrop::Value; }
+    let TyKind::Adt(payload, args) = *payload_ty.kind() else { return StagedDrop::Value };
+    // Keep the full type in the column's drop note for generic payloads.
+    if !args.is_empty() { return StagedDrop::Value; }
+    StagedDrop::VariantPayload { variant: variant.to_string(), payload: tcx.item_name(payload.did()).to_string() }
 }
 
 fn called_closure<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> Option<&'tcx Body<'tcx>> {
@@ -4851,8 +4871,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             // is described on the source column.
             if how == "drops" {
                 for (source, staging) in staged_sources(place) {
+                    let ty = tcx.erase_and_anonymize_regions(source.ty(&body.local_decls, tcx).ty);
                     residual_drops.push(ResidualDrop {
-                        local: source.local, site, path: cx.name(source), how, only_assigned: false, flag: false, staged: Some(staging),
+                        local: source.local, site, path: cx.name(source), how, only_assigned: false, flag: false,
+                        staged: Some((staging, staged_drop_kind(tcx, ty, typing_env))),
                     });
                 }
             }
@@ -6120,13 +6142,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         // scope after the exit and still at the successor (a loan whose last
         // use is on this row is out of scope there; another path's loan
         // that joins at the successor is not on this one).
-        let mut live: BTreeSet<usize> = BTreeSet::new();
+        let mut live = BTreeMap::<usize, BTreeSet<(Location, bool)>>::new();
         let mut boundaries = Vec::new();
         for e in exits {
             if !after {
                 boundaries.push((*e, false));
                 inscope.seek_before_primary_effect(*e);
-                live.extend(inscope.get().iter().map(|b| b.index()));
+                for loan in inscope.get().iter() {
+                    live.entry(loan.index()).or_default().insert((*e, false));
+                }
                 continue;
             }
             let line = cx.row_of(*e);
@@ -6137,18 +6161,20 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             inscope.seek_after_primary_effect(*e);
             let after: BTreeSet<usize> = inscope.get().iter().map(|b| b.index()).collect();
             if at.is_empty() {
-                live.extend(after.iter().copied());
+                for &loan in &after {
+                    live.entry(loan).or_default().insert((*e, true));
+                }
             }
             for s in at {
                 boundaries.push((s, false));
                 inscope.seek_before_primary_effect(s);
-                live.extend(inscope.get().iter().map(|b| b.index()).filter(|b| after.contains(b)));
+                for loan in inscope.get().iter().map(|b| b.index()).filter(|b| after.contains(b)) {
+                    live.entry(loan).or_default().extend([(*e, true), (s, false)]);
+                }
             }
         }
         for l in &loans {
-            if !live.contains(&l.loan) {
-                continue;
-            }
+            let Some(live_on) = live.get(&l.loan) else { continue };
             // Who holds it here (Polonius: whose origins contain it after
             // the row's exits); the call / macro it went to otherwise.
             let mut now: Vec<String> = Vec::new();
@@ -6165,11 +6191,19 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let holder = if now.is_empty() || now.contains(&first) { first } else { now[0].clone() };
             let mut current = BTreeSet::new();
             let iterator = table.and_then(|t| {
-                let mut carrying = iterator_paths.iter().filter(|&&(local, path)| !boundaries.is_empty()
-                    && boundaries.iter().all(|&(at, after)| {
+                let mut carrying = iterator_paths.iter().filter(|&&(local, path)| {
+                    let holds_at = |&(at, after): &(Location, bool)| {
                         let point = if after { t.mid_index(at) } else { t.start_index(at) };
                         held_by(local, point).contains(&l.loan) && flow.state(&[at], after, path).word() == "own"
-                    }));
+                    };
+                    // An exit from the loop can end a shared loan on one
+                    // edge while the iterator keeps it on the continuing edge.
+                    if l.kind == "shared" {
+                        live_on.iter().all(holds_at)
+                    } else {
+                        boundaries.iter().all(holds_at)
+                    }
+                });
                 let &(local, _) = carrying.next()?;
                 carrying.next().is_none().then_some(local)
             });
@@ -6205,7 +6239,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             if let Some(direct) = &l.direct_holder {
                 if st.state.get(direct) == Some(&"own") && reborrows.get(&l.loan).is_some_and(|children|
-                    children.iter().any(|(child, through)| through == direct && live.contains(child))) {
+                    children.iter().any(|(child, through)| through == direct && live.contains_key(child))) {
                     current.insert(direct.clone());
                 }
             }
@@ -6417,7 +6451,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         // origin tracks the contents, limited to what this
                         // exact borrow could see when it was taken.
                         for &(id, loc, local, name, origin) in &option_borrows {
-                            if !active_option(local, name) || !live.contains(&id) { continue; }
+                            if !active_option(local, name) || !live.contains_key(&id) { continue; }
                             let initial = at(t.start_index(loc), &[origin]);
                             if initial.is_empty() { continue; }
                             let Some(tracked) = &pol else { continue };

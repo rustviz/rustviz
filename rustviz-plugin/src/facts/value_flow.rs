@@ -9,7 +9,7 @@ use rustc_middle::mir::{
     AggregateKind, BasicBlock, Body, BorrowKind, Local, LocalInfo, Location, Operand, Place, ProjectionElem, Rvalue,
     StatementKind, TerminatorKind, RETURN_PLACE,
 };
-use rustc_middle::ty::{Ty, TyCtxt};
+use rustc_middle::ty::{Ty, TyCtxt, TypingEnv};
 use rustc_span::{sym, Span};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -320,22 +320,27 @@ pub(crate) fn is_std_sync_primitive<'tcx>(
 /// A call's destination type can prove cleanup only if every value of
 /// that type owns a resource. `needs_drop` alone also admits an empty
 /// variant and unknown generic payloads.
-fn result_owns_resource<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+fn type_owns_resource<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, include_sync_primitives: bool) -> bool {
     use rustc_middle::ty::TyKind;
+    let owns_resource = |ty| type_owns_resource(tcx, ty, include_sync_primitives);
     match *ty.kind() {
         TyKind::Adt(def, args) => {
-            is_std_sync_primitive(tcx, def) || def.has_dtor(tcx)
+            (include_sync_primitives && is_std_sync_primitive(tcx, def)) || def.has_dtor(tcx)
                 || (!def.is_manually_drop() && !def.is_union() && !def.variants().is_empty()
                     && def.variants().iter().all(|variant| {
-                        variant.fields.iter().any(|field| result_owns_resource(tcx, field.ty(tcx, args)))
+                        variant.fields.iter().any(|field| owns_resource(field.ty(tcx, args)))
                     }))
         }
-        TyKind::Tuple(fields) => fields.iter().any(|field| result_owns_resource(tcx, field)),
+        TyKind::Tuple(fields) => fields.iter().any(owns_resource),
         TyKind::Array(elem, len) => len.try_to_target_usize(tcx).is_some_and(|n| n != 0)
-            && result_owns_resource(tcx, elem),
-        TyKind::Closure(_, args) => result_owns_resource(tcx, args.as_closure().tupled_upvars_ty()),
+            && owns_resource(elem),
+        TyKind::Closure(_, args) => owns_resource(args.as_closure().tupled_upvars_ty()),
         _ => false,
     }
+}
+
+pub(crate) fn always_needs_drop<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, env: TypingEnv<'tcx>) -> bool {
+    ty.needs_drop(tcx, env) && type_owns_resource(tcx, ty, false)
 }
 
 fn unique<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
@@ -835,7 +840,7 @@ fn collect_blocks<'tcx>(
             returns_reference: ty.is_ref(),
             returns_unit: ty.is_unit(),
             copyable,
-            result_is_resource: result_owns_resource(tcx, ty),
+            result_is_resource: type_owns_resource(tcx, ty, true),
             drops_arg: def.is_some_and(|id| tcx.is_diagnostic_item(sym::mem_drop, id)),
             try_branch,
             callable_result,
