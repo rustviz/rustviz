@@ -1536,7 +1536,136 @@ impl<'tcx> Order<'_, 'tcx> {
     }
 
 
-    fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout, dead: bool) {
+    /// A borrow or a call can supply a reference before the binding's
+    /// actual store, in particular for a pattern extracting a payload.
+    fn reference_receipt(&self, event: &E) -> Option<SegmentPoint> {
+        let (E::StaticBorrow { to, .. } | E::MutableBorrow { to, .. } | E::Bind { to, .. }
+            | E::Copy { to, .. } | E::Move { to, .. }) = event else { return None };
+        let local = to.extract_rap()?.ref_local()?;
+        let sites = self.facts.rows.iter().flat_map(normal_facts).filter_map(|fact| {
+            if fact.place_local != Some(local) || !matches!(fact.fact, Fact::Init { .. }) {
+                return None;
+            }
+            let at = fact.occurrence.at;
+            let data = &self.body[at.block];
+            let destination = match data.statements.get(at.statement_index).map(|stmt| &stmt.kind) {
+                Some(rustc_middle::mir::StatementKind::Assign(a)) => a.0.as_local(),
+                None if at == self.body.terminator_loc(at.block) => match data.terminator().kind {
+                    TerminatorKind::Call { destination, target: Some(_), .. } => destination.as_local(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            (destination == Some(local)).then_some(at)
+        });
+        let mut matched = sites.clone().filter(|&at| {
+            let span = self.body.source_info(at).span;
+            self.spans.get(&event.get_id()).is_some_and(|source| source.contains(span) || span.contains(*source))
+        });
+        // A pattern's projected borrow may be anchored to its scrutinee.
+        // The compiler local can still identify its only installation.
+        let at = if let Some(at) = matched.next() {
+            matched.all(|site| site == at).then_some(at)?
+        } else {
+            let mut sites = sites;
+            let at = sites.next()?;
+            sites.all(|site| site == at).then_some(at)?
+        };
+        Some(SegmentPoint::After(at))
+    }
+
+    /// Separate dependent call returns that otherwise share one display
+    /// row with the intervening use. Each return writes its own MIR local.
+    fn stage_reference_results(&self, events: &[(usize, E)], indices: &[usize], row: &Row,
+        arrows: &[E], layout: &mut RowLayout) {
+        let point_at = |at: Location| -> Option<Point> {
+            let rank = self.body.basic_blocks.reverse_postorder().iter().position(|b| *b == at.block)?;
+            Some((rank, at.statement_index, 1, 0))
+        };
+        let results: BTreeMap<_, _> = arrows.iter().filter_map(|event| {
+            let at = *layout.reference_results.get(&event.get_id())?;
+            Some((point_at(at)?, at))
+        }).collect();
+        let Some((&first, _)) = results.first_key_value() else { return };
+        let Some((&last, _)) = results.last_key_value() else { return };
+        if !self.earlier(first, last)
+            || !results.keys().zip(results.keys().skip(1)).all(|(&a, &b)| self.earlier(a, b)) {
+            return;
+        }
+        let mut staged = Vec::new();
+        for &i in indices {
+            let event = &events[i].1;
+            let id = event.get_id();
+            if let Some(&at) = layout.reference_results.get(&id) {
+                if let Some(point) = point_at(at).filter(|point| results.contains_key(point)) {
+                    staged.push((point, id, SegmentPoint::After(at)));
+                }
+                continue;
+            }
+            if !matches!(event, E::PassByStaticReference { .. } | E::PassByMutableReference { .. } | E::Copy { .. } | E::Move { .. }) {
+                continue;
+            }
+            let Some(point) = self.point(event, row, true) else { continue };
+            let Some(from) = endpoints(event).0.extract_rap().and_then(ResourceAccessPoint::ref_local) else { continue };
+            let block = self.body.basic_blocks.reverse_postorder()[point.0];
+            let at = Location { block, statement_index: point.1 };
+            let reads_argument = match event {
+                E::PassByStaticReference { .. } | E::PassByMutableReference { .. } =>
+                    self.body[block].statements.get(at.statement_index).is_some_and(|stmt|
+                        matches!(&stmt.kind, rustc_middle::mir::StatementKind::Assign(a)
+                            if matches!(a.1, rustc_middle::mir::Rvalue::Ref(_, _, borrowed) if borrowed.local == from))),
+                _ => endpoints(event).1.extract_rap().is_some_and(ResourceAccessPoint::is_fn)
+                    && self.transfers.get(&id).is_some_and(|site| site.at == at),
+            };
+            let earlier_result = results.iter().any(|(&returned, &at)| self.earlier(returned, point)
+                && matches!(self.body[at.block].terminator().kind, TerminatorKind::Call { destination, .. } if destination.local == from));
+            if reads_argument && earlier_result && self.earlier(point, last) {
+                staged.push((point, id, SegmentPoint::After(at)));
+            }
+        }
+        if !staged.iter().any(|(point, _, _)| !results.contains_key(point))
+            || arrows.iter().any(|arrow| !staged.iter().any(|(_, id, _)| *id == arrow.get_id())) {
+            return;
+        }
+        staged.sort_by_key(|&(point, _, _)| point);
+        let group = staged[0].1;
+        let mut previous = None;
+        let mut stage = 0;
+        for (point, id, boundary) in staged {
+            if previous.is_some_and(|before| before != point) { stage += 1; }
+            previous = Some(point);
+            layout.reference_result_stages.insert(id, (group, stage));
+            layout.segment_points.insert(id, boundary);
+        }
+    }
+
+    /// A retained reborrow can outlive the reference overwritten in its
+    /// parent slot. The old holder's end belongs before the replacement.
+    fn replaces_ended_reference(&self, end: &E, receive: &E, row: &Row) -> bool {
+        let (E::StaticDie { from, to, .. } | E::MutableDie { from, to, .. }) = end else { return false };
+        let (E::StaticBorrow { from: lender, to: target, .. } | E::MutableBorrow { from: lender, to: target, .. }) = receive else { return false };
+        let Some(local) = from.extract_rap().and_then(ResourceAccessPoint::ref_local) else { return false };
+        if target.extract_rap().and_then(ResourceAccessPoint::ref_local) != Some(local) { return false; }
+        let old_lender = to.extract_rap().and_then(ResourceAccessPoint::owner_local);
+        let new_lender = lender.extract_rap().and_then(ResourceAccessPoint::owner_local);
+        let Some((old_lender, new_lender)) = old_lender.zip(new_lender).filter(|(a, b)| a != b) else { return false };
+        let mut stores = normal_facts(row).filter(|fact| {
+            let Fact::Repoint { old, new, reaching: Some(reaching), .. } = &fact.fact else { return false };
+            let ([prior], [replacement]) = (reaching.as_slice(), new.as_slice()) else { return false };
+            let at = fact.occurrence.at;
+            let Some(statement) = self.body[at.block].statements.get(at.statement_index) else { return false };
+            matches!(&statement.kind, rustc_middle::mir::StatementKind::Assign(a)
+                if a.0.as_local() == Some(local)) && old.is_empty()
+                && self.ends.get(&end.get_id()).is_none_or(|ids| ids.as_slice() == [*prior])
+                && self.loan(*prior).is_some_and(|l| l.lender_local == Some(old_lender))
+                && self.loan(*replacement).is_some_and(|l| l.lender_local == Some(new_lender)
+                    && l.issue.is_some_and(|at| self.spans.get(&receive.get_id())
+                        .is_some_and(|span| span.contains(self.body.source_info(at).span))))
+        });
+        stores.next().is_some() && stores.next().is_none()
+    }
+
+    fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout, dead: bool, top_level: bool) {
         for (line, e) in events.iter() {
             if let E::GoOutOfScope { ro, early: None, .. } = e {
                 if let Some(local) = ro.ref_local() {
@@ -1595,7 +1724,7 @@ impl<'tcx> Order<'_, 'tcx> {
                     });
                     if unreachable { layout.unreachable_arms.insert((*id, index)); }
                     self.describe_shared_call_result(&arm.e_data, layout);
-                    self.order_list(&mut arm.e_data, &mut arm.line_map, layout, unreachable);
+                    self.order_list(&mut arm.e_data, &mut arm.line_map, layout, unreachable, false);
                 }
             }
             if let Some(lender) = self.shadowed_borrow_lender(ev) {
@@ -1610,6 +1739,9 @@ impl<'tcx> Order<'_, 'tcx> {
         for (line, indices) in lines {
             for &i in &indices {
                 let event = &events[i].1;
+                if let Some(point) = self.reference_receipt(event) {
+                    layout.reference_receipts.insert(event.get_id(), point);
+                }
                 if let Some(site) = self.aggregate_move(event).filter(|(point, row)|
                     *row > line && self.facts.segment_points.contains_key(point))
                 {
@@ -1650,6 +1782,11 @@ impl<'tcx> Order<'_, 'tcx> {
                     {
                         layout.segment_points.insert(event.get_id(), point);
                     }
+                }
+            }
+            if top_level && straight_line {
+                if let Some(arrows) = map.get(&line) {
+                    self.stage_reference_results(events, &indices, row, arrows, layout);
                 }
             }
             if indices.len() < 2 {
@@ -1699,6 +1836,9 @@ impl<'tcx> Order<'_, 'tcx> {
                 for (j, &other) in indices.iter().enumerate().filter(|(j, _)| *j != i) {
                     let b = &events[other].1;
                     let ids = (a.get_id(), b.get_id());
+                    if self.replaces_ended_reference(a, b, row) {
+                        layout.projected.insert(ids);
+                    }
                     if let Some(owner) = self.destructor_before_release(a, b, points[i], points[j]) {
                         layout.after_destructor.insert(ids.1, owner);
                     }
@@ -1807,7 +1947,7 @@ pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
         &mut visitor.row_layout,
     );
     order.across_arms(visitor.preprocessed_events, &mut Vec::new(), &mut visitor.row_layout);
-    order.order_list(visitor.preprocessed_events, visitor.event_line_map, &mut visitor.row_layout, false);
+    order.order_list(visitor.preprocessed_events, visitor.event_line_map, &mut visitor.row_layout, false, true);
 }
 
 /// Read the independent columns in their existing order, emitting any
@@ -1968,10 +2108,13 @@ pub struct RowLayout {
     pub(crate) scope_end_ids: BTreeSet<usize>,
     pub(crate) holder_handoff_titles: BTreeMap<usize, String>,
     pub(crate) result_lend_titles: BTreeMap<usize, String>,
-        pub(crate) segment_points: BTreeMap<usize, SegmentPoint>,
     pub(crate) alternative_reference_results: BTreeSet<usize>,
     pub(crate) shared_results_from_mutable: BTreeSet<usize>,
     pub(crate) staged_mutable_references: BTreeSet<usize>,
+    pub(crate) segment_points: BTreeMap<usize, SegmentPoint>,
+    pub(crate) reference_receipts: BTreeMap<usize, SegmentPoint>,
+    pub(crate) reference_results: BTreeMap<usize, Location>,
+    pub(crate) reference_result_stages: BTreeMap<usize, (usize, usize)>,
     pub(crate) aggregate_moves: BTreeMap<usize, (SegmentPoint, usize)>,
     pub(crate) closure_receivers: BTreeMap<usize, String>,
     /// Bindings whose callable representation is unknown in this body.
@@ -2023,6 +2166,9 @@ impl RowLayout {
         self.alternative_reference_results.append(&mut other.alternative_reference_results);
         self.shared_results_from_mutable.append(&mut other.shared_results_from_mutable);
         self.staged_mutable_references.append(&mut other.staged_mutable_references);
+        self.reference_receipts.append(&mut other.reference_receipts);
+        self.reference_results.append(&mut other.reference_results);
+        self.reference_result_stages.append(&mut other.reference_result_stages);
         self.aggregate_moves.append(&mut other.aggregate_moves);
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.terminal_calls.append(&mut other.terminal_calls);

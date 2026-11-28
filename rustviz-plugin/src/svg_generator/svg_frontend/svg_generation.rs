@@ -1894,6 +1894,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
     let top_level_ids: HashSet<usize> = visualization_data.preprocess_external_events.iter().map(|(_, e)| e.get_id()).collect();
     let arm_drawn: HashSet<usize> = arm_listed_arrows(&visualization_data.preprocess_external_events)
         .into_iter().filter(|id| !top_level_ids.contains(id)).collect();
+    let stages = &visualization_data.row_layout.reference_result_stages;
+    let staged_lines: BTreeMap<_, _> = visualization_data.event_line_map.iter().filter_map(|(&line, arrows)| {
+        let mut arrows = arrows.iter().filter(|e| !arm_drawn.contains(&e.get_id()));
+        let &(group, _) = stages.get(&arrows.next()?.get_id())?;
+        arrows.all(|e| stages.get(&e.get_id()).is_some_and(|&(g, _)| g == group)).then_some((line, group))
+    }).collect();
     let mut line_insertion_map: HashMap<usize, usize> = HashMap::new();
     // The let-chain bindings the plugin found (before the arms' own are
     // added below).
@@ -1913,6 +1919,12 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
         let (line_num, event) = visualization_data.preprocess_external_events.get_mut(i).unwrap();
         let mut branch_line = 0;
         if skippable_ev.contains(&event.get_id()) {
+            i += 1;
+            continue;
+        }
+        let stage_group = staged_lines.get(line_num).copied();
+        if !event.is_arrow_ev() && stages.get(&event.get_id()).is_some_and(|&(group, _)| Some(group) == stage_group) {
+            // The argument's call mark is placed with the returns below.
             i += 1;
             continue;
         }
@@ -2098,15 +2110,26 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                 .filter(|e| !arm_drawn.contains(&e.get_id()))
                 .cloned().collect::<Vec<_>>());
             let ordered = res.as_deref().and_then(|ev| {
+                if let Some(group) = stage_group {
+                    let mut groups = BTreeMap::<_, Vec<_>>::new();
+                    for (_, event) in visualization_data.preprocess_external_events.iter()
+                        .filter(|(row, _)| *row == line_num) {
+                        if let Some((_, stage)) = stages.get(&event.get_id()).filter(|&&(g, _)| g == group) {
+                            groups.entry(stage).or_default().push(event.clone());
+                        }
+                    }
+                    return Some(groups.into_values().collect());
+                }
                 if ev.iter().any(|e| visualization_data.row_layout.transfer_stack.contains(&e.get_id())) {
                     return Some(ev.iter().cloned().map(|e| vec![e]).collect());
                 }
                 ordered_store_rows(ev, &visualization_data.row_layout.stack_points).or_else(|| ordered_effect_rows(ev, &visualization_data.row_layout.assignment_order, true)).or_else(|| ordered_effect_rows(ev, &visualization_data.row_layout.call_rows, false))
             });
             let ex = match res {
-                Some(ev) if ordered.is_some() => {
+                Some(_) if ordered.is_some() => {
                     let mut row = final_line_num;
-                    for group in ordered.unwrap() {
+                    let mut needed = 0;
+                    for mut group in ordered.unwrap() {
                         stacked_stores.extend(group.iter().map(ExternalEvent::get_id));
                         for e in &group {
                             placed.push((row, e.clone()));
@@ -2119,12 +2142,16 @@ fn place_external_events(source_rs_str: &str, visualization_data: &mut Visualiza
                             }
                         }
                         same_line_row = Some((line_num, row));
-                        let count = group.len();
-                        event_line_map_replace.insert(row, group);
+                        group.retain(ExternalEvent::is_arrow_ev);
+                        let count = group.len().max(1);
+                        if !group.is_empty() {
+                            event_line_map_replace.insert(row, group);
+                        }
+                        needed += count;
                         row += count;
                     }
                     let blanks = source_lines_for_absorb.iter().skip(line_num).take_while(|l| l.trim().is_empty()).count();
-                    let extra = (ev.len() - 1).saturating_sub(blanks);
+                    let extra = (needed - 1).saturating_sub(blanks);
                     reserve_stack_rows(&mut line_insertion_map, final_line_num, extra)
                 }
                 Some(ev) if chain_bindings_side_by_side(&ev, &chain_pairs) => {
