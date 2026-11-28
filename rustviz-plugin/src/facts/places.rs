@@ -144,6 +144,30 @@ impl<'tcx> Names<'tcx> {
         Some((place.local, array, label))
     }
 
+    /// A variant field has no Rust place expression. Use the ADT's
+    /// declared variant and field rather than the debug downcast spelling.
+    pub(super) fn variant_field_label(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Option<String> {
+        let (_, skip, _) = self.root(place)?;
+        let i = (skip..place.projection.len()).find(|&i| matches!(place.projection[i], ProjectionElem::Downcast(..)))?;
+        let prefix = Place { local: place.local, projection: tcx.mk_place_elems(&place.projection[..i]) };
+        let base = self.name(tcx, body, prefix)?;
+        let adt = prefix.ty(body, tcx).ty.ty_adt_def()?;
+        let ProjectionElem::Downcast(_, variant) = place.projection[i] else { return None };
+        let variant = adt.variant(variant);
+        let label = match place.projection.get(i + 1) {
+            Some(ProjectionElem::Field(field, _)) if i + 2 == place.projection.len() =>
+                if variant.ctor_kind().is_some() {
+                    format!("field {} of the {} variant in {base}", field.index(), variant.name)
+                } else {
+                    format!("the {} field of the {} variant in {base}", variant.fields[*field].name, variant.name)
+                },
+            Some(ProjectionElem::Field(field, _)) =>
+                format!("part of the {} field of the {} variant in {base}", variant.fields[*field].name, variant.name),
+            _ => format!("the {} variant in {base}", variant.name),
+        };
+        Some(label)
+    }
+
     /// Describe projections that cannot be written as a named source place.
     pub(super) fn projected(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tcx>) -> Option<super::ProjectedPlace> {
         let (_, skip, _) = self.root(place)?;

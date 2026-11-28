@@ -985,6 +985,8 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c10_06_longest",
         must_contain: &[
+            "x holds an immutable reference; it can read the borrowed value",
+            "y holds an immutable reference; it can read the borrowed value",
             "x is an immutable borrow from the caller",
             "string2 is bound to an immutable reference",
             "string1 is passed to as_str by shared reference (as self, implicitly borrowed). as_str may read it",
@@ -1008,6 +1010,8 @@ const BOOK: &[Snippet] = &[
     Snippet {
         id: "c10_07_longest_inner_scope",
         must_contain: &[
+            "x holds an immutable reference; it can read the borrowed value",
+            "y holds an immutable reference; it can read the borrowed value",
             "string1 is passed to longest by shared reference. longest may read it",
             "string2 is passed to longest by shared reference. longest may read it",
             "L9 result holds an immutable reference",
@@ -2153,6 +2157,20 @@ fn check(s: &Snippet, outcome: &Outcome, failures: &mut Vec<String>, notes: &mut
     }
 
     let actual = tooltips(code, timeline);
+    if matches!(s.id, "c10_06_longest" | "c10_07_longest_inner_scope") {
+        let doc = roxmltree::Document::parse(timeline).expect("validated SVG");
+        for name in ["x", "y"] {
+            let readable = format!("{name} holds an immutable reference; it can read the borrowed value");
+            let initialized_lines: Vec<_> = doc.descendants().filter(|node|
+                node.attribute("data-rv-kind") == Some("line")
+                    && node.attribute("data-rv-var") == Some(name)
+                    && node.attribute("data-rv-line") == Some("1")).collect();
+            if initialized_lines.is_empty() || initialized_lines.iter().any(|node|
+                node.attribute("data-tooltip-text").is_none_or(|tip| clean_tooltip(tip) != readable)) {
+                failures.push(format!("{}: the first {name} segment is missing its read-access clause", s.id));
+            }
+        }
+    }
     let missing: Vec<_> = s.must_contain.iter().filter(|w| !present(w, &actual)).collect();
     if !missing.is_empty() {
         failures.push(format!("{}: missing correct tooltip(s) {:?}", s.id, missing));
