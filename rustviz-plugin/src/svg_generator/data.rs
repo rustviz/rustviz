@@ -771,6 +771,14 @@ fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &Plac
     }
 }
 
+/// A return to a drawn column can target a projection of that column.
+fn release_lender(event: &ExternalEvent) -> Option<&ResourceAccessPoint> {
+    let (ExternalEvent::StaticDie { from, to, .. } | ExternalEvent::MutableDie { from, to, .. }) = event else {
+        return None;
+    };
+    to.extract_rap().filter(|rap| !rap.is_fn() && !from.is_same_underlying(to))
+}
+
 /// Appends `event` to a column's history. A write through a reference
 /// to part of v's resource, drawn on v's column (#861), goes before the
 /// end of that reference's borrow of v on the same line, which may be
@@ -783,14 +791,12 @@ fn element_update_holds_value(r: &ResourceAccessPoint, place: &str, write: &Plac
 /// an arm belongs on the reference's column there, as at the top level (#1277).
 /// `append_branch_event` leaves RefDies out (`ResourceAccessPoint_extract`
 /// names neither side of one).
-/// Its kind comes from the borrow recorded for it in this arm so far,
-/// which isn't on its column yet: a shared reference made from a
-/// mutable borrow (`let r3 = downgrade(&mut s2);`) ends a mutable one
-/// (#1571).
+/// A shared reference can hold an exclusive loan (#1571). Use the loan
+/// at this boundary when MIR identifies it.
 fn append_decl_ref_die(vd: &VisualizationData, e: &ExternalEvent, line: usize, var: &ResourceAccessPoint, b_history: &mut Vec<(usize, Event)>) {
     if let ExternalEvent::RefDie { from: from_ro @ ResourceTy::Value(r), id, .. } = e {
         if r == var {
-            if !r.is_mutref() && history_holds_mut_borrow(vd, b_history, r, line, 4) {
+            if !r.is_mutref() && holder_end_is_mutable(vd, *id, r, b_history, line) {
                 b_history.push((line, Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id, skip_note: None, readable: false }));
             } else {
                 b_history.extend(vd.event_of_external_event(line, e, false));
@@ -6266,7 +6272,7 @@ impl Visualizable for VisualizationData {
         ExternalEvent::RefDie { from: from_ro, to: to_ro, id ,..} => {
           match from_ro.clone() {
               ResourceTy::Deref(ro_is) | ResourceTy::Value(ro_is) => {
-                  if (ro_is.is_mutref() || holds_mut_borrow(self, &ro_is)) && !to_o {
+                  if self.holder_end_is_mutable(*id, &ro_is) && !to_o {
                     vec![(line_num, Event::MutableDie {to: ResourceTy::Anonymous, is: from_ro.clone(), id: *id, skip_note: None, readable: false })]
                   }
                   else {
@@ -6454,9 +6460,7 @@ impl Visualizable for VisualizationData {
                             for (l, e) in &b.e_data {
                                 match e {
                                     ExternalEvent::Branch { branches, .. } => ends_of(branches, rap, out),
-                                    ExternalEvent::StaticDie { to: ResourceTy::Value(lender), .. }
-                                    | ExternalEvent::MutableDie { to: ResourceTy::Value(lender), .. }
-                                        if lender == rap && !b.decl_vars.contains(rap) => out.push((*l, e.clone())),
+                                    _ if release_lender(e) == Some(rap) => out.push((*l, e.clone())),
                                     _ => {}
                                 }
                             }
@@ -6742,9 +6746,7 @@ impl Visualizable for VisualizationData {
                         for (l, e) in &b.e_data {
                             match e {
                                 ExternalEvent::Branch { branches, .. } => outside_ends(branches, skip, out),
-                                ExternalEvent::StaticDie { to: ResourceTy::Value(lender), .. }
-                                | ExternalEvent::MutableDie { to: ResourceTy::Value(lender), .. }
-                                    if !lender.is_fn() && !skip(lender) => out.push((*l, e.clone())),
+                                _ if release_lender(e).is_some_and(|lender| !skip(lender)) => out.push((*l, e.clone())),
                                 _ => {}
                             }
                         }
@@ -6753,8 +6755,7 @@ impl Visualizable for VisualizationData {
                 let mut ends = Vec::new();
                 outside_ends(&branches, &|r| live_vars.contains(r) || decls.contains(r), &mut ends);
                 for (l, e) in ends {
-                    let (ExternalEvent::StaticDie { to: ResourceTy::Value(lender), .. }
-                        | ExternalEvent::MutableDie { to: ResourceTy::Value(lender), .. }) = &e else { continue };
+                    let Some(lender) = release_lender(&e) else { continue };
                     for (ln, ev) in self.event_of_external_event(l, &e, true) {
                         self._append_event(lender, ev, &ln);
                     }
@@ -6799,7 +6800,7 @@ impl Visualizable for VisualizationData {
             ExternalEvent::RefDie { from: from_ro, to: _, id, ..} => { // need Ref Event to avoid drawing redundant arrows when rendering timelines
                 match from_ro.clone() {
                     ResourceTy::Deref(ro_is) | ResourceTy::Value(ro_is) => {
-                        if ro_is.is_mutref() || holds_mut_borrow(self, &ro_is) {
+                        if self.holder_end_is_mutable(id, &ro_is) {
                             maybe_append_event(self, &from_ro.clone(), Event::MutableDie { to: ResourceTy::Anonymous, is: from_ro.clone(), id: id, skip_note: None, readable: false }, line_number);
                             //maybe_append_event(self, &to_ro.clone(), Event::MutableReacquire { from: from_ro, is: to_ro }, &line_number);
                         }
@@ -6939,11 +6940,19 @@ impl Visualizable for VisualizationData {
 /// column drew "made from a mutable borrow", and the end that gives
 /// nothing back (another reference still holds the loan) ended it as an
 /// immutable one.
-fn holds_mut_borrow(vd: &VisualizationData, ro: &ResourceAccessPoint) -> bool {
-    holds_mut_borrow_by(vd, ro, usize::MAX, 4)
+impl VisualizationData {
+    fn holder_end_is_mutable(&self, id: usize, rap: &ResourceAccessPoint) -> bool {
+        let history = self.timelines.get(rap.hash()).map_or(&[][..], |t| t.history.as_slice());
+        holder_end_is_mutable(self, id, rap, history, usize::MAX)
+    }
 }
 
-/// `holds_mut_borrow` for `ro`'s value as of line `by`. A copy of another
+fn holder_end_is_mutable(vd: &VisualizationData, id: usize, rap: &ResourceAccessPoint, history: &[(usize, Event)], line: usize) -> bool {
+    vd.row_layout.holder_end_mutability.get(&id).copied()
+        .unwrap_or_else(|| rap.is_mutref() || history_holds_mut_borrow(vd, history, rap, line, 4))
+}
+
+/// Whether `ro` holds a mutable borrow as of line `by`. A copy of another
 /// reference (`h.r = r4;`, `let Holder { r: r4, .. } = h;` with h.r from
 /// `holder(downgrade(&mut s4))`) holds that reference's loan, so its kind
 /// is the source's as of the copy (the checker's rule, #1521); `depth`

@@ -8374,7 +8374,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let mut points = BTreeSet::from([SegmentPoint::Before(Location::START)]);
     for row in &out_rows {
         let effects: Vec<_> = row.facts.iter().filter(|e| e.drop_route == DropRoute::Normal).collect();
-        if !effects.first().is_some_and(|first| effects.iter().any(|e| e.location != first.location)) {
+        // A transfer and a release on its outgoing edge are distinct
+        // drawing boundaries even when they share one MIR instruction.
+        let transfer_releases = effects.iter().any(|e| matches!(e.fact, Fact::Copy { .. } | Fact::Move { .. }))
+            && effects.iter().any(|e| matches!(e.fact, Fact::BorrowEnd { .. } | Fact::HoldEnd { .. }));
+        if !transfer_releases && !effects.first().is_some_and(|first| effects.iter().any(|e| e.location != first.location)) {
             continue;
         }
         for event in effects {

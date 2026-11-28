@@ -1739,6 +1739,16 @@ impl<'tcx> Order<'_, 'tcx> {
         for (line, indices) in lines {
             for &i in &indices {
                 let event = &events[i].1;
+                if matches!(event, E::RefDie { .. }) {
+                    if let Some(ends) = self.references.ends.get(&event.get_id()) {
+                        let mut kinds = ends.iter().filter_map(|end| {
+                            self.loan(end.loan).map(|loan| matches!(loan.kind, "mut" | "unique"))
+                        });
+                        if let Some(kind) = kinds.next().filter(|&first| kinds.all(|kind| kind == first)) {
+                            layout.holder_end_mutability.insert(event.get_id(), kind);
+                        }
+                    }
+                }
                 if let Some(point) = self.reference_receipt(event) {
                     layout.reference_receipts.insert(event.get_id(), point);
                 }
@@ -2106,6 +2116,8 @@ pub struct RowLayout {
     /// Owner columns whose incoming loan cannot be present in the selected enum variant.
     pub(crate) fieldless_lenders: BTreeMap<(usize, usize, u64), u64>,
     pub(crate) scope_end_ids: BTreeSet<usize>,
+    /// The kind of loan a MIR holder-end mark stops carrying.
+    pub(crate) holder_end_mutability: BTreeMap<usize, bool>,
     pub(crate) holder_handoff_titles: BTreeMap<usize, String>,
     pub(crate) result_lend_titles: BTreeMap<usize, String>,
     pub(crate) alternative_reference_results: BTreeSet<usize>,
@@ -2161,6 +2173,7 @@ impl RowLayout {
         self.uncertain_store_ends.append(&mut other.uncertain_store_ends);
         self.available_after_store_end.append(&mut other.available_after_store_end);
         self.arm_points.append(&mut other.arm_points);
+        self.holder_end_mutability.append(&mut other.holder_end_mutability);
         self.end_before_fork.append(&mut other.end_before_fork);
         self.segment_points.append(&mut other.segment_points);
         self.alternative_reference_results.append(&mut other.alternative_reference_results);

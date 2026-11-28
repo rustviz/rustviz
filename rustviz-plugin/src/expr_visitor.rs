@@ -5187,21 +5187,58 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     out
   }
 
-  /// The last line of the MIR loan of `lender_name` (a variable or a
-  /// field of one) taken on `line`: where the borrow checker ends it.
-  /// `hold.r = &t` writes a reference field of a struct variable
-  /// (`lhs_expr` is the field, `lhs_rap` its column) that held a
-  /// borrow (`old`). Returns the line the borrow checker ends that old
-  /// loan on, if it's after the write; None for anything else (a plain
-  /// reference variable, whose old borrow does end at the write because
-  /// the variable is dead until then, or a loan that ends by then).
-  pub fn field_write_loan_end(&self, lhs_expr: &'tcx Expr<'tcx>, lhs_rap: &ResourceAccessPoint, old: &RefData, line: usize) -> Option<usize> {
-    let ExprKind::Field(..) = lhs_expr.kind else { return None };
+  /// A projected store can replace its reference while the previous
+  /// loan still restricts the lender. Use the old store's reaching
+  /// definition, or the original issue for a field written indirectly.
+  pub(crate) fn field_write_releases(
+    &self, lhs: &Expr<'_>, assignment: rustc_span::Span, field: &ResourceAccessPoint, old: &RefData,
+  ) -> Option<(&'a crate::facts::LoanInfo, Vec<crate::facts::repoints::Boundary<'a>>)> {
     let ResourceTy::Value(lender) = &old.lender else { return None };
-    if lender.is_ref() || lender.is_fn() || lhs_rap.is_fn() {
-      return None;
-    }
-    self.loan_end_line(old.assigned_at, lender.name()).filter(|&end| end > line)
+    if !field.is_member() || lender.is_ref() || lender.is_fn() { return None; }
+    let facts = self.body_facts?;
+    let body = &self.bwf.body;
+    let is_lender = |loan: &crate::facts::LoanInfo| loan.lender_local.is_some_and(|local|
+      self.raps.place(local, &loan.lender).is_some_and(|binding| &binding.rap == lender));
+    let store = self.reference_effects.assignment(lhs.span, assignment).filter(|store| !store.destination.is_indirect());
+    let is_field = |place: &crate::facts::EndPlace| {
+      self.raps.place(Local::from_usize(place.local), &place.name).is_some_and(|binding| &binding.rap == field)
+    };
+    let (at, loan) = if let Some(store) = store {
+      // An overwrite of a result tied to several inputs has a separate
+      // holder boundary and release for each possible lender.
+      let [id] = store.incoming? else { return None };
+      let loan = facts.loans.iter().find(|loan| loan.loan == *id && !store.installed.contains(id) && is_lender(loan))?;
+      (store.fact.occurrence.at, loan)
+    } else {
+      let mut writes = [lhs.span, assignment].into_iter()
+        .flat_map(|span| facts.writes.get(&span.with_parent(None)).into_iter().flatten())
+        .filter(|write| write.runs && !write.skipped);
+      let first = writes.next()?;
+      if first.direct || !writes.all(|write| write.at == first.at)
+        || first.dest.as_ref().and_then(|column| self.write_rap(column)).as_ref() != Some(field)
+      {
+        return None;
+      }
+      let explicit = old.borrow_span.and_then(|span| self.loan_at_span(span)).map(|loan| loan.loan);
+      let dom = body.basic_blocks.dominators();
+      let mut loans = facts.loans.iter().filter(|loan| explicit.is_none_or(|id| id == loan.loan)
+        && is_lender(loan) && loan.issue.is_some_and(|issue| issue.dominates(first.at, dom))
+        && self.reference_effects.ends(loan.loan).any(|end| end.release && end.fact.end_places.iter().any(is_field)));
+      (first.at, loans.next().filter(|_| loans.next().is_none())?)
+    };
+    let destination = store.map(|store| crate::facts::EndPlace::new(self.tcx, store.destination, String::new()));
+    let ends: Vec<_> = self.reference_effects.ends(loan.loan).filter(|end| {
+      end.release && end.fact.end_places.iter().any(|p| destination.as_ref().map_or_else(
+        || is_field(p), |dest| p.local == dest.local && p.projection == dest.projection))
+    }).collect();
+    ends.iter().any(|end| {
+      let occurrence = end.fact.occurrence;
+      let replacement = crate::facts::Occurrence { at: occurrence.at, successor: None, exit: None };
+      let next_store = self.reference_effects.stores.get(&replacement);
+      occurrence.at != at
+        && !crate::facts::repoints::occurrence_precedes(body, occurrence, at)
+        && !store.zip(next_store).is_some_and(|(first, next)| first.destination == next.destination)
+    }).then_some((loan, ends))
   }
 
   pub fn loan_end_line(&self, line: usize, lender_name: &str) -> Option<usize> {

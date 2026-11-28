@@ -11229,13 +11229,27 @@ fn leg_table_pieces(
                 let owns_row = source.and_then(|source| table.arm_owns_row(function, source, src)).unwrap_or(!short_circuit);
                 (owns_row && on_arm).then(|| table.cell(function, rap.name(), src, floor)).flatten()
             };
+            // A shared source row or a reconverging arm can lack a
+            // row snapshot of its own. After a release on this leg,
+            // prefer its actual MIR edge to the arm's entry state.
+            let after_release = || {
+                use crate::facts::schema::SegmentPoint;
+                history.iter().rev().filter(|(at, _)| *at == row).find_map(|(_, event)| {
+                    if !matches!(event, Event::StaticReacquire { .. } | Event::MutableReacquire { .. }) {
+                        return None;
+                    }
+                    let &point @ SegmentPoint::Edge { .. } =
+                        visualization_data.row_layout.segment_points.get(&event.get_id())? else { return None };
+                    table.segment_point_cell(function, rap.name(), point).cloned()
+                })
+            };
             let stacked = rl.get(row + 1).is_some_and(Option::is_none);
             let cell = if stacked {
                 segment_interval_cell(rap, visualization_data, row, history)
                     .or(one_line)
                     .or_else(|| (!on_arm || history.is_empty()).then(boundary).flatten())
             } else {
-                one_line.or_else(own_row).or_else(|| {
+                one_line.or_else(own_row).or_else(after_release).or_else(|| {
                     // A call in this arm can share a source row with
                     // another arm or fork. Above its release dot, the
                     // call's own input still restricts the reference.
