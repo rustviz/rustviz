@@ -136,6 +136,8 @@ pub const INVARIANTS: &[(&str, &str)] = &[
      "an arrow to a column ends at none of that column's dots"),
     ("outside-figure",
      "an element is drawn outside the timeline's width or height"),
+    ("arrow-in-gutter",
+     "an arrow extends left of the column margin, its caller or function endpoint, or the space reserved for a borrow-end stub"),
     ("fork-without-dot",
      "two legs of a column leave a point in different directions (a fork) or meet there (a join) \
       with no dot of that column there: the conditional's split or join is drawn in mid-line"),
