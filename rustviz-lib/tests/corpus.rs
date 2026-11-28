@@ -35303,6 +35303,8 @@ fn issue_1955_loan_ends_follow_the_reaching_holder() {
 #[test]
 fn issue_1955_handoff_and_release_tooltips() {
     let copy = run_with_local_backend("edition2024/rv3_1955_01").timeline_panel_string();
+    // Writing s after the copy is E0502 before formatting uses r2 and
+    // is accepted after that call.
     check_review_tip(&copy, "s@L9:dot:",
         &["r2 keeps s shared until println! returns", "s's resource is no longer immutably borrowed"],
         &["still immutably borrowed by r and r2", "still immutably borrowed by r2"]);
@@ -43941,6 +43943,30 @@ fn mir_review_copy_keeps_original_mutable_loan() {
         "x immutably borrows a resource"]);
     let svg = run_with_local_backend(case).timeline_panel_string();
     assert!(drawn_clauses(&svg, "x", "5").iter().all(|(_, _, t)| !t.contains("x's mutable borrow ends")));
+    // After k is initialized, rustc accepts reassigning y but rejects
+    // writing to a before the last use of k.
+    check_review_tip(&svg, "y@L6:dot:static_lend+static_reacquire",
+        &["println! borrows y for formatting", "y is no longer immutably borrowed"],
+        &["k keeps y shared"]);
+}
+
+#[test]
+fn issue_1955_formatting_after_let_else_uses_the_copied_references() {
+    // After destructuring, rustc rejects writes to the lenders before
+    // the last use of the copied references and accepts them after the call.
+    for (case, row, holder, places) in [
+        ("holder_return_clear_of_leg_1476", 12, "pair", ["a", "b"]),
+        ("holder_return_clear_of_leg_1476", 23, "pair", ["a", "b"]),
+        ("holder_tuple_literal_1459", 12, "pair", ["a", "b"]),
+        ("holder_tuple_literal_1459", 35, "r", ["e", "g"]),
+    ] {
+        let svg = run_with_local_backend(case).timeline_panel_string();
+        for place in places {
+            check_review_tip(&svg, &format!("{place}@L{row}:dot:static_lend+static_reacquire"),
+                &[&format!("{place}'s resource is no longer immutably borrowed")],
+                &[&format!("still immutably borrowed by {holder}")]);
+        }
+    }
 }
 
 #[test]

@@ -8,7 +8,7 @@ pub(crate) use repoints::DrawnReferenceEffects;
 use crate::expr_visitor::ExprVisitor;
 use crate::facts::schema::{BodyFacts, DropRoute, Ev, Fact, LoanInfo, ReferencePoint, Row};
 use crate::svg_generator::data::{ExternalEvent as E, InitBy, ResourceAccessPoint, ResourceTy};
-use rustc_middle::mir::{Body, Location, Rvalue, StatementKind, TerminatorKind};
+use rustc_middle::mir::{Body, Location, Place, Rvalue, StatementKind, TerminatorKind};
 use rustc_span::Span;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -78,9 +78,17 @@ fn names_lender(r: &ResourceTy, l: &LoanInfo) -> bool {
         || matches!(r, ResourceTy::Caller) && l.source == "caller"
 }
 
-impl Order<'_, '_> {
+impl<'tcx> Order<'_, 'tcx> {
     fn loan(&self, id: usize) -> Option<&LoanInfo> {
         self.facts.loans.iter().find(|l| l.loan == id)
+    }
+
+    fn borrowed_place(&self, loan: &LoanInfo) -> Option<Place<'tcx>> {
+        let at = loan.issue?;
+        let statement = self.body[at.block].statements.get(at.statement_index)?;
+        let StatementKind::Assign(assignment) = &statement.kind else { return None };
+        let Rvalue::Ref(_, _, place) = assignment.1 else { return None };
+        Some(place)
     }
 
     fn matches(&self, ev: &E, f: &Ev) -> bool {
@@ -1023,11 +1031,13 @@ impl Order<'_, '_> {
             let blocks = &self.body.basic_blocks;
             let call_at = Location { block: blocks.reverse_postorder()[at.0], statement_index: at.1 };
             let mut handoffs = BTreeSet::new();
-            let mut candidates: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+            let mut candidates: BTreeMap<&str, BTreeSet<usize>> = BTreeMap::new();
             for loan in &self.facts.loans {
                 if names_lender(from, loan) {
-                    for holder in &loan.direct_holders {
-                        candidates.entry(holder).or_default().push(loan.loan);
+                    // A reference field can have only the aggregate's
+                    // column, which is what the call tooltip names.
+                    for holder in loan.direct_holders.iter().chain(loan.holder_stores.iter().map(|store| &store.place.name)) {
+                        candidates.entry(holder).or_default().insert(loan.loan);
                     }
                 }
             }
@@ -1048,17 +1058,22 @@ impl Order<'_, '_> {
                                 return false;
                             }
                             end.fact.end_places.iter().any(|place| {
-                                if place.name != holder { return false; }
+                                let mut stores = loan.holder_stores.iter().filter(|store| {
+                                    store.place.name == holder && store.place.local == place.local
+                                });
+                                let Some(store) = stores.next().filter(|s| {
+                                    s.complete && s.place.projection.starts_with(&place.projection) && stores.next().is_none()
+                                }) else {
+                                    return false;
+                                };
                                 if !self.facts.definite_hold_origins.get(&(end.fact.occurrence, *id))
                                     .is_some_and(|slots| slots.iter().any(|slot|
-                                        slot.local.index() == place.local && slot.projection == place.projection))
+                                        slot.local.index() == store.place.local && slot.projection == store.place.projection))
                                 {
                                     return false;
                                 }
-                                let mut stores = loan.holder_stores.iter().filter(|store| &store.place == place);
-                                let finished = stores.next().is_some_and(|store| store.complete) && stores.next().is_none();
-                                if finished { handoffs.insert(*id); }
-                                finished
+                                handoffs.insert(*id);
+                                true
                             })
                         })
                     })
@@ -1066,17 +1081,27 @@ impl Order<'_, '_> {
                     layout.ended_before_call.entry(*id).or_default().insert(holder.to_owned());
                 }
             }
-            // The copied holder and the call loan can end together. In
-            // that case the holder keeps the lender shared through the
-            // call, and no holder from this loan remains afterward.
+            // The call and the copied holder must borrow the same MIR
+            // place. A reborrow through a reference can keep its referent
+            // borrowed while the call borrows the reference slot itself.
+            let ResourceTy::Value(lender) = from else { return };
             let returned = |loan| self.reference_facts.ends(loan).filter(|end| end.release);
-            let holders: BTreeSet<_> = normal_facts(row).filter_map(|fact| {
+            let mut call_loans = normal_facts(row).filter_map(|fact| {
                 let Fact::Borrow { loan, .. } = fact.fact else { return None };
-                (fact.location == call_at && self.loan(loan).is_some_and(|l| names_lender(from, l))).then_some(loan)
-            }).flat_map(returned).flat_map(|call_end| {
-                handoffs.iter().copied().flat_map(returned).filter(move |holder_end|
-                    holder_end.fact.occurrence == call_end.fact.occurrence)
-            }).filter_map(|end| {
+                if fact.location != call_at { return None; }
+                let info = self.loan(loan)?;
+                let borrowed = self.borrowed_place(info)?;
+                (info.kind == "shared" && info.lender == *lender.name()
+                    && Some(borrowed.local) == lender.scope_local()).then_some((loan, borrowed))
+            });
+            let Some((loan, borrowed)) = call_loans.next().filter(|_| call_loans.next().is_none()) else {
+                return;
+            };
+            let call_ends: BTreeSet<_> = returned(loan).map(|end| end.fact.occurrence).collect();
+            let holders: BTreeSet<_> = handoffs.into_iter().filter(|id| self.loan(*id).is_some_and(|loan|
+                loan.kind == "shared" && self.borrowed_place(loan) == Some(borrowed)
+            )).flat_map(returned).filter_map(|end| {
+                if !call_ends.contains(&end.fact.occurrence) { return None; }
                 let [place] = end.fact.end_places.as_slice() else { return None };
                 (end.fact.exact_end_places.contains(place) || end.fact.transfer_paths.iter().any(|steps|
                     steps.last().is_some_and(|step| &step.place == place)))
