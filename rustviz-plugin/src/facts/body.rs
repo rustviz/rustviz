@@ -3053,6 +3053,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 } else if place_under(bp, *slot) {
                     match &bp.projection[slot.projection.len()..] {
                         [ProjectionElem::Deref] => ReferenceTarget::Referent,
+                        [ProjectionElem::Deref, rest @ ..] if rest.iter().all(|p| *p == ProjectionElem::Deref)
+                            && matches!(kind, "mut" | "unique") => ReferenceTarget::NestedReferent,
                         [ProjectionElem::Deref, ProjectionElem::Downcast(_, variant), ProjectionElem::Field(..)]
                             if slot.ty(body, tcx).ty.builtin_deref(true).and_then(|ty| ty.ty_adt_def())
                                 .is_some_and(|adt| adt.variant(*variant).fields.len() == 1) =>
@@ -6322,6 +6324,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }).collect();
     let iterator_move_edges: Vec<_> = item_moves.iter().flat_map(|(&(storage, _), &at)|
         cx.r.real_succs(at).into_iter().map(move |to| (storage, at, to))).collect();
+    // Universal origins can relate independent parameters with the same
+    // lifetime. An unchanged argument's value cannot contain a loan
+    // issued by this body, even if its origin contains the loan.
+    let assigned_locals: BTreeSet<_> = move_data.inits.iter().filter_map(|init|
+        matches!(init.location, rustc_mir_dataflow::move_paths::InitLocation::Statement(_))
+            .then(|| move_data.move_paths[init.path].place.local)).collect();
+    let unchanged_arguments: BTreeSet<_> = body.args_iter().filter(|arg|
+        !assigned_locals.contains(arg) && !stores.addressed.iter().any(|place| place.local == *arg)
+            && matches!(body.local_decls[*arg].ty.kind(), TyKind::Ref(_, pointee, _) if regions_of(*pointee).is_empty()))
+        .collect();
     let mut entries: BTreeMap<usize, BTreeSet<Location>> = BTreeMap::new();
     let start = Location::START;
     entries.entry(cx.row_of(start)).or_default().insert(start);
@@ -6904,7 +6916,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         for (slot, name, _) in &reference_slots {
                             if *name == c && st.locals.get(c) == Some(&Some(slot.local))
                                 && matches!(l.reference_targets.get(&(slot.local, c.clone())),
-                                    Some(ReferenceTarget::Referent | ReferenceTarget::VariantPayload | ReferenceTarget::Part))
+                                    Some(ReferenceTarget::Referent | ReferenceTarget::NestedReferent | ReferenceTarget::VariantPayload | ReferenceTarget::Part))
                             {
                                 let source = reborrow_slots.get(&issue).copied().unwrap_or(*slot);
                                 let (original, replaced) = replaced_since(source, issue, exits, after, imaginary, edge_to.map(|to| to.block));
@@ -7131,9 +7143,12 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if !st.reference_types.contains_key(name) { continue; }
             for loan in restrictions {
                 st.reference_carriers.entry(loan.loan).or_insert_with(|| {
-                    if point.is_some() { return loan.current.clone(); }
-                    let mut carriers: BTreeSet<String> = st.holds.iter().filter(|(_, ls)|
-                        ls.contains(&loan.loan)).map(|(h, _)| h.clone()).collect();
+                    let mut carriers: BTreeSet<String> = if point.is_some() {
+                        loan.current.clone()
+                    } else {
+                        st.holds.iter().filter(|(_, ls)|
+                            ls.contains(&loan.loan)).map(|(h, _)| h.clone()).collect()
+                    };
                     // For shared direct references, the origin at this
                     // boundary can be live through a later use of an inner
                     // projection. Keep that direct carrier if no other
@@ -7149,6 +7164,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             carriers.remove(&column.root);
                             carriers.insert(field.clone());
                         }
+                    }
+                    if taken_at(loan.loan).is_some() {
+                        carriers.retain(|name| st.locals.get(name).copied().flatten()
+                            .is_none_or(|local| !unchanged_arguments.contains(&local)));
                     }
                     carriers
                 });
@@ -7166,10 +7185,28 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 st.manually_taken.insert(take.column.clone(), Extraction { inner: take.inner.clone(), maybe: paths.intact });
             }
         }
+        let mut fieldless_carriers = BTreeMap::new();
         for (name, loans) in &st.lent {
             let exclusive = loans.iter().any(|l| matches!(l.kind, "mut" | "unique"));
             let ids = loans.iter().filter(|l| matches!(l.kind, "mut" | "unique") == exclusive).map(|l| l.loan).collect();
-            if may_skip(exits, after, &ids, imaginary, &|_, _| false) { st.may_lend.insert(name.clone()); }
+            // A shared loan can be taken before the branch, yet only a
+            // payload on some paths can use it after the join.
+            let fieldless = (st.reference_types.contains_key(name))
+                .then(|| match loans.as_slice() {
+                    [loan] if loan.kind == "shared" => st.reference_carriers.get(&loan.loan),
+                    _ => None,
+                }).flatten()
+                .and_then(|names| names.first().filter(|_| names.len() == 1))
+                .and_then(|name| st.locals.get(name).copied().flatten())
+                .is_some_and(|local| *fieldless_carriers.entry(local).or_insert_with(|| {
+                    exits.iter().any(|&at| {
+                        let at = if after && at != body.terminator_loc(at.block) { at.successor_within_block() } else { at };
+                        stores.has_fieldless_variant(at, local)
+                    })
+                }));
+            if fieldless || may_skip(exits, after, &ids, imaginary, &|_, _| false) {
+                st.may_lend.insert(name.clone());
+            }
         }
         st
     };
@@ -7198,7 +7235,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             .then_some((arm, edge.successor))
     });
     let arm_edges: Vec<_> = entry_edges.clone().filter(|(arm, _)|
-        !drop_holders_at_reassign.is_empty() || fieldless_arms.contains(arm)).collect();
+        !reference_slots.is_empty() || !drop_holders_at_reassign.is_empty() || fieldless_arms.contains(arm)).collect();
     let mut arm_entries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, BTreeSet<_>>>::default();
     for (arm, block) in entry_edges {
         arm_entries.entry(arm.branch).or_default().entry(arm.index).or_default().insert(block.start_location());
@@ -7942,7 +7979,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
                 for (arm, entries) in by_arm {
                     if let Some(bounds) = boundaries.get_mut(&arm).filter(|bounds| bounds.entry.is_some()) {
-                        bounds.join = Some(state_at(&entries, false, false, None, None, None));
+                        let next = entries.iter().map(|&from| (from, at)).collect();
+                        let runtime: Vec<_> = entries.iter().copied().flat_map(runtime_edge).collect();
+                        let mut snapshot = state_at(&entries, true, false, Some(&runtime), Some(&next), None);
+                        bounds.join_references_only = drop_holders_at_reassign.is_empty()
+                            && !fieldless_arms.contains(&super::SourceArm { branch: id, index: arm });
+                        if bounds.join_references_only {
+                            snapshot.state.retain(|name, _| snapshot.reference_types.contains_key(name));
+                        }
+                        bounds.join = Some(snapshot);
                     }
                 }
             }

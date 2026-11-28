@@ -659,6 +659,7 @@ pub struct ArmBoundaries {
     pub(crate) own_rows: BTreeSet<usize>,
     pub entry: Option<State>,
     pub join: Option<State>,
+    pub(crate) join_references_only: bool,
 }
 
 fn conditional_joins<S: serde::Serializer>(
@@ -875,6 +876,7 @@ pub(crate) enum ReferenceTarget {
     Binding,
     Ancestor,
     Referent,
+    NestedReferent,
     VariantPayload,
     Coerced,
     Part,

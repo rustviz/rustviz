@@ -489,7 +489,10 @@ impl ExprVisitor<'_, '_> {
           if let Some((_, ExternalEvent::Branch { branches, join_id, .. })) =
             branch_at(self.preprocessed_events, branch, &mut Vec::new())
           {
-            let state = branches[arm].source.and_then(|arm| facts.arm_boundaries.get(&arm.branch)?.get(&arm.index)?.join.as_ref())
+            let state = branches[arm].source.and_then(|arm| {
+              let bounds = facts.arm_boundaries.get(&arm.branch)?.get(&arm.index)?;
+              (!bounds.join_references_only).then_some(bounds.join.as_ref()).flatten()
+            })
               .or_else(|| facts.joins.get(&(*join_id)?).filter(|j| !j.checked_only).map(|j| &j.state));
             if let Some(state) = state {
               for column in facts.columns.iter().filter(|c| c.local == lender) {

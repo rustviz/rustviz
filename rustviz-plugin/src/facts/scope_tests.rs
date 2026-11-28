@@ -49,6 +49,47 @@ fn with_fixture_body(fixture: &str, name: &str, check: impl Fn(TyCtxt<'_>, &Body
     rustc_driver::run_compiler(&args, &mut Check(name, check));
 }
 
+fn check_reference_join(func: &str, column: &str, expected_arms: usize) {
+    with_fixture_body("reference_arm_privileges_1962", func, move |tcx, facts| {
+        let bwf = rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, facts.def_id.expect_local());
+        let body = &bwf.body;
+        let local = facts.bindings.columns[column][0];
+        let mut joins = facts.joins.iter();
+        let (branch, join) = joins.next().unwrap();
+        assert!(joins.next().is_none());
+        assert_eq!(join.incoming.len(), expected_arms);
+        for edge in &join.incoming {
+            let at = edge.from;
+            let block = &body[at.block];
+            if expected_arms == 1 {
+                assert_eq!(at.successor_within_block(), join.at);
+                assert!(matches!(&block.statements[at.statement_index].kind,
+                    rustc_middle::mir::StatementKind::Assign(write) if write.0.as_local() == Some(local)));
+            } else {
+                assert_eq!(at, body.terminator_loc(at.block));
+                assert!(matches!(block.terminator().kind,
+                    TerminatorKind::Call { destination, target: Some(to), .. }
+                        if destination.as_local() == Some(local) && to.start_location() == join.at));
+            }
+        }
+        let arms: Vec<_> = facts.arm_boundaries[branch].values().filter_map(|arm| arm.join.as_ref()).collect();
+        assert_eq!(arms.len(), expected_arms);
+        for arm in arms {
+            assert_eq!(arm.state.get(column), Some(&"own"), "{func} arm before initialization");
+        }
+    });
+}
+
+#[test]
+fn issue_1962_let_else_join_follows_the_pattern_store() {
+    check_reference_join("bind_on_success", "p", 1);
+}
+
+#[test]
+fn issue_1962_call_join_follows_the_return_edge() {
+    check_reference_join("call_result", "result", 2);
+}
+
 #[test]
 fn scope_review_ordinary_unwind_drops_live_argument() {
     with_body("unwind", |tcx, facts| {

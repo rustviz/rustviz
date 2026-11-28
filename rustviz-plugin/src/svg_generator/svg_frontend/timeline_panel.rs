@@ -10315,12 +10315,20 @@ fn render_branches(
                 leading_state = State::FullPrivilege { s: LineState::Uninit };
             }
             let explain_boundary = |seg: &mut BranchSeg, joining| {
-                if rap.is_ref() && !state_is_dashed(&seg.state) {
+                let gray_join = joining && rap.is_mutref() && matches!(seg.state, State::FullPrivilege { s: LineState::Gray }
+                    | State::PartialPrivilege { s: LineState::Gray });
+                if rap.is_ref() && (!state_is_dashed(&seg.state) || gray_join) {
                     let cell = visualization_data.fn_source_lines.get(rap.hash()).zip(branch.source)
                         .and_then(|(&function, source)| visualization_data.state_table.arm_boundary_cell(
-                            function, rap.name(), source, joining));
-                    if cell.is_some() {
-                        (seg.state, seg.title) = reference_segment(&seg.state, rap, visualization_data, cell);
+                            function, rap.name(), source, joining))
+                        .filter(|cell| matches!(cell.init, Init::Own | Init::Partly));
+                    if let Some(cell) = cell {
+                        let layout = convert_back(&seg.state);
+                        let (state, title) = reference_segment(&layout, rap, visualization_data, Some(cell));
+                        if !gray_join || matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }) {
+                            seg.state = state;
+                            seg.title = if gray_join { format!("{} {title}", seg.title) } else { title };
+                        }
                     }
                 }
                 if !rap.is_ref() && matches!(seg.state, State::PartialPrivilege { s: LineState::Full }
@@ -10449,11 +10457,17 @@ fn render_branches(
                     let rise = apexes.raised_splits.get(&first_row).copied()
                         .or_else(|| apexes.splits.contains(&first_row).then_some(COLLAPSED_APEX))
                         .unwrap_or(0);
+                    let next = segs.len();
                     push_seg_if_renderable(
                         &mut segs, rap,
                         (branch_x, column_top_y), (branch_x, (get_y_axis_pos(first_row) - rise) as f64),
                         leading_state, visualization_data, &arm_label, Leg::Column, *split_point, first_row, &arm_path,
                     );
+                    if rap.is_ref() {
+                        if let Some(seg) = segs.get_mut(next) {
+                            explain_boundary(seg, false);
+                        }
+                    }
                 }
             }
             let connectors = segs.len();
@@ -10549,6 +10563,20 @@ fn render_branches(
                         continue;
                     }
                     match p_title {
+                        Some(title) if rap.is_ref() && matches!(p_state, State::FullPrivilege { s: LineState::Gray }
+                            | State::PartialPrivilege { s: LineState::Gray }) =>
+                        {
+                            let next = segs.len();
+                            push_seg_if_renderable(
+                                &mut segs, rap,
+                                (branch_x, py1 as f64), (branch_x, py2 as f64),
+                                p_state, visualization_data, &arm_label, Leg::Column, p_top, p_bot, &arm_path,
+                            );
+                            if let Some(seg) = segs.get_mut(next) {
+                                seg.title.push_str(" On this path, ");
+                                seg.title.push_str(&title);
+                            }
+                        }
                         Some(title) if seg_drawn(rap, &p_state) => segs.push(BranchSeg {
                             p1: (branch_x, py1 as f64), p2: (branch_x, py2 as f64), state: p_state, title,
                             inactive_arm: None, own_row: false, rows: (p_top, p_bot),
@@ -10951,7 +10979,11 @@ fn render_branches(
             for seg in &mut segs {
                 if let Some(arm) = &seg.inactive_arm {
                     if seg_underline_y(seg, own_y, split_row, row_lines).is_none() {
-                        seg.title = hover_messages::state_inactive_arm_unlit(arm);
+                        let lit = hover_messages::state_inactive_arm(arm);
+                        let unlit = hover_messages::state_inactive_arm_unlit(arm);
+                        if let Some(suffix) = seg.title.strip_prefix(&lit) {
+                            seg.title = unlit + suffix;
+                        }
                     }
                 }
                 // The replacement may use the last row of a compact arm.
@@ -11208,32 +11240,61 @@ fn leg_table_pieces(
         if rap.is_ref() {
             let row = w[0];
             let source = arm.1.get(arm.0).copied().flatten();
-            let cell = if rl.get(row + 1).is_some_and(Option::is_none) {
-                reference_interval_cell(rap, visualization_data, row, history)
-            } else {
-                let function = visualization_data.fn_source_lines[rap.hash()];
-                let table = &visualization_data.state_table;
-                one_line.or_else(|| {
-                    let src = rv_attrs::line_of(row, rl)?;
-                    let floor = rv_attrs::line_of(own.0, rl)?;
-                    // A short-circuit operand that can be entered more than one
-                    // way has no boundary facts and owns no row we can name.
-                    let owns_row = source.and_then(|source| table.arm_owns_row(function, source, src)).unwrap_or(!short_circuit);
-                    (owns_row && own.0 <= row && row < own.1).then(|| table.cell(function, rap.name(), src, floor)).flatten()
-                }).or_else(|| {
-                    table.arm_boundary_cell(function, rap.name(), source?, row >= own.1).cloned()
-                })
+            let function = visualization_data.fn_source_lines[rap.hash()];
+            let table = &visualization_data.state_table;
+            let on_arm = own.0 <= row && row < own.1;
+            let padding = !on_arm && !from_arm;
+            let boundary = || {
+                let source = source?;
+                table.arm_boundary_cell(function, rap.name(), source, row >= own.1 && row >= arm.3).cloned()
             };
-            // The leg is drawn as holding a reference. A cell that says the
-            // binding is unassigned is not about this leg's path (a one-line
-            // arm's snapshot taken before its own store), so it can't speak.
+            let own_row = || {
+                let src = rv_attrs::line_of(row, rl)?;
+                let floor = rv_attrs::line_of(own.0, rl)?;
+                let owns_row = source.and_then(|source| table.arm_owns_row(function, source, src)).unwrap_or(!short_circuit);
+                (owns_row && on_arm).then(|| table.cell(function, rap.name(), src, floor)).flatten()
+            };
+            let stacked = rl.get(row + 1).is_some_and(Option::is_none);
+            let cell = if stacked {
+                reference_interval_cell(rap, visualization_data, row, history)
+                    .or(one_line)
+                    .or_else(|| (!on_arm || history.is_empty()).then(boundary).flatten())
+            } else {
+                one_line.or_else(own_row).or_else(|| {
+                    // A call in this arm can share a source row with
+                    // another arm or fork. Above its release dot, the
+                    // call's own input still restricts the reference.
+                    use crate::facts::schema::ReferencePoint;
+                    history.iter().filter(|(at, event)| *at == w[1] && matches!(event,
+                        Event::StaticReacquire { .. } | Event::MutableReacquire { .. }))
+                        .find_map(|(_, event)| {
+                            let &ReferencePoint::Edge { from, .. } =
+                                visualization_data.row_layout.reference_points.get(&event.get_id())? else { return None };
+                            if !table.returns_from_call(function, from) { return None; }
+                            table.reference_point_cell(function, rap.name(), ReferencePoint::Before(from)).cloned()
+                        })
+                }).or_else(boundary)
+            };
+            // A snapshot before the arm's own store cannot describe a
+            // connector that is already carrying its result.
             let cell = cell.filter(|c| c.init != Init::Unassigned
                 || matches!(state, State::FullPrivilege { s: LineState::Uninit }));
-            let (st, title) = reference_segment(state, rap, visualization_data, cell.as_ref());
-            if let Some(last) = out.last_mut().filter(|l| l.5 == from_arm && l.2 == st && l.3.as_ref() == Some(&title)) {
+            let (mut st, title) = reference_segment(state, rap, visualization_data, cell.as_ref());
+            let revoked = |st: &State| matches!(st, State::RevokedPrivilege { .. });
+            // Gray identifies skipped source rows. Keep explaining the
+            // state of this reference on the arm to which the leg belongs.
+            if padding && (revoked(state) || revoked(&st)) {
+                st = if rap.is_mutref() && !matches!(st, State::PartialPrivilege { .. }) {
+                    State::FullPrivilege { s: LineState::Gray }
+                } else {
+                    State::PartialPrivilege { s: LineState::Gray }
+                };
+            }
+            let title = Some(title);
+            if let Some(last) = out.last_mut().filter(|l| l.5 == from_arm && l.2 == st && l.3 == title) {
                 last.1 = w[1];
             } else {
-                out.push((row, w[1], st, Some(title), true, from_arm));
+                out.push((row, w[1], st, title, true, from_arm));
             }
             continue;
         }
@@ -11392,6 +11453,9 @@ fn leg_lent_state(state: &State, rap: &ResourceAccessPoint, visualization_data: 
 fn one_line_arm_piece(state: &State, rap: &ResourceAccessPoint, visualization_data: &VisualizationData, at: usize, cell: crate::facts::table::Cell) -> Option<(State, Option<String>)> {
     use crate::facts::table::{Init, Why};
     if rap.is_ref() {
+        if cell.init == Init::Unassigned && !matches!(state, State::FullPrivilege { s: LineState::Uninit }) {
+            return None;
+        }
         let (state, title) = reference_segment(state, rap, visualization_data, Some(&cell));
         return Some((state, Some(title)));
     }
@@ -12957,16 +13021,24 @@ fn reference_interval_cell(
         return table.reference_point_cell(function, rap.name(),
             ReferencePoint::Before(rustc_middle::mir::Location::START)).cloned();
     }
-    let before = history.iter().find_map(|(r, event)| {
-        if *r <= row || matches!(event, Event::Branch { .. }) || rv_attrs::line_of(*r, &vd.row_lines) != Some(src) {
+    history.iter().find_map(|(r, event)| {
+        let anchor = match event {
+            Event::Branch { split_point, .. } => *split_point,
+            _ => *r,
+        };
+        if anchor <= row || rv_attrs::line_of(anchor, &vd.row_lines) != Some(src) {
             return None;
         }
-        Some(match *points.get(&event.get_id())? {
+        if let Event::Branch { branch_history, .. } = event {
+            let source = branch_history.iter().find_map(|branch| branch.source)?;
+            return table.branch_entry_cell(function, rap.name(), source.branch).cloned();
+        }
+        let before = match *points.get(&event.get_id())? {
             ReferencePoint::Before(at) | ReferencePoint::After(at) | ReferencePoint::Edge { from: at, .. } =>
                 ReferencePoint::Before(at),
-        })
-    });
-    table.reference_point_cell(function, rap.name(), before?).cloned()
+        };
+        table.reference_point_cell(function, rap.name(), before).cloned()
+    })
 }
 
 fn reference_break_alt<'a>(
@@ -13066,6 +13138,7 @@ fn reference_segment(
             .then_some((l, target))
     }).collect();
     let may_lend = cell.may_lend || loans.iter().any(|(l, _)| cell.maybe_replaced_references.contains(&l.loan));
+    let nested = loans.iter().any(|(l, target)| *target == NestedReferent && matches!(l.kind, "mut" | "unique"));
     let place_label = |loan| table.loan(function, loan).map(|info|
         info.reference_label.as_ref().unwrap_or(&info.lender));
     // Lent::holder is a display preference. Only a single current carrier
@@ -13093,12 +13166,12 @@ fn reference_segment(
             };
             return (revoked(), format!("{held}. {subject}, so {styled} can't be used directly while the borrow is live"));
         }
-        if loan.kind == "shared" {
+        if loan.kind == "shared" && !nested {
             return (partial, format!("{held}. The borrow of {place} makes {styled} read-only while the borrow is live"));
         }
     }
     let exclusive: Vec<_> = loans.iter().filter(|(l, target)|
-        matches!(l.kind, "mut" | "unique") && *target != Part && *target != VariantPayload).collect();
+        matches!(l.kind, "mut" | "unique") && !matches!(target, Part | NestedReferent | VariantPayload)).collect();
     let binding_shared = loans.iter().any(|(l, target)| l.kind == "shared" && matches!(target, Binding | Coerced));
     if let Some(&&(first, first_target)) = exclusive.first() {
         let is_binding = first_target == Binding;
@@ -13180,14 +13253,17 @@ fn reference_segment(
         }
         return (revoked(), title);
     }
-    if let Some(&(l, target)) = loans.iter().find(|(l, _)| l.kind == "reserved") {
+    if let Some(&(l, target)) = loans.iter().find(|(l, _)| !nested && l.kind == "reserved") {
         let call = table.loan(function, l.loan).and_then(|i| i.to_call.as_deref());
-        if matches!(target, Part | Ancestor) {
+        if matches!(target, Part | Ancestor | NestedReferent) {
             let place = place_label(l.loan).map_or_else(|| "a place reached through the reference".into(), |p| styled_name_html(p));
             let (by, activate) = call.map_or(("".into(), "the mutable borrow activates"),
                 |call| (format!(" by the call to {}", styled_name_html(call)), "the call starts"));
-            let state = if target == Ancestor { partial } else { full };
+            let state = if matches!(target, Ancestor | NestedReferent) { partial } else { full };
             let mut title = format!("{held}. A mutable borrow of {place} is reserved{by}. Shared reads of {place} are allowed until {activate}. The reservation blocks another mutable borrow of {place}");
+            if target == NestedReferent {
+                title.push_str(&format!(" and prevents writes to {place}"));
+            }
             if binding_shared {
                 title.push_str(&format!(". The binding {styled} is also shared and cannot be replaced while that shared borrow is live"));
             }
@@ -13195,7 +13271,7 @@ fn reference_segment(
         }
         return (partial, hover_messages::state_ref_reserved(name, mutable, call, target == Binding, binding_shared));
     }
-    if binding_shared {
+    if binding_shared && !nested {
         if !mutable && !rap.is_mut() {
             return (partial, unrestricted);
         }
@@ -13213,10 +13289,9 @@ fn reference_segment(
         }
         return (partial, title);
     }
-    if loans.iter().any(|(l, target)| l.kind == "shared" && *target == Referent) {
+    if !nested && loans.iter().any(|(l, target)| l.kind == "shared" && *target == Referent) {
         let title = if may_lend {
-            format!("{held}. The borrow checker allows only shared access through {} while the borrow may be live",
-                styled_name_html(name))
+            format!("{held}. The borrow checker allows only shared access through {styled} while the borrow may be live")
         } else {
             hover_messages::state_mut_ref_partial_privilege(name, !kind.referent_needs_drop)
         };
@@ -13265,6 +13340,8 @@ fn reference_segment(
         let payload = loans.iter().any(|(loan, target)| *target == VariantPayload && matches!(loan.kind, "mut" | "unique"));
         return if payload {
             (revoked(), format!("{title}. The exclusive borrow of the payload also prevents access to the whole enum through {styled}"))
+        } else if nested {
+            (revoked(), format!("{title}. The original referent cannot be accessed through {styled} while it is exclusively borrowed. An unborrowed intermediate reference can still be replaced"))
         } else {
             (full, title)
         };
