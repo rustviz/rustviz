@@ -2355,7 +2355,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let order: BTreeMap<_, _> = self.scope_names(from, end).into_iter().map(|(i, n)| (n, i)).collect();
     for (local, name, effect) in &exit_facts {
       let (local, name) = (*local, *name);
-      if (!effect.effect.runs() && !effect.has_value) || moved_some.contains(name) || self.skip_raps.contains(name) { continue; }
+      if (!effect.effect.runs() && !effect.has_value && !effect.guard_skipped) || moved_some.contains(name) || self.skip_raps.contains(name) { continue; }
       if let Some(rd) = self.raps.place(local, name).filter(|rd| rd.rap.owner_local() == Some(local) && !rd.rap.never_drops()) {
         if let Some(&i) = order.get(name) {
           let root = self.body_facts.and_then(|f| f.bindings.locals.get(&local))
@@ -4982,6 +4982,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         moved: p.moved.clone(), maybe_moved: p.conditional.clone(), dropped: p.dropped.clone(),
         refilled: p.refilled.clone(),
         by_cond, flag: p.flag, box_parts, box_payload,
+        previous_none: false,
+        box_has_allocation: box_parts && drop.box_has_allocation,
         other_drops: p.drops_resource && (p.incomplete || p.moved.is_empty() && p.conditional.is_empty()),
       }
     };
@@ -5020,7 +5022,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let mut dots = Vec::new();
     let parts = drop.partial.as_ref().filter(|p| p.drops_resource || !p.moved.is_empty())
-      .map(|p| parts_for(p, drop.box_parts, box_payload));
+      .map(|p| parts_for(p, drop.box_parts, box_payload))
+      .or_else(|| write.previous_none.then(|| ReassignParts { previous_none: true, ..Default::default() }));
     if how != "nothing_to_drop" || parts.is_some() {
       dots.push(dot(rap, conditional, drop.may_have_moved, parts, payload, drop.contents_gone, drop.flag));
     }
@@ -5042,6 +5045,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   pub(crate) fn emit_assignment_drops(&mut self, row: usize, write: &crate::facts::AssignmentWrite, events: Vec<AssignmentDot>) {
     for AssignmentDot { rap, maybe_moved, by_cond, loop_head, parts, init, payload, contents_gone, flag } in events {
       self.row_layout.assignment_stores.insert(*self.unique_id, self.assignment_occurrence(write));
+      if write.checked_index {
+        self.row_layout.checked_index_stores.insert(*self.unique_id);
+      }
       self.add_external_event(row, ExternalEvent::OwnerDropAtReassign {
         ro: rap, id: *self.unique_id, maybe_moved, by_cond, loop_head,
         parts, maybe_init: init, payload, contents_gone, flag, skipped: !write.runs || write.skipped,
@@ -10952,6 +10958,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         None => b.expression_temp(expr.hir_id),
       }).map(|t| t.local);
       o.unbound_temp = true;
+      o.loop_iterator = iterator_binding.is_some();
       o.temp_part = part.clone();
       o.ctor_temp = (part.is_none() || ctor_literal) && !expr.span.from_expansion()
         && matches!(expr.kind, ExprKind::Call(callee, _) if is_ctor_path(callee, self.tcx.typeck(expr.hir_id.owner)));

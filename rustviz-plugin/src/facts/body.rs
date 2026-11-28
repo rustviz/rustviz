@@ -1731,7 +1731,7 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
 
 /// A None constructor stored directly, or staged immediately before the
 /// old value's Drop terminator and installed on its normal return edge.
-fn assigned_none<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, at: Location, lhs: Place<'tcx>, rv: &Rvalue<'tcx>) -> bool {
+pub(super) fn assigned_none<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, at: Location, lhs: Place<'tcx>, rv: &Rvalue<'tcx>) -> bool {
     let none = |rv: &Rvalue<'tcx>| matches!(rv, Rvalue::Aggregate(k, _) if matches!(**k, AggregateKind::Adt(def, variant, ..)
         if tcx.is_lang_item(tcx.adt_def(def).variant(variant).def_id, rustc_hir::LangItem::OptionNone)));
     if none(rv) { return true; }
@@ -2369,6 +2369,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let mut wording_init = repeated_comparisons.then(|| {
         MaybeInitializedPlaces::new(tcx, wording_body, &rt_md).iterate_to_fixpoint(tcx, wording_body, None)
             .into_results_cursor(wording_body)
+    });
+    let mut scope_wording = repeated_arguments.then(|| Flow {
+        unwind_from: None,
+        body: wording_body,
+        md: &rt_md,
+        init: MaybeInitializedPlaces::new(tcx, wording_body, &rt_md).exclude_inactive_in_otherwise()
+            .iterate_to_fixpoint(tcx, wording_body, None).into_results_cursor(wording_body),
+        uninit: MaybeUninitializedPlaces::new(tcx, wording_body, &rt_md).mark_inactive_variants_as_uninit()
+            .include_inactive_in_otherwise().iterate_to_fixpoint(tcx, wording_body, None).into_results_cursor(wording_body),
+        ever: EverInitializedPlaces::new(wording_body, &rt_md).iterate_to_fixpoint(tcx, wording_body, None).into_results_cursor(wording_body),
     });
     let rt_unassigned_entry = maybe_unassigned_entry(&rt_body, &rt_md);
     let mut rt = Flow {
@@ -4812,10 +4822,28 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // their own. A lost field and all its descendants count only once.
     let rt_doms = rt_body.basic_blocks.dominators();
     let tested_flags = std::cell::OnceCell::new();
+    let box_has_allocation = |ty: rustc_middle::ty::Ty<'tcx>| ty.boxed_ty().is_some_and(|ty| {
+        let ty = tcx.erase_and_anonymize_regions(ty);
+        tcx.layout_of(typing_env.as_query_input(ty)).is_ok_and(|layout| layout.size.bytes() != 0)
+    });
+    let guarded_places = |loc| tested_flags.get_or_init(|| tested_drop_flags(tcx, body)).get(&loc);
     let tests_flag = |loc: Location, place: Place<'tcx>| {
-        tested_flags.get_or_init(|| tested_drop_flags(tcx, body)).get(&loc).is_some_and(|guarded| {
+        guarded_places(loc).is_some_and(|guarded| {
             matches!(body[loc.block].terminator().kind, TerminatorKind::Drop { place: root, .. } if same_place(root, place))
                 || guarded.iter().any(|&p| place_under(p, place) || place_under(place, p))
+        })
+    };
+    let variable_flag = |rt: &mut Flow<'_, '_, 'tcx>, loc: Location, place: Place<'tcx>, sites: &[Location], after| {
+        guarded_places(loc).is_some_and(|guarded| {
+            guarded.iter().any(|&p| {
+                if !place_under(p, place) && !place_under(place, p) { return false; }
+                let path = match rt_md.rev_lookup.find(p.as_ref()) {
+                    LookupResult::Exact(path) | LookupResult::Parent(Some(path)) => path,
+                    LookupResult::Parent(None) => return false,
+                };
+                let state = rt.state(sites, after, path);
+                state.may_init && state.may_uninit
+            })
         })
     };
     let variant_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, drop_at: Option<Location>, root: MovePathIndex, name: &str| {
@@ -5421,12 +5449,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     TerminatorKind::Call { target, func, .. } if func.const_fn_def().is_none()
                         || target.is_some() && !closure_has_no_return(tcx, func))),
                 partial: parts.iter().position(|(l, col, _)| *l == local && col == name).map(|i| parts.swap_remove(i).2),
-                array: None, legs: legs.clone(), span: cx.r.span_of(loc), boundary, row, site, effect: ScopeDrop::Storage, flag: false, flag_on_some_paths: false,
+                array: None, legs: legs.clone(), span: cx.r.span_of(loc), boundary, row, site, effect: ScopeDrop::Storage, flag: false, flag_on_some_paths: false, guard_skipped: false,
                 field_order: place.projection.iter().filter_map(|e| match e {
                     ProjectionElem::Field(f, _) => Some(f.index()), _ => None,
                 }).collect(),
                 moved: false, unassigned: false, has_value: state.may_init,
                 box_contents_need_drop: place.ty(&body.local_decls, tcx).ty.boxed_ty().map(|ty| ty_info(ty).1),
+                box_has_allocation: box_has_allocation(place.ty(&body.local_decls, tcx).ty),
                 payload_moved: exact && state.may_init && state.payload_moved, payload_maybe: exact && state.may_init && state.payload_maybe,
             };
             if needs_drop && !storage {
@@ -5439,7 +5468,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         _ => ScopeDrop::Empty,
                     }
                 };
-                end.flag = tests_flag(loc, *place);
+                end.flag = end.effect != ScopeDrop::Empty && variable_flag(rt, loc, *place, sites, after);
                 let ty = place.ty(&body.local_decls, tcx).ty;
                 if exact && state.may_init && !state.may_uninit {
                     if matches!(ty.kind(), TyKind::Array(..)) && drop_how(&state) == "drops_rest" {
@@ -5464,6 +5493,25 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     }) {
                         end.effect = ScopeDrop::Whole;
                         end.partial = None;
+                    }
+                }
+                end.flag &= end.effect != ScopeDrop::Empty;
+                if end.effect == ScopeDrop::Conditional && rt.unwind_from.is_none() {
+                    if let Some(wording) = scope_wording.as_mut().filter(|f| sites.iter().all(|at|
+                        f.body.basic_blocks.dominators().is_reachable(at.block))) {
+                        match rest_how(wording, sites, after, path) {
+                            "nothing_to_drop" if site.is_some() && !wording.state(sites, after, path).may_init => {
+                                end.effect = ScopeDrop::Empty;
+                                end.has_value = false;
+                                end.flag = false;
+                                end.guard_skipped = true;
+                            }
+                            "drops" => {
+                                end.effect = ScopeDrop::Whole;
+                                end.flag = variable_flag(wording, loc, *place, sites, after);
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 if state.may_uninit {
@@ -5549,6 +5597,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     [at] => Some(*at),
                     _ => None,
                 });
+                let previous_none = drop_at.is_some_and(|at| {
+                    let mut sites = runtime_locations(at).peekable();
+                    sites.peek().is_some() && sites.all(|site|
+                        super::runtime::option_is_none(tcx, &rt_body, site, *lhs, &executes))
+                });
                 let replacing = drop_at.and_then(|at| {
                     let sites: Vec<_> = runtime_locations(at).collect();
                     if sites.is_empty() { return None; }
@@ -5574,8 +5627,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         how == "drops_rest" && place.ty(&body.local_decls, tcx).ty.is_box()
                             && exact(tcx.mk_place_deref(place)).is_some_and(|p| !rt.state(&sites, false, p).may_init)
                     };
-                    let how = exact(*lhs).map_or("drops", |path| rest_how(&mut rt, &sites, false, path));
+                    let how = if previous_none { "nothing_to_drop" }
+                        else { exact(*lhs).map_or("drops", |path| rest_how(&mut rt, &sites, false, path)) };
                     let box_parts = lhs.ty(&body.local_decls, tcx).ty.is_box() && how == "drops_rest";
+                    let box_has_allocation = box_parts && box_has_allocation(lhs.ty(&body.local_decls, tcx).ty);
                     let box_payload_maybe_moved = box_parts && exact(tcx.mk_place_deref(*lhs)).is_some_and(|p| {
                         let state = rt.state(&sites, false, p);
                         state.may_init && state.may_uninit && ty_info(tcx.mk_place_deref(*lhs).ty(&body.local_decls, tcx).ty).1
@@ -5591,7 +5646,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             flag: flag(place), drops_resource: true, incomplete: true, ..PartialDrop::default()
                         }))
                     };
-                    let partial = if contents_gone { None } else { detail(*lhs, how) };
+                    let partial = if contents_gone || previous_none { None } else { detail(*lhs, how) };
                     let fields = if how == "nothing_to_drop" || contents_gone || dest.is_none() {
                         Vec::new()
                     } else {
@@ -5649,7 +5704,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     Some(ReplacementDrop {
                         how, flag: flag_for_whole, may_have_moved: may_have_moved(*lhs), may_be_refilled,
                         moved_columns, contents_gone, partial, fields, inputs,
-                        box_parts: box_parts && !contents_gone, box_payload_maybe_moved,
+                        box_parts: box_parts && !contents_gone, box_has_allocation, box_payload_maybe_moved,
                     })
                 });
                 let span = st.source_info.span.with_parent(None);
@@ -5685,6 +5740,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 };
                 writes.entry(span).or_default().push(AssignmentWrite {
                     at: loc, row: cx.rows.event_row.get(&loc).copied().unwrap_or_else(|| cx.row_of(loc)),
+                    checked_index: super::indexed::checked_store(tcx, body, loc, resolved),
+                    previous_none,
                     runs: executes_at(loc.block),
                     skipped: skipped_closure_returns.contains_key(&loc.block),
                     copy: ty_info(lhs.ty(&body.local_decls, tcx).ty).0, direct: same_place(resolved, *lhs),

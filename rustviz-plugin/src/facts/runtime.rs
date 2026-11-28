@@ -2,8 +2,84 @@
 
 use std::collections::BTreeMap;
 
-use rustc_middle::mir::{AggregateKind, BasicBlock, Body, Operand, ProjectionElem, Rvalue, StatementKind, TerminatorKind};
+use rustc_middle::mir::{AggregateKind, BasicBlock, Body, Location, Operand, Place, ProjectionElem, Rvalue, StatementKind, TerminatorKind};
 use rustc_middle::ty::{TyCtxt, TyKind, TypingEnv};
+
+/// Prove that all incoming paths supply the None variant. A joined
+/// payload move path can be maybe-initialized even though every reaching
+/// discriminant is None.
+pub(super) fn option_is_none<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    at: Location,
+    place: Place<'tcx>,
+    reachable: &std::collections::BTreeSet<BasicBlock>,
+) -> bool {
+    let Some(local) = place.as_local() else { return false };
+    let TyKind::Adt(def, _) = *body.local_decls[local].ty.kind() else { return false };
+    if !tcx.is_lang_item(def.did(), rustc_hir::LangItem::Option) {
+        return false;
+    }
+    let Some(none) = def.variants().iter_enumerated().find_map(|(index, variant)|
+        tcx.is_lang_item(variant.def_id, rustc_hir::LangItem::OptionNone).then_some(index))
+    else { return false };
+    if body.basic_blocks.iter().flat_map(|block| &block.statements).any(|stmt|
+        matches!(&stmt.kind, StatementKind::Assign(a) if matches!(a.1,
+            Rvalue::RawPtr(_, p) | Rvalue::Ref(_, rustc_middle::mir::BorrowKind::Mut { .. }, p)
+                if p.local == local && !p.is_indirect())))
+    {
+        return false;
+    }
+    let tag = def.discriminant_for_variant(tcx, none).val;
+    let mut work = vec![(at, None)];
+    let mut fuel = 128;
+    while let Some((at, successor)) = work.pop() {
+        if fuel == 0 { return false; }
+        fuel -= 1;
+        let block = &body[at.block];
+        let decision = successor.and_then(|successor| match &block.terminator().kind {
+            TerminatorKind::Call { destination, .. } if *destination == place => Some(Err(())),
+            TerminatorKind::Drop { place: dropped, .. } if *dropped == place => Some(Err(())),
+            TerminatorKind::SwitchInt { discr, targets } => {
+                let discr = discr.place()?;
+                let is_tag = block.statements.iter().rev().find_map(|stmt| match &stmt.kind {
+                    StatementKind::Assign(a) if a.0 == discr =>
+                        Some(matches!(a.1, Rvalue::Discriminant(p) if p == place)),
+                    _ => None,
+                }) == Some(true);
+                if !is_tag { return None; }
+                let selected = def.discriminants(tcx).filter(|(_, d)| targets.target_for_value(d.val) == successor)
+                    .map(|(_, d)| d.val).collect::<Vec<_>>();
+                (selected.as_slice() == [tag]).then_some(Ok(()))
+            }
+            _ => None,
+        });
+        match decision {
+            Some(Ok(())) => continue,
+            Some(Err(())) => return false,
+            None => {}
+        }
+        let initialized = block.statements[..at.statement_index].iter().enumerate().rev().find_map(|(statement_index, st)| match &st.kind {
+            StatementKind::Assign(a) if a.0 == place =>
+                Some(super::body::assigned_none(tcx, body, Location { statement_index, ..at }, place, &a.1)),
+            StatementKind::StorageLive(l) | StatementKind::StorageDead(l) if *l == local => Some(false),
+            StatementKind::SetDiscriminant { place: p, variant_index } if **p == place =>
+                Some(*variant_index == none),
+            _ => None,
+        });
+        match initialized {
+            Some(true) => continue,
+            Some(false) => return false,
+            None => {}
+        }
+        let size = work.len();
+        work.extend(body.basic_blocks.predecessors()[at.block].iter()
+            .filter(|pred| reachable.contains(pred) && !body[**pred].is_cleanup)
+            .map(|&pred| (body.terminator_loc(pred), Some(at.block))));
+        if work.len() == size { return false; }
+    }
+    true
+}
 
 /// The first call to `next` on a freshly constructed nonempty integer
 /// range returns Some. Give that call its own path. Its original block and

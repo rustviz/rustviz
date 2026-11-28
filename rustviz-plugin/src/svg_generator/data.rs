@@ -298,6 +298,7 @@ pub struct Owner {
     /// True iff this owner is an unbound temporary (see
     /// `ResourceAccessPoint::is_unbound_temporary`).
     pub unbound_temp: bool,
+    pub loop_iterator: bool,
     /// True iff this owner is the temporary that the struct / tuple /
     /// array literal on the right of a `let` builds (#439), which the
     /// variables in the literal are moved into.
@@ -1752,10 +1753,12 @@ pub enum TupleDropAt {
 /// scope end of such a struct (`event_dot_struct_partial_go_out_of_scope`).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ReassignParts {
+    pub previous_none: bool,
     /// Some dropped components have no column.
     pub other_drops: bool,
     pub flag: bool,
     pub box_parts: bool,
+    pub box_has_allocation: bool,
     pub box_payload: Option<String>,
     /// Moved out on every path.
     pub moved: Vec<String>,
@@ -4681,6 +4684,8 @@ impl Event {
                     // `make_p().name`, `match make() { Some(s) => .. }`:
                     // part of the value is moved out (#469).
                     hover_messages::event_dot_unbound_temporary_part_acquire(&from.name(), part)
+                } else if matches!(is, ResourceTy::Value(ResourceAccessPoint::Owner(Owner { loop_iterator: true, .. }))) {
+                    hover_messages::event_dot_loop_iterator_acquire(&target_name(from))
                 } else if matches!(is, ResourceTy::Value(rap) if rap.is_unbound_temporary()) {
                     // `make();`, `make().len()`: nothing takes the value.
                     hover_messages::event_dot_unbound_temporary_acquire(&target_name(from))
@@ -4814,7 +4819,7 @@ impl Event {
                     hover_messages::event_dot_holder_borrow_caller(&self.deref_name(my_name))
                 } else if is.holds_borrow() {
                     // `refs.push(&mut m)` stores a borrow of m itself (#973).
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from), may_be_none)
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), true, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from), may_be_none, holds_copy_value(is))
                 } else if matches!(is, ResourceTy::Value(r) if r.is_ref() && !r.is_mutref()) {
                     hover_messages::event_dot_mut_borrow_by_shared_ref(&self.deref_name(my_name), *of_ref_var || loan_holds_value(from, is))
                 } else {
@@ -4827,7 +4832,7 @@ impl Event {
                     hover_messages::event_dot_closure_capture_static_borrow(&self.deref_name(my_name), &from.name())
                 } else if is.holds_borrow() {
                     // `refs.push(&x)` stores a borrow of x itself (#973).
-                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from), may_be_none)
+                    hover_messages::event_dot_holder_borrow(&self.deref_name(my_name), &from.name(), false, if *of_ref_var { hover_messages::HolderLender::Own } else { holder_lender_kind(from) }, *of_ref_var || holds_copy_value(from), may_be_none, holds_copy_value(is))
                 } else if matches!(is, ResourceTy::Value(r) if r.is_mutref()) {
                     hover_messages::event_dot_static_borrow_by_mut_ref(&self.deref_name(my_name), *of_ref_var || loan_holds_value(from, is))
                 } else {
@@ -4875,7 +4880,7 @@ impl Event {
               panic!("internal state: a RefDie event has no hover text of its own");
             },
             Event::Branch { .. } => {
-              format!("{} is live in a conditional expression ", my_name)
+              format!("{} has a separate timeline path for each branch of this conditional", my_name)
             }
         } 
     }

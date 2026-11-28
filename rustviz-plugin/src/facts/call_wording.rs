@@ -7,6 +7,54 @@ use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_span::Span;
 use std::collections::BTreeSet;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReferenceArgument {
+    ByValue { mutable: bool },
+    Replace,
+    Swap,
+    Take,
+}
+
+/// Use the definition's parameter type before substituting the call's
+/// type arguments. A reference-typed operand can instantiate a by-value T.
+pub(crate) fn reference_argument<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    span: Span,
+    index: usize,
+) -> Option<(ReferenceArgument, Location)> {
+    use rustc_span::Symbol;
+    let (at, place) = call_operand(body, span, index)?;
+    let reference = place.ty(&body.local_decls, tcx).ty.ref_mutability()?;
+    let TerminatorKind::Call { func, .. } = &body[at.block].terminator().kind else { return None };
+    let (def, args) = func.const_fn_def()?;
+    let implementation = if tcx.trait_of_assoc(def).is_some() && !super::call_relationships::kind(tcx, Some(def)).is_callable() {
+        let args = tcx.erase_and_anonymize_regions(args);
+        rustc_middle::ty::Instance::try_resolve(tcx, body.typing_env(tcx), def, args)
+            .ok().flatten().map_or(def, |instance| instance.def_id())
+    } else {
+        def
+    };
+    let sig = tcx.fn_sig(implementation).instantiate_identity().skip_binder();
+    let param = sig.inputs().get(index)?;
+    let replace = tcx.get_diagnostic_item(Symbol::intern("mem_replace"));
+    let effect = if !param.is_ref() {
+        ReferenceArgument::ByValue { mutable: reference.is_mut() }
+    } else if index == 0 && Some(def) == replace {
+        ReferenceArgument::Replace
+    } else if index < 2 && tcx.is_diagnostic_item(Symbol::intern("mem_swap"), def) {
+        ReferenceArgument::Swap
+    } else if index == 0 && replace.is_some_and(|replace|
+        tcx.parent(def) == tcx.parent(replace) && tcx.item_name(def) == Symbol::intern("take"))
+    {
+        // core::mem::take has no diagnostic item.
+        ReferenceArgument::Take
+    } else {
+        return None;
+    };
+    Some((effect, at))
+}
+
 /// The call's operand, before any renderer column mapping. A nested call
 /// on the same row has a different instruction and argument list.
 pub(crate) fn call_operand<'tcx>(

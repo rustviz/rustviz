@@ -152,6 +152,64 @@ fn is_element(step: PlaceElem<'_>) -> bool {
     )
 }
 
+/// The store is on the successful edge of built-in indexing or a
+/// standard library IndexMut call. Match the MIR operand or result, since
+/// evaluation of the RHS can have its own, unrelated bounds checks.
+pub(super) fn checked_store<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    at: Location,
+    place: Place<'tcx>,
+) -> bool {
+    let direct: BTreeSet<_> = place.projection.iter().filter_map(|step| match step {
+        ProjectionElem::Index(index) => Some(index),
+        _ => None,
+    }).collect();
+    if direct.is_empty() && !place.is_indirect() {
+        return false;
+    }
+    let dom = body.basic_blocks.dominators();
+    let store_span = body.source_info(at).span.source_callsite();
+    let mut block = at.block;
+    while let Some(pred) = dom.immediate_dominator(block) {
+        let term = body[pred].terminator();
+        block = pred;
+        if !store_span.contains(term.source_info.span.source_callsite()) {
+            continue;
+        }
+        match &term.kind {
+            TerminatorKind::Assert { msg, target, .. }
+                if dom.dominates(*target, at.block) =>
+            {
+                if let rustc_middle::mir::AssertKind::BoundsCheck { len, index } = &**msg {
+                    if !index.place().and_then(|p| p.as_local()).is_some_and(|i| direct.contains(&i)) {
+                        continue;
+                    }
+                    let walk = Walk {
+                        tcx, body, address_taken: rustc_mir_dataflow::impls::borrowed_locals(body).iter().collect(),
+                    };
+                    let check = body.terminator_loc(pred);
+                    let operand = |op| walk.operand_index(check, op, &mut { WALK_LIMIT });
+                    if !matches!((operand(index), operand(len)), (Index::Constant(i), Index::Constant(n)) if i < n) {
+                        return true;
+                    }
+                }
+            }
+            TerminatorKind::Call { func, destination, target: Some(target), .. }
+                if place.projection.first() == Some(&ProjectionElem::Deref)
+                    && destination.as_local() == Some(place.local)
+                    && dom.dominates(*target, at.block) =>
+            {
+                return func.const_fn_def().is_some_and(|(def, args)|
+                    tcx.trait_of_assoc(def).is_some_and(|tr| tcx.is_lang_item(tr, LangItem::IndexMut))
+                    && super::iterators::preserves_items(tcx, body.typing_env(tcx), def, args));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 struct Walk<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &'a Body<'tcx>,

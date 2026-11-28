@@ -532,6 +532,8 @@ pub struct IteratorDrop {
 #[derive(Clone, Debug)]
 pub(crate) struct AssignmentWrite {
     pub at: rustc_middle::mir::Location,
+    pub checked_index: bool,
+    pub previous_none: bool,
     pub row: usize,
     pub runs: bool,
     pub skipped: bool,
@@ -560,6 +562,7 @@ pub(crate) struct ReplacementDrop {
     pub may_be_refilled: bool,
     pub moved_columns: Vec<WriteColumn>,
     pub box_parts: bool,
+    pub box_has_allocation: bool,
     pub box_payload_maybe_moved: bool,
     pub contents_gone: bool,
     pub partial: Option<PartialDrop>,
@@ -1418,12 +1421,14 @@ pub(crate) struct ScopeEnd {
     pub payload_moved: bool,
     pub payload_maybe: bool,
     pub box_contents_need_drop: Option<bool>,
+    pub box_has_allocation: bool,
     pub row: usize,
     pub site: Option<rustc_span::Span>,
     pub effect: ScopeDrop,
-    /// At a shared destructor this can be true even when this particular
-    /// exit always (or never) supplies the value.
+    /// This exit can supply both values of the tested drop flag.
     pub flag: bool,
+    /// This exit always supplies the absent value to a guarded destructor.
+    pub guard_skipped: bool,
     pub flag_on_some_paths: bool,
     /// Field indices in declaration order within this MIR local.
     pub field_order: Vec<usize>,
@@ -1442,11 +1447,12 @@ impl ScopeEnd {
         if !ends.iter().all(|e| e.array == end.array) { end.array = None; }
         if !ends.iter().all(|e| e.partial == end.partial) { end.partial = None; }
         end.flag = ends.iter().all(|e| e.flag);
+        end.guard_skipped = ends.iter().all(|e| e.guard_skipped);
         end.flag_on_some_paths = !end.flag && ends.iter().any(|e| e.flag || e.flag_on_some_paths);
         if !ends.iter().all(|e| e.effect == end.effect) {
             end.effect = if end.flag && !ends.iter().any(|e| e.effect == ScopeDrop::ByPath) {
                 ScopeDrop::Conditional
-            } else if ends.iter().all(|e| e.site.is_none()) {
+            } else if same_site {
                 ScopeDrop::ByPath
             } else { return None };
         }

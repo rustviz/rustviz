@@ -1,5 +1,6 @@
 extern crate handlebars;
 use crate::facts::table::{FunctionStart, Init, JoinCell};
+use crate::facts::call_wording::ReferenceArgument;
 use crate::facts::SharedReferenceJoin;
 use crate::svg_generator::data::{state_after_loop_exits, AltRuntime};
 use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, NoteEvent, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, MutRef, StaticRef, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
@@ -2056,6 +2057,10 @@ fn scope_end_message(
             || never_drops;
         let end = visualization_data.row_layout.scope_ends.get(id);
         let effect = end.map(|end| end.effect);
+        if end.is_some_and(|end| end.guard_skipped) {
+            let name = styled_name_html(&name);
+            return (format!("{name} goes out of scope. It no longer holds a resource on this path, so there is nothing to drop here."), false);
+        }
         // For named places the destructor's own state decides the mark.
         // Replay is still used for synthetic columns and special exit
         // explanations that have no ordinary MIR storage boundary.
@@ -2271,7 +2276,8 @@ fn scope_end_message(
             } else if !needs_drop {
                 hover_messages::event_dot_go_out_of_scope_box_plain_contents_maybe_moved(&name)
             } else {
-                hover_messages::event_dot_box_payload_conditional(&name, end.is_some_and(|e| e.flag))
+                hover_messages::event_dot_box_payload_conditional(&name, end.is_some_and(|e| e.flag),
+                    end.is_some_and(|e| e.box_has_allocation && e.has_value && e.effect != ScopeDrop::Conditional))
             };
             return (title, true);
         } else if effect.is_none_or(|e| matches!(e, ScopeDrop::Remaining | ScopeDrop::Conditional)) && mixed_box_paths(ro, history) {
@@ -2321,7 +2327,8 @@ fn scope_end_message(
             // allocation is still freed here (#609). Not when the
             // Box was given a new value and moved away whole since
             // (#1145).
-            return (hover_messages::event_dot_box_contents_moved_go_out_of_scope(&name), true);
+            return (hover_messages::event_dot_box_contents_moved_go_out_of_scope(&name,
+                end.is_some_and(|e| e.box_has_allocation && e.has_value && e.effect != ScopeDrop::Conditional)), true);
         } else if let Some(split) = partial {
             // Partially moved struct (#207): only the
             // fields still holding a value are dropped,
@@ -2965,6 +2972,9 @@ fn render_dot(
                     if conditional_drop.is_some() {
                         title = format!("{}. This assignment runs on only some paths through this expression.", title.trim_end_matches('.'));
                     }
+                    if visualization_data.row_layout.checked_index_stores.contains(&event.get_id()) {
+                        title = hover_messages::after_index_check(&title);
+                    }
                     // A struct whose parts were all moved out before it
                     // is overwritten drops nothing: a plain dot that says
                     // so, no drop triangle (#1138).
@@ -3224,7 +3234,8 @@ fn render_dot(
                 Event::StaticBorrow { is, .. } | Event::MutableBorrow { is, .. } if stored.is_none() => {
                     let holder = styled_name_html(&is.name());
                     let adverb = if mutable { "mutably" } else { "immutably" };
-                    data.title = format!("{holder} holds a value that {adverb} borrows {place} ({holder} isn't a reference itself)");
+                    let noun = if crate::svg_generator::data::holds_copy_value(is) { "value" } else { "resource" };
+                    data.title = format!("{holder} holds a {noun} that {adverb} borrows {place} ({holder} isn't a reference itself)");
                 }
                 Event::StaticReacquire { from, .. } | Event::MutableReacquire { from, .. }
                     if from.extract_rap().is_some_and(|r| r.is_fn()) => {
@@ -3436,6 +3447,11 @@ fn render_dot(
         {
             data.title.insert_str(0, "This effect occurs only if the `?` succeeds. ");
         }
+        if !data.title.is_empty() && layout.checked_index_stores.contains(&event.get_id())
+            && matches!(event, Event::Acquire { .. } | Event::Copy { .. })
+        {
+            data.title = hover_messages::after_index_check(&data.title);
+        }
         let mut event_kind = rv_attrs::event_name(event);
         if matches!(event, Event::StaticLend { .. } | Event::MutableLend { .. }
             | Event::StaticBorrow { .. } | Event::MutableBorrow { .. }) {
@@ -3464,7 +3480,7 @@ fn render_dot(
                     && loan.lender == lender.name() && loan.direct_holders.contains(&holder.name())).then_some(loan)
             })() {
                 data.title = hover_messages::arrow_end_title(holder, lender, None,
-                    true, Some(loan), Some("unique immutable"), None);
+                    true, Some(loan), Some("unique immutable"), None, None, false);
             }
         }
         let rap = &visualization_data.timelines[hash].resource_access_point;
@@ -5021,19 +5037,19 @@ fn timeline_segment_title(
     if rap.holds_borrow() {
         if let State::FullPrivilege { .. } = state {
             if let Some(copy) = option_ref_copy(visualization_data, rap.hash(), rap.name(), line) {
-                return hover_messages::state_value_holds_loans(rap.name(), copy, &[], false);
+                return hover_messages::state_value_holds_loans(rap.name(), copy, &[], false, rap.holds_value());
             }
             if visualization_data.row_layout.closure_result_holders.contains(rap.hash()) {
-                return hover_messages::state_value_holds_loans(rap.name(), rap.is_copy_owner(), &[], false);
+                return hover_messages::state_value_holds_loans(rap.name(), rap.is_copy_owner(), &[], false, rap.holds_value());
             }
             // `let mut refs = Vec::new();` starts out holding no
             // reference; `refs.push(&s)` stores one later (#392).
             if holder_starts_empty(visualization_data, rap) {
                 if !holder_never_borrows(visualization_data, rap) {
-                    return hover_messages::state_holder_starts_empty(rap.name());
+                    return hover_messages::state_holder_starts_empty(rap.name(), rap.holds_value());
                 }
             } else {
-                return hover_messages::state_holder_full_privilege(rap.name());
+                return hover_messages::state_holder_full_privilege(rap.name(), rap.holds_value());
             }
         }
     }
@@ -7607,7 +7623,8 @@ fn render_generic_arrow(
             if let Some(kind) = layout.available_after_store_end.get(&id).and_then(|id| kind_of(*id)) {
                 hover_messages::arrow_repoint_release(from, to, kind)
             } else {
-                hover_messages::arrow_end_title(from, to, static_lender.as_ref(), *of_ref_var, loan, kind, layout.pattern_payloads.get(&id))
+                hover_messages::arrow_end_title(from, to, static_lender.as_ref(), *of_ref_var, loan, kind,
+                    layout.pattern_payloads.get(&id), layout.named_loan_ends.get(&id).copied(), layout.returned_loan_ends.contains(&id))
             }
         }
         _ => hover_messages::arrow_full_title(external_event, from, to, option_ref,
@@ -7662,6 +7679,9 @@ fn render_generic_arrow(
     }
     if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::VecElement { id, nested: true, .. } if *id == external_event.get_id())) {
         title.push_str(". The element goes into an inner vector held by the destination");
+    }
+    if layout.checked_index_stores.contains(&id) {
+        title = hover_messages::after_index_check(&title);
     }
     if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedTransfer { id, .. } if *id == external_event.get_id())) {
         title = format!("{} {}", hover_messages::UNREACHED_TRANSFER, title);
@@ -7795,7 +7815,12 @@ fn render_generic_arrow(
             let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
 
             let receiver = layout.closure_receivers.get(&id);
-            let mut title = if let Some(title) = receiver {
+            let effect = layout.reference_arguments.get(&id).copied();
+            let mut title = if let Some(ReferenceArgument::ByValue { mutable }) = effect {
+                let projected = layout.projected_loan_places.get(&id)
+                    .map(|(_, place)| hover_messages::projected_place_html(place));
+                hover_messages::arrow_call_title(external_event, function, from_variable, Some(mutable), projected.as_deref())
+            } else if let Some(title) = receiver {
                 title.clone()
             } else if visualization_data.row_layout.reassigned_receivers.contains(&external_event.get_id()) {
                 format!("{} may read or write through the receiver reserved before {} was reassigned", styled_name_html(&function.name), styled_name_html(&from_variable.name()))
@@ -7808,13 +7833,23 @@ fn render_generic_arrow(
                 };
                 format!("{} {access} {} through this borrow", styled_name_html(&function.name), hover_messages::projected_place_html(place))
             } else {
-                hover_messages::arrow_call_title(external_event, function, from_variable)
+                hover_messages::arrow_call_title(external_event, function, from_variable, None, None)
             };
             if let Some(note) = layout.call_store_notes.get(&id) {
                 // The call's own text may end mid-sentence or at a parenthesis.
                 if !title.ends_with('.') { title.push('.'); }
                 title.push(' ');
                 title.push_str(note);
+            }
+            if let Some(effect) = effect.filter(|e| !matches!(e, ReferenceArgument::ByValue { .. })) {
+                if !title.ends_with('.') { title.push('.'); }
+                title.push(' ');
+                let destination = layout.mem_transfers.get(&id).map(String::as_str);
+                title.push_str(hover_messages::mem_transfer(effect, destination));
+                if let Some(destination) = destination {
+                    title.push_str(&styled_name_html(destination));
+                    title.push('.');
+                }
             }
             if let Some(checked) = unreachable {
                 title = unreachable_title(checked, &title);
@@ -12219,14 +12254,14 @@ fn owner_value_title(rap: &ResourceAccessPoint, vd: &VisualizationData, fn_line:
                 _ => {}
             }
         }
-        return hover_messages::state_value_holds_loans(name, copy, &lenders.into_iter().collect::<Vec<_>>(), temporary);
+        return hover_messages::state_value_holds_loans(name, copy, &lenders.into_iter().collect::<Vec<_>>(), temporary, rap.holds_value());
     } else if cell.holder_type == Some(crate::facts::schema::HolderType::Primitive) {
         return hover_messages::state_full_privilege_copyable(name);
     } else if rap.holds_borrow() && !cell.borrowed_from.is_empty() {
         // An iterator can borrow data through raw pointers.
         let from = display_loan_sources(vd, fn_line, name, &cell.borrowed_from);
         if cell.holds.iter().any(|&id| vd.row_layout.uncertain_projected_stores.contains(&(*rap.hash(), id))) {
-            let mut title = hover_messages::state_holder_starts_empty(name);
+            let mut title = hover_messages::state_holder_starts_empty(name, rap.holds_value());
             title.push_str(&hover_messages::state_holder_tracks(name, &from));
             return title;
         }
@@ -12239,18 +12274,18 @@ fn owner_value_title(rap: &ResourceAccessPoint, vd: &VisualizationData, fn_line:
         if !constraints.is_empty() {
             let actual = display_loan_sources(vd, fn_line, name, &cell.borrowed_from.difference(&constraints).copied().collect());
             let mut title = if actual.is_empty() && vd.row_layout.enum_reference_holders.get(rap.hash()) == Some(&true) {
-                hover_messages::state_holder_full_privilege(name)
+                hover_messages::state_holder_full_privilege(name, rap.holds_value())
             } else if actual.is_empty() {
-                hover_messages::state_holder_starts_empty(name)
+                hover_messages::state_holder_starts_empty(name, rap.holds_value())
             } else {
-                hover_messages::state_holder_borrows_from(name, &actual)
+                hover_messages::state_holder_borrows_from(name, &actual, rap.holds_value())
             };
             title.push_str(&hover_messages::state_holder_tracks(name, &display_loan_sources(vd, fn_line, name, &constraints)));
             return title;
         }
-        return hover_messages::state_holder_borrows_from(name, &from);
+        return hover_messages::state_holder_borrows_from(name, &from, rap.holds_value());
     } else if vd.row_layout.enum_reference_holders.get(rap.hash()) == Some(&false) {
-        return hover_messages::state_holder_starts_empty(name);
+        return hover_messages::state_holder_starts_empty(name, rap.holds_value());
     }
     timeline_segment_title(&State::FullPrivilege { s: LineState::Full }, rap, vd, row)
 }

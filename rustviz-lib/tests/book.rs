@@ -1079,7 +1079,7 @@ const BOOK: &[Snippet] = &[
         id: "c13_03_fnmut_counter",
         must_contain: &[
             "Closure capture (mutable borrow) from count to inc",
-            "If inc holds a mutable borrow affecting count, that borrow ends here. It no longer restricts access to count",
+            "inc's mutable borrow of count ends. This borrow no longer restricts access to count. Ending the borrow doesn't move the value",
         ],
         must_not_contain: &["Return mutably borrowed resource from inc to count"],
         ..E
@@ -1174,7 +1174,7 @@ const BOOK: &[Snippet] = &[
         id: "c13_12_closure_borrow_then_use",
         must_contain: &[
             "Closure capture (immutable borrow) from list to only_borrows",
-            "If only_borrows holds a shared borrow affecting list, that borrow ends here. It no longer restricts access to list",
+            "only_borrows's shared borrow of list ends. This borrow no longer restricts access to list. Ending the borrow doesn't move the resource",
             "list goes out of scope. Its resource is dropped.",
         ],
         ..E

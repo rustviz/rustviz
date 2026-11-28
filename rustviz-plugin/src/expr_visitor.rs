@@ -5955,7 +5955,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     writes.filter(|other| (other.runs && !other.skipped) == (write.runs && !write.skipped))
       .all(|other| other.dest == write.dest && other.direct == write.direct
         && other.staged_move == write.staged_move && other.self_assignment == write.self_assignment
-        && other.replacing == write.replacing).then_some(write)
+        && other.replacing == write.replacing
+        && other.checked_index == write.checked_index
+        && other.previous_none == write.previous_none).then_some(write)
   }
 
   pub(crate) fn write_rap(&self, column: &crate::facts::WriteColumn) -> Option<ResourceAccessPoint> {
@@ -5974,6 +5976,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if matches!(event, ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. }
         | ExternalEvent::Bind { to, .. } if to.extract_rap().is_some_and(|r| destinations.contains(r.hash()))) {
         self.row_layout.assignment_stores.insert(event.get_id(), point);
+        if write.checked_index {
+          self.row_layout.checked_index_stores.insert(event.get_id());
+        }
       }
     }
   }
@@ -6759,6 +6764,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     {
       let argument_loan = self.argument_loan(arg.span);
       let projected = argument_loan.and_then(|loan| Some((loan.loan, loan.projected.clone()?)));
+      let reference_argument = slots.span.and_then(|span|
+        crate::facts::call_wording::reference_argument(self.tcx, self.mir_body, span, slots.index));
       // `point(&mut hold, &t)` where point's signature lets it store
       // `&t` in `hold`: t stays borrowed past the call (#513).
       // `store(&mut r, b.as_str())`: the reference a call returns,
@@ -6767,6 +6774,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       for (from_ro, place, destination, end_line, loan, replaces, holder, returned_at) in stored.iter().cloned() {
         let mutable = arg_mut == Mutability::Mut;
         let id = *self.unique_id;
+        if let Some((effect, _)) = reference_argument {
+          self.row_layout.reference_arguments.insert(id, effect);
+        }
         let loans = vec![loan];
         self.stored_borrows.push(StoredBorrow {
           holder, at: line_num, until: end_line, lender: from_ro.real_name(), is_mut: mutable, id, loans, returned_at,
@@ -6858,6 +6868,33 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         _ => from_ro,
       };
       let id = *self.unique_id;
+      if let Some((effect, at)) = reference_argument {
+        use crate::facts::call_wording::{self, ReferenceArgument};
+        self.row_layout.reference_arguments.insert(id, effect);
+        let destination = match self.mir_body[at.block].terminator().kind {
+          rustc_middle::mir::TerminatorKind::Call { destination, .. }
+            if matches!(effect, ReferenceArgument::Replace | ReferenceArgument::Take) =>
+              call_wording::binding_place(self.mir_body, &self.raps.bindings, destination).or_else(|| {
+                use crate::facts::value_flow::ReturnPart;
+                let (local, path) = self.body_facts?.value_flow.direct_result_binding(at)?;
+                let mut name = self.raps.bindings.locals.get(&local)?.clone();
+                for part in path {
+                  use std::fmt::Write;
+                  match part {
+                    ReturnPart::Array(i) => write!(name, "[{i}]").ok()?,
+                    ReturnPart::Tuple(i) => write!(name, ".{i}").ok()?,
+                    ReturnPart::Field(_, field) => write!(name, ".{field}").ok()?,
+                    ReturnPart::Variant(..) => break,
+                  }
+                }
+                Some(name)
+              }),
+          _ => None,
+        };
+        if let Some(destination) = destination {
+          self.row_layout.mem_transfers.insert(id, destination);
+        }
+      }
       if let Some(slot) = joined_argument {
         self.argument_slots.insert(id, slot);
       }
@@ -12785,7 +12822,10 @@ pub fn match_rhs_closure(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, clos
         if let ExternalEvent::StaticDie { of_ref_var: o, .. } | ExternalEvent::MutableDie { of_ref_var: o, .. } = &mut die {
           *o = of_ref_var;
         }
-        if let Some(loan) = loan { self.end_loans.insert(*self.unique_id, vec![loan]); }
+        if let Some(loan) = loan {
+          self.end_loans.insert(*self.unique_id, vec![loan]);
+          self.row_layout.named_loan_ends.insert(*self.unique_id, false);
+        }
         self.add_external_event(die_line, die);
         *self.unique_id += 1;
       }
@@ -13818,7 +13858,40 @@ pub fn print_out_of_scope(&mut self){
           }
         }
         if !loans.is_empty() {
+          let wording = (|| {
+            let [loan] = loans.as_slice() else { return None };
+            if !matches!(end, End::Arrow(_)) { return None; }
+            let facts = facts?;
+            let info = facts.loans.iter().find(|info| info.loan == *loan)?;
+            let holder = from_ro.scope_local()?;
+            // An aggregate such as Option<&T> can reach the release
+            // without its reference, even with a single possible lender.
+            let named = info.direct_locals.contains(&holder) && (from_ro.is_closure()
+              || from_ro.is_ref() && !facts.loans.iter().any(|other|
+                other.loan != *loan && other.direct_locals.contains(&holder)));
+            let source = info.lender_local?.index();
+            let holder = holder.index();
+            let on_path = named && facts.rows.iter().flat_map(|row| &row.facts).any(|end|
+              matches!(end.fact, crate::facts::Fact::BorrowEnd { loan: id, .. } if id == *loan)
+                && !end.end_places.iter().any(|place| place.local == holder));
+            let mut results = facts.call_relationships.calls.iter().filter_map(|call| {
+              let origin = call.return_lender.as_ref()?;
+              let result = call.holders.as_ref()?.result.as_ref()?;
+              (result.destination.local == holder).then_some((origin, result))
+            });
+            let returned = results.next().is_some_and(|(origin, result)| {
+              results.next().is_none() && origin.local == source && result.slots.iter().any(|slot|
+                slot.place.local == holder && slot.loans.len() == 1 && slot.loans.contains(loan))
+            });
+            Some((named.then_some(on_path), returned))
+          })();
           for id in first_id..*self.unique_id {
+            if let Some(on_path) = wording.and_then(|(named, _)| named) {
+              self.row_layout.named_loan_ends.insert(id, on_path);
+            }
+            if wording.is_some_and(|(_, returned)| returned) {
+              self.row_layout.returned_loan_ends.insert(id);
+            }
             if loans.iter().all(|id| self.stored_unique_captures.contains(&(*from_ro.hash(), *id))) {
               self.row_layout.stored_loans.insert(id, crate::event_order::StoredLoan::UniqueCapture);
             }
