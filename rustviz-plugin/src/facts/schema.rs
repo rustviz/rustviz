@@ -231,7 +231,7 @@ pub struct BodyFacts {
     #[serde(skip)]
     pub(crate) value_flow: super::value_flow::ValueFlow,
     #[serde(skip)]
-    pub(crate) reference_points: BTreeMap<ReferencePoint, State>,
+    pub(crate) segment_points: BTreeMap<SegmentPoint, State>,
     /// Named holders still carrying each loan when their destructor runs.
     #[serde(skip)]
     pub drop_holders: BTreeMap<usize, BTreeSet<String>>,
@@ -539,7 +539,7 @@ pub(crate) struct ReferenceType {
 /// The boundary at a displayed MIR effect. An ending edge may select one
 /// successor independently of the other ways out of the instruction.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum ReferencePoint {
+pub(crate) enum SegmentPoint {
     Before(Location),
     After(Location),
     Edge { from: Location, to: Location },
@@ -869,6 +869,10 @@ pub struct Row {
     /// up to this successor lie on the same path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continues_to: Option<usize>,
+    /// Source arms whose executable entries dominate all of this row's
+    /// exits. An exit on a sibling edge cannot supply a leg's state.
+    #[serde(skip)]
+    pub(crate) arm_paths: Vec<super::SourceArm>,
     /// The columns' states after the row, as the next row of the same
     /// path sees them. A row with no MIR location on a path that goes on
     /// (blank, `} else {`, the `};` of a `let ... else { return }`) is

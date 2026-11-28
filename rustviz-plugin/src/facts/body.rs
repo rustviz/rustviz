@@ -4729,7 +4729,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         crossed_write
     };
-    let mut state_at = |exits: &[Location], after: bool, imaginary: bool, runtime: Option<&[Location]>| -> State {
+    let mut state_at = |exits: &[Location], after: bool, imaginary: bool, runtime: Option<&[Location]>, point_only: bool| -> State {
         let mut st = State::default();
         let mut active = BTreeMap::new();
         let mut declared = |local| *active.entry(local).or_insert_with(|| {
@@ -5224,12 +5224,11 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 let mut after_join: BTreeSet<usize> = BTreeSet::new();
                 let mut seen: BTreeSet<Location> = BTreeSet::new();
                 let mut work: Vec<(Location, Option<Point>)> = Vec::new();
-                if after {
+                if after && !point_only {
                     work.push((*e, None));
                 } else {
-                    // The snapshot is at entry, before this row can issue
-                    // any loans or assign a new holder.
-                    legs.push((t.start_index(*e), false, None));
+                    let at = if after { t.mid_index(*e) } else { t.start_index(*e) };
+                    legs.push((at, false, None));
                 }
                 while let Some((l, frozen)) = work.pop() {
                     if !seen.insert(l) {
@@ -5436,14 +5435,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         // A guard or a short circuit can lower to more than one test. Only
         // use a test every other test of this conditional passes through.
         let first = tests.iter().copied().find(|&test| tests.iter().all(|&other| ldom(test, other)))?;
-        Some((branch, state_at(&[first], false, false, None)))
+        Some((branch, state_at(&[first], false, false, None, false)))
     }).collect();
     let mut arm_boundaries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, ArmBoundaries>>::default();
     let arm_edges: Vec<_> = switches.iter().filter_map(|exit| {
         let arm = super::SourceArm { branch: exit.branch?, index: exit.arm? };
         let edge = exit.edge;
-        ((!reference_slots.is_empty() || !drop_holders_at_reassign.is_empty())
-            && runs.contains(&edge.switch.block) && runs.contains(&edge.successor))
+        (runs.contains(&edge.switch.block) && runs.contains(&edge.successor))
             .then_some((arm, edge.successor))
     }).collect();
     let mut arm_entries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, BTreeSet<_>>>::default();
@@ -5461,7 +5459,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     == Some(super::SourceArm { branch, index: arm })
             }) {
                 let entries: Vec<_> = entries.into_iter().collect();
-                boundaries.entry = Some(state_at(&entries, false, false, None));
+                boundaries.entry = Some(state_at(&entries, false, false, None, false));
             }
         }
     }
@@ -5546,7 +5544,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
         }
         let entry: Vec<_> = entry.into_iter().collect();
-        let mut entry_state = state_at(&entry, false, true, None);
+        let mut entry_state = state_at(&entry, false, true, None, false);
         // Storage can be live during a let initializer even though the
         // binding's lexical scope starts after it.
         let scopes: Vec<_> = entry.iter().flat_map(|&loc| {
@@ -5642,13 +5640,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let after = cx.rows.exits.range(cx.r.line_lo(arm)..=cx.r.line_hi(arm)).filter_map(|(&row, exits)| {
             let exits: Vec<_> = exits.iter().copied()
                 .filter(|loc| arm_locations.contains(loc) && contains(arm, *loc)).collect();
-            (!exits.is_empty()).then(|| (row, state_at(&exits, true, true, None)))
+            (!exits.is_empty()).then(|| (row, state_at(&exits, true, true, None, false)))
         }).collect();
         imaginary_edges.push(ImaginaryEdge {
             id: ImaginaryEdgeId(arm),
             entry: entry_state,
             after,
-            join: if rejoin.is_empty() { State::default() } else { state_at(&rejoin.into_iter().collect::<Vec<_>>(), false, false, None) },
+            join: if rejoin.is_empty() { State::default() } else { state_at(&rejoin.into_iter().collect::<Vec<_>>(), false, false, None, false) },
             changes,
             scrutinee_moves,
             initializer_bindings,
@@ -5697,7 +5695,14 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     for line in lines.into_iter().filter(|l| *l >= first_line && *l <= last_line) {
         let mut row = Row { line, partial_drops: scope_partials.remove(&line).unwrap_or_default(), ..Default::default() };
         if let Some(exits) = cx.rows.exits.get(&line) {
-            row.after = state_at(exits, true, false, None);
+            row.after = state_at(exits, true, false, None, false);
+            row.arm_paths = switches.iter().filter_map(|switch| {
+                let edge = switch.edge;
+                let arm = super::SourceArm { branch: switch.branch?, index: switch.arm? };
+                (exclusive_edges.contains(&edge) && exits.iter().all(|exit|
+                    runs.contains(&exit.block) && dom.dominates(edge.successor, exit.block)))
+                    .then_some(arm)
+            }).collect();
             if let [exit] = exits.as_slice() {
                 if let [next] = cx.r.real_succs(*exit).as_slice() {
                     let next_line = cx.row_of(*next);
@@ -5720,7 +5725,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     || cx.rows.row.get(s).is_some_and(|r| next.is_some_and(|n| *r > n))
             });
         }
-        row.before = entries.get(&line).map(|locs| state_at(&locs.iter().copied().collect::<Vec<_>>(), false, false, None));
+        row.before = entries.get(&line).map(|locs| state_at(&locs.iter().copied().collect::<Vec<_>>(), false, false, None, false));
         if let Some(specs) = cx.rows.arms.get(&line) {
             let nested: BTreeSet<_> = specs.iter().filter_map(|s| s.parent).collect();
             for (i, s) in specs.iter().enumerate() {
@@ -5734,8 +5739,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     has_exit: s.exits.iter().any(|exit| runs.contains(&exit.block)),
                     edge: s.edge,
                     continuing: (nested.contains(&i) && s.continuing.iter().any(|exit| runs.contains(&exit.block)))
-                        .then(|| state_at(&s.continuing, true, false, None)),
-                    after: state_at(&s.exits, true, false, None),
+                        .then(|| state_at(&s.continuing, true, false, None, false)),
+                    after: state_at(&s.exits, true, false, None, false),
                 });
             }
         }
@@ -5815,16 +5820,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 }
                 for (arm, entries) in by_arm {
                     if let Some(bounds) = boundaries.get_mut(&arm).filter(|bounds| bounds.entry.is_some()) {
-                        bounds.join = Some(state_at(&entries, false, false, None));
+                        bounds.join = Some(state_at(&entries, false, false, None, false));
                     }
                 }
             }
         }
         let unshared = preds.len() == block_pred_count;
         let mut state = if unshared {
-            state_at(&[at], false, false, None)
+            state_at(&[at], false, false, None, false)
         } else {
-            state_at(&preds, true, false, Some(&incoming))
+            state_at(&preds, true, false, Some(&incoming), false)
         };
 
         let tests: Vec<_> = match tcx.hir_node(id) {
@@ -5861,7 +5866,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let entries: Vec<_> = region.iter().filter(|(loc, previous)| {
             in_region(**loc) && (previous.is_empty() || previous.iter().any(|&prev| !in_region(prev)))
         }).map(|(&loc, _)| loc).collect();
-        let entry = state_at(&entries, false, false, None);
+        let entry = state_at(&entries, false, false, None, false);
         let effect_on_every_path = |effects: &BTreeSet<Location>| {
             if effects.is_empty() { return false; }
             let mut work = incoming.clone();
@@ -5893,7 +5898,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let mut edge_state = if unshared && preds.len() == 1 {
                 state.state.clone()
             } else {
-                state_at(&[from], true, !executable, Some(runtime)).state
+                state_at(&[from], true, !executable, Some(runtime), false).state
             };
             match body[from.block].terminator().kind {
                 TerminatorKind::Call { destination, target: Some(target), .. }
@@ -5994,63 +5999,69 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         joins.insert(id, Join { at, state, incoming: edge_states, changes, assignments, dead_implicit_else });
     }
     // Only source rows with multiple effects need interior snapshots.
-    // Store full compiler coordinates, including the successor on an end.
-    let mut reference_points = BTreeMap::new();
-    if !reference_slots.is_empty() {
-        let mut points = BTreeSet::new();
-        for row in &out_rows {
-            let effects: Vec<_> = row.facts.iter().filter(|e| e.drop_route == DropRoute::Normal).collect();
-            if !effects.iter().any(|e| match &e.fact {
-                Fact::Borrow { loan, .. } | Fact::BorrowEnd { loan, .. } =>
-                    loans.iter().any(|l| l.loan == *loan && !l.reference_targets.is_empty()),
-                Fact::Repoint { .. } => true,
-                Fact::Init { reassign: true, .. } => reference_writes.iter().any(|w| w.0 == e.location),
-                _ => false,
-            }) || !effects.first().is_some_and(|first| effects.iter().any(|e| e.location != first.location)) {
-                continue;
+    // Keep the same compiler coordinates for owners, fields and references.
+    let mut points = BTreeSet::new();
+    for row in &out_rows {
+        let effects: Vec<_> = row.facts.iter().filter(|e| e.drop_route == DropRoute::Normal).collect();
+        if !effects.first().is_some_and(|first| effects.iter().any(|e| e.location != first.location)) {
+            continue;
+        }
+        for event in effects {
+            let at = event.occurrence.at;
+            points.extend([SegmentPoint::Before(at), SegmentPoint::After(at)]);
+            if let Some(to) = event.occurrence.successor {
+                points.insert(SegmentPoint::Edge { from: at, to });
             }
-            for event in effects {
-                let at = event.occurrence.at;
-                points.extend([ReferencePoint::Before(at), ReferencePoint::After(at)]);
-                if let Some(to) = event.occurrence.successor {
-                    points.insert(ReferencePoint::Edge { from: at, to });
-                }
-                if let Fact::Borrow { loan, .. } = event.fact {
-                    if let Some(&activation) = activation.get(&loan) {
-                        points.insert(ReferencePoint::After(activation));
-                    }
+            if let Fact::Borrow { loan, .. } = event.fact {
+                if let Some(&activation) = activation.get(&loan) {
+                    points.insert(SegmentPoint::After(activation));
                 }
             }
         }
-        for point in points {
-            let mut snapshot = match point {
-                ReferencePoint::Before(at) => state_at(&[at], false, false, None),
-                ReferencePoint::After(at) => {
-                    let call_result = (at == body.terminator_loc(at.block)).then(|| body[at.block].terminator())
-                        .and_then(|term| match term.kind {
-                            TerminatorKind::Call { target: Some(target), .. }
-                                if body.basic_blocks.predecessors()[target].as_slice() == [at.block] => Some(target.start_location()),
-                            _ => None,
-                        });
-                    if let Some(target) = call_result {
-                        state_at(&[target], false, false, None)
-                    } else {
-                        state_at(&[at], true, false, None)
-                    }
-                }
-                ReferencePoint::Edge { from, to } => {
-                    let edge = state_at(&[from], true, false, None);
-                    let mut dest = state_at(&[to], false, false, None);
-                    for (column, loans) in &mut dest.lent {
-                        loans.retain(|loan| edge.lent.get(column).is_some_and(|ls|
-                            ls.iter().any(|l| l.loan == loan.loan)));
-                    }
-                    dest
-                }
-            };
-            snapshot.state.retain(|name, _| snapshot.reference_types.contains_key(name));
-            reference_points.insert(point, snapshot);
+    }
+    // A projected operand of an aggregate can have a mark on a
+    // different display row from the aggregate's MIR instruction.
+    for row in &out_rows {
+        for event in &row.facts {
+            let at = event.occurrence.at;
+            if matches!(event.fact, Fact::Move { .. })
+                && body[at.block].statements.get(at.statement_index).is_some_and(|stmt|
+                    matches!(&stmt.kind, StatementKind::Assign(assign) if
+                        matches!(&assign.1, Rvalue::Aggregate(_, operands) if operands.iter()
+                            .any(|op| matches!(op, Operand::Move(p) if !p.projection.is_empty())))))
+            {
+                points.insert(SegmentPoint::After(at));
+            }
         }
+    }
+    let mut segment_points = BTreeMap::new();
+    for point in points {
+        let snapshot = match point {
+            SegmentPoint::Before(at) => state_at(&[at], false, false, None, false),
+            SegmentPoint::After(at) => {
+                let call_result = (at == body.terminator_loc(at.block)).then(|| body[at.block].terminator())
+                    .and_then(|term| match term.kind {
+                        TerminatorKind::Call { target: Some(target), .. }
+                            if body.basic_blocks.predecessors()[target].as_slice() == [at.block] => Some(target.start_location()),
+                        _ => None,
+                    });
+                if let Some(target) = call_result {
+                    state_at(&[target], false, false, None, false)
+                } else {
+                    state_at(&[at], true, false, None, true)
+                }
+            }
+            SegmentPoint::Edge { from, to } => {
+                let edge = state_at(&[from], true, false, None, true);
+                let mut dest = state_at(&[to], false, false, None, false);
+                for (column, loans) in &mut dest.lent {
+                    loans.retain(|loan| edge.lent.get(column).is_some_and(|ls|
+                        ls.iter().any(|l| l.loan == loan.loan)));
+                }
+                dest
+            }
+        };
+        segment_points.insert(point, snapshot);
     }
     // NLL may have already released the old value at a later reassignment.
     // Find the stores that actually reach the write, stopping on each path
@@ -6182,7 +6193,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     BodyFacts {
         call_relationships,
         value_flow,
-        reference_points,
+        segment_points,
         residual_drops,
         short_call_borrows,
         drop_holders,
