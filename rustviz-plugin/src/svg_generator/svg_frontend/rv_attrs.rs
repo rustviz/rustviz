@@ -166,7 +166,7 @@ pub fn event_name(e: &Event) -> &'static str {
         Event::Acquire { .. } => "acquire",
         Event::Duplicate { .. } => "duplicate",
         Event::Copy { .. } => "copy",
-        Event::Move { .. } => "move",
+        Event::Move { .. } => MOVE,
         Event::Branch { .. } => "branch",
         Event::MutableLend { .. } => "mutable_lend",
         Event::MutableBorrow { .. } => "mutable_borrow",
@@ -213,6 +213,8 @@ pub fn event_name(e: &Event) -> &'static str {
 /// split dot is `branch`.
 pub const BRANCH_JOIN: &str = "branch_join";
 
+pub const MOVE: &str = "move";
+
 /// A note on a transfer belonging to an exit the runtime skips.
 pub const SKIPPED_EXIT: &str = "skipped_exit";
 
@@ -225,7 +227,7 @@ pub fn external_event_name(e: &ExternalEvent) -> &'static str {
             if break_alt.as_ref().is_some_and(|alt| alt.runtime == AltRuntime::Skipped) => SKIPPED_EXIT,
         ExternalEvent::Bind { .. } => "bind",
         ExternalEvent::Copy { .. } => "copy",
-        ExternalEvent::Move { .. } => "move",
+        ExternalEvent::Move { .. } => MOVE,
         ExternalEvent::StaticBorrow { .. } => "static_borrow",
         ExternalEvent::MutableBorrow { .. } => "mutable_borrow",
         ExternalEvent::StaticDie { .. } => "static_die",

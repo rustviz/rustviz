@@ -12,7 +12,7 @@ use super::{SharedReferenceJoin, SourceArm, SwitchEdge};
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Location};
 use rustc_data_structures::fx::FxIndexMap;
-use super::schema::{ReferencePoint, ReferenceType, ReferenceTarget, ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, JoinChange, Lent, PartialDrop, Parts, StagedDrop, State};
+use super::schema::{SegmentPoint, ReferenceType, ReferenceTarget, ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, JoinChange, Lent, PartialDrop, Parts, StagedDrop, State};
 pub use super::schema::MixedInit;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -174,6 +174,9 @@ struct RowCells {
     /// goes on): a column missing from it is out of scope there.
     snapshot: bool,
     continues_to: Option<usize>,
+    arm_paths: Vec<Vec<SourceArm>>,
+    before_arm_paths: Vec<Vec<SourceArm>>,
+    single_incoming_row: Option<usize>,
     cells: Cells,
     before: Option<Cells>,
     before_scope_end: Cells,
@@ -223,7 +226,7 @@ struct BodyTable {
     function_body_start: Option<(usize, usize)>,
     rows: BTreeMap<usize, RowCells>,
     successor_counts: BTreeMap<rustc_middle::mir::Location, usize>,
-    reference_points: BTreeMap<ReferencePoint, Cells>,
+    segment_points: BTreeMap<SegmentPoint, Cells>,
     call_returns: BTreeSet<rustc_middle::mir::Location>,
     branch_entries: FxIndexMap<rustc_hir::HirId, Cells>,
     arm_boundaries: FxIndexMap<rustc_hir::HirId, BTreeMap<usize, ArmBoundaryCells>>,
@@ -239,7 +242,6 @@ struct BodyTable {
     iterator_restrictions: BTreeSet<(Local, usize)>,
     collection_handoffs: BTreeMap<(Local, usize), Vec<(Location, Location)>>,
     drop_holders: BTreeMap<usize, BTreeSet<String>>,
-    part_lenders: BTreeSet<String>,
     /// Columns with fields this body can't name (no columns of their own).
     hidden_fields: BTreeSet<String>,
     /// Rows whose code never runs (`BodyFacts::dead_lines`).
@@ -391,10 +393,6 @@ impl StateTable {
             .is_some_and(|b| b.iterator_restrictions.contains(&(local, loan.loan))))
     }
 
-    pub fn has_part_loans(&self, function: FunctionStart, column: &str) -> bool {
-        self.bodies.get(&function.body).is_some_and(|b| b.part_lenders.contains(column))
-    }
-
     /// The source row reached by the snapshot's single forward MIR edge.
     pub fn continues_to_row(&self, function: FunctionStart, row: usize) -> Option<usize> {
         self.bodies.get(&function.body)?.rows.get(&row)?.continues_to
@@ -423,6 +421,53 @@ impl StateTable {
         }
         if span.start.0 < row && row < span.end.0 {
             return Some((self.loan_cell(function, column, row, span.start.0 + 1)?, None));
+        }
+        None
+    }
+
+    /// The state carried along the interior of an arm. A row shared by
+    /// alternatives needs an identified arm or a common outgoing state.
+    /// Empty rows only carry a value along a proved continuation.
+    pub(crate) fn arm_segment_cell(&self, function: FunctionStart, column: &str, row: usize,
+        floor: usize, following: Option<usize>, path: &[SourceArm],
+    ) -> Option<Cell> {
+        let arm = *path.last()?;
+        let body = self.bodies.get(&function.body)?;
+        let on_path = |paths: &[Vec<SourceArm>]| {
+            !paths.is_empty() && paths.iter().all(|exit| {
+                exit.contains(&arm) && exit.iter().all(|actual| {
+                    path.iter().all(|expected| expected.branch != actual.branch || expected == actual)
+                })
+            })
+        };
+        let row_cell = self.loan_cell(function, column, row, floor);
+        if let Some(r) = body.rows.get(&row).filter(|r| !r.arms.is_empty()) {
+            if let Some(cell) = self.source_arm_cell(function, column, row, arm) {
+                return Some(cell);
+            }
+            if r.continues_to != following || following.is_none() {
+                if let Some(cell) = agreed((0..r.arms.len()).map(|i| self.cell_in_arm(function, column, row, i)))
+                    .flatten().filter(|_| on_path(&r.arm_paths))
+                {
+                    return Some(cell);
+                }
+            }
+        }
+        if let Some(cell) = row_cell.filter(|cell| {
+            body.rows.get(&cell.from_row).is_some_and(|r| {
+                on_path(&r.arm_paths) && (r.arms.is_empty() || r.continues_to == following && following.is_some())
+            })
+        }) {
+            return Some(cell);
+        }
+        // A guard's row can take several paths. The next row's entry
+        // can isolate those paths if they flow here from this boundary
+        // and are all in the requested arm.
+        let next = body.rows.get(&following?)?;
+        if next.single_incoming_row == Some(row) && on_path(&next.before_arm_paths) {
+            let mut cell = next.before.as_ref()?.get(column)?.clone();
+            cell.from_row = row;
+            return Some(cell);
         }
         None
     }
@@ -466,8 +511,8 @@ impl StateTable {
         Some(cell)
     }
 
-    pub(crate) fn reference_point_cell(&self, function: FunctionStart, column: &str, point: ReferencePoint) -> Option<&Cell> {
-        self.bodies.get(&function.body)?.reference_points.get(&point)?.get(column)
+    pub(crate) fn segment_point_cell(&self, function: FunctionStart, column: &str, point: SegmentPoint) -> Option<&Cell> {
+        self.bodies.get(&function.body)?.segment_points.get(&point)?.get(column)
     }
 
     pub(crate) fn reference_target(&self, function: FunctionStart, column: &str, cell: &Cell, loan: usize) -> Option<ReferenceTarget> {
@@ -955,32 +1000,6 @@ impl StateTable {
     /// The first row below `row` with a state of its own, in the body of
     /// this function body (P1-4b's reference
     /// columns).
-    pub fn next_state_row(&self, function: FunctionStart, row: usize) -> Option<usize> {
-        let body = self.bodies.get(&function.body)?;
-        if row >= body.last_line {
-            return None;
-        }
-        body.rows.range(row + 1..=body.last_line).find(|(_, r)| r.snapshot).map(|(l, _)| *l)
-    }
-
-    /// Whether `row` has no event about any place of `column`'s variable
-    /// (`p`, `p.a`, `*b`): its state before the row is then its state
-    /// after it. `values_only`: only events that change what it holds
-    /// count (a move, an assignment, a drop), not its loans.
-    pub fn quiet(&self, function: FunctionStart, column: &str, row: usize, values_only: bool) -> bool {
-        let Some(body) = self.bodies.get(&function.body) else { return false };
-        let Some(r) = body.rows.get(&row) else { return true };
-        let root = |c: &str| c.trim_start_matches('*').split(['.', '[']).next().unwrap_or_default().to_owned();
-        // (Not a place reached through a reference it holds, `*h.r = ..`:
-        // that writes what h.r points to, not h. Such places have no
-        // column; a Box's payload `*b` has one.)
-        let its = |c: &str| root(c) == root(column) && (!c.starts_with('*') || body.columns.iter().any(|k| k == c));
-        r.why.iter().filter(|(c, _)| its(c)).all(|(_, ws)| {
-            ws.iter().all(|(_, w)| values_only && matches!(w, Why::Lent { .. } | Why::LoanEnded { .. }))
-        })
-    }
-
-    /// The place `loan` borrows, as the facts name it (`x`, `*r`).
     pub fn loan_lender(&self, function: FunctionStart, loan: usize) -> Option<&str> {
         self.loan(function, loan).map(|l| l.lender.as_str())
     }
@@ -1085,7 +1104,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let mut moved_places = BTreeMap::<_, BTreeSet<_>>::new();
     let mut rows = BTreeMap::new();
     for r in &b.rows {
-        let mut rc = RowCells { snapshot: !r.after.state.is_empty() || !r.after.locals.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), runtime_entry: r.runtime_entry, completed_bindings: r.completed_bindings.iter().flat_map(cells_of).collect(), block_end: r.block_end, completed_let: r.completed_let, jumps: r.jumps, ..Default::default() };
+        let mut rc = RowCells { snapshot: !r.after.state.is_empty() || !r.after.locals.is_empty(), continues_to: r.continues_to, arm_paths: r.arm_paths.clone(), before_arm_paths: r.before_arm_paths.clone(), single_incoming_row: r.single_incoming_row, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), runtime_entry: r.runtime_entry, completed_bindings: r.completed_bindings.iter().flat_map(cells_of).collect(), block_end: r.block_end, completed_let: r.completed_let, jumps: r.jumps, ..Default::default() };
         rc.before_scope_end = r.before_scope_end.iter().filter_map(|(column, state)|
             Some((column.clone(), cells_of(state).remove(column)?))).collect();
         for a in &r.arms {
@@ -1129,7 +1148,6 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     }
     let array_lengths = b.columns.iter().filter_map(|c| Some(((c.local, c.name.clone()), c.array_len?))).collect();
     let boxes = b.columns.iter().filter(|c| c.is_box).map(|c| c.name.clone()).collect();
-    let part_lenders = b.loans.iter().flat_map(|l| l.part_of.iter().cloned()).collect();
     let loans = b.loans.iter().map(|l| (l.loan, l.clone())).collect();
     let hidden_fields = b.columns.iter().filter(|c| c.hidden_fields).map(|c| c.name.clone()).collect();
     let mut successor_counts = BTreeMap::new();
@@ -1158,9 +1176,9 @@ fn body_table(b: &BodyFacts) -> BodyTable {
             }
         }
     }
-    let reference_points = b.reference_points.iter().map(|(&point, state)| (point, cells_of(state))).collect();
     let call_returns = b.call_relationships.calls.iter().filter(|call| call.can_return).map(|call| call.location).collect();
-    BodyTable { iterator_restrictions, collection_handoffs, successor_counts, reference_points, call_returns, closure_captures: b.closure_captures.clone(), drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    let segment_points = b.segment_points.iter().map(|(&point, state)| (point, cells_of(state))).collect();
+    BodyTable { iterator_restrictions, collection_handoffs, successor_counts, segment_points, call_returns, closure_captures: b.closure_captures.clone(), drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 fn body_joins(b: &BodyFacts) -> BodyJoins {
@@ -1218,7 +1236,7 @@ mod tests {
             joined_argument_loans: Default::default(),
             exact_reborrow_parents: Default::default(),
             usable_after_release: Default::default(),
-            reference_points: Default::default(),
+            segment_points: Default::default(),
             residual_drops: Vec::new(),
             skipped_residuals: BTreeSet::new(),
             short_call_borrows: Default::default(),
@@ -1361,6 +1379,53 @@ mod tests {
         let mut other = body("g", 1, &["s"], vec![row(2, &[("s", "moved")], &[], Vec::new())]);
         other.def_id = def(2);
         StateTable::from_facts(&CrateFacts { version: 2, bodies: vec![main_body(), other], errors: Vec::new() })
+    }
+
+    #[test]
+    fn arm_fallback_cannot_read_a_sibling_even_when_its_exits_agree() {
+        use rustc_hir::{HirId, ItemLocalId, OwnerId};
+        use rustc_middle::mir::{BasicBlock, Location};
+
+        let function = start(1);
+        let branch = |local_id| HirId {
+            owner: OwnerId { def_id: function.body.expect_local() },
+            local_id: ItemLocalId::from_u32(local_id),
+        };
+        let outer = SourceArm { branch: branch(1), index: 0 };
+        let sibling = SourceArm { branch: branch(1), index: 1 };
+        let nested = |index| SourceArm { branch: branch(2), index };
+        let moved = cells_of(&state(&[("s", "moved")], &[]));
+        let mut table = table();
+        let rows = &mut table.bodies.get_mut(&function.body).unwrap().rows;
+        rows.insert(7, RowCells {
+            snapshot: true,
+            cells: moved.clone(),
+            arm_paths: vec![vec![outer, nested(0)], vec![outer, nested(1)]],
+            arms: (0..2).map(|i| {
+                let source = nested(i);
+                let edge = SwitchEdge { switch: Location::START, successor: BasicBlock::from_usize(i + 1) };
+                (ArmInfo {
+                    runs: true, runs_at_runtime: true, parent: None, edge, source: Some(source),
+                    branch: Some(source.branch), has_exit: true, continuing: None,
+                }, moved.clone())
+            }).collect(),
+            ..Default::default()
+        });
+        rows.insert(8, RowCells {
+            snapshot: true,
+            cells: cells_of(&state(&[("s", "maybe")], &[])),
+            arm_paths: vec![vec![outer, nested(0)], vec![sibling]],
+            ..Default::default()
+        });
+        // Both nested exits move s, but neither is on the outer else leg.
+        assert!(table.arm_segment_cell(function, "s", 7, 7, Some(8), &[sibling]).is_none());
+        assert_eq!(table.arm_segment_cell(function, "s", 7, 7, Some(8), &[outer]).unwrap().init, Init::Moved);
+        // The merged row has no common arm and cannot give a definite
+        // state for an individual leg.
+        assert!(table.arm_segment_cell(function, "s", 8, 8, Some(9), &[sibling]).is_none());
+        // Even the right inner identity cannot bypass a conflicting
+        // enclosing arm when carrying a state through ordinary rows.
+        assert!(table.arm_segment_cell(function, "s", 8, 8, Some(9), &[sibling, nested(0)]).is_none());
     }
 
     #[test]

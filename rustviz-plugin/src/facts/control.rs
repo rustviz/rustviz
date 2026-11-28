@@ -27,7 +27,7 @@ pub(crate) fn enclosing_arms(tcx: TyCtxt<'_>, id: HirId, declaration_layout: boo
     enclosing_arms_with(tcx, id, declaration_layout, |_| false)
 }
 
-fn enclosing_arms_with(tcx: TyCtxt<'_>, id: HirId, declaration_layout: bool, draws_short_circuit: impl Fn(HirId) -> bool) -> Vec<SourceArm> {
+pub(super) fn enclosing_arms_with(tcx: TyCtxt<'_>, id: HirId, declaration_layout: bool, draws_short_circuit: impl Fn(HirId) -> bool) -> Vec<SourceArm> {
     let mut arms = Vec::new();
     let mut child = id;
     let mut body_arm = None;

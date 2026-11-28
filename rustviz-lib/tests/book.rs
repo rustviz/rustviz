@@ -570,6 +570,8 @@ const BOOK: &[Snippet] = &[
             "The following applies only if the pattern matches. x is the owner of the resource",
             "The following applies only if the pattern matches. x's resource is moved to the caller",
             "The following applies only if the pattern matches. x goes out of scope",
+            // The stroke into the move mark still depicts the whole Option; its payload moves at the mark.
+            "Part of s was moved out, so s can't be used as a whole",
         ],
         ..E
     },

@@ -3997,7 +3997,7 @@ pub fn state_kept_borrowed_by(name: &str, holder: &str) -> String {
 pub fn state_borrowed_by_loop_iterator_holder(name: &String, holds_value: bool, mutable: bool) -> String {
     let me = styled_name_html(name);
     if mutable {
-        format!("{me}'s {} is mutably borrowed by the `for` loop's iterator; {me} can't be used until the borrow ends", held(holds_value))
+        format!("{me}'s {} is mutably borrowed by the `for` loop's iterator. While the iterator or a reference it yielded keeps the borrow live, {me} can't be used", held(holds_value))
     } else {
         format!("{}. The `for` loop's iterator holds a shared borrow", state_partial_privilege(name, holds_value))
     }
