@@ -2,7 +2,7 @@
 //! selects a store once, when the visitor emits its arrow. After that, even
 //! identical arrows use the MIR destination and occurrence of that store.
 use super::{BodyFacts, DropRoute, Ev, Fact, Occurrence};
-use rustc_middle::mir::{Body, Location, Place, ProjectionElem, Rvalue, StatementKind, TerminatorKind};
+use rustc_middle::mir::{Body, Local, Location, Place, ProjectionElem, Rvalue, StatementKind, TerminatorKind};
 use rustc_middle::ty::{TyCtxt, TyKind};
 use rustc_span::Span;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -370,6 +370,36 @@ impl<'a, 'tcx> IncomingStores<'a, 'tcx> {
             }
         }
         result
+    }
+
+    /// A value reaching this boundary can be an enum variant with no payload.
+    pub(super) fn has_fieldless_variant(&self, at: Location, local: Local) -> bool {
+        use rustc_middle::mir::{AggregateKind, Operand};
+        let TyKind::Adt(def, _) = self.body.local_decls[local].ty.kind() else { return false; };
+        if !def.is_enum() || !def.variants().iter().any(|v| v.fields.is_empty()) {
+            return false;
+        }
+        let mut work = vec![(at, local)];
+        let mut seen = BTreeSet::new();
+        while let Some((at, local)) = work.pop() {
+            if !seen.insert((at, local)) { continue; }
+            for site in self.definitions(at, local.into()).sites {
+                let Some(statement) = self.body[site.at.block].statements.get(site.at.statement_index) else { continue; };
+                let StatementKind::Assign(write) = &statement.kind else { continue; };
+                match &write.1 {
+                    Rvalue::Aggregate(kind, operands)
+                        if operands.is_empty() && matches!(**kind, AggregateKind::Adt(id, ..) if id == def.did()) =>
+                        return true,
+                    Rvalue::Use(Operand::Copy(src) | Operand::Move(src)) => {
+                        if let Some(src) = src.as_local() {
+                            work.push((site.at, src));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
     }
 }
 

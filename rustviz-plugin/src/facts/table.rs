@@ -224,6 +224,7 @@ struct BodyTable {
     rows: BTreeMap<usize, RowCells>,
     successor_counts: BTreeMap<rustc_middle::mir::Location, usize>,
     reference_points: BTreeMap<ReferencePoint, Cells>,
+    call_returns: BTreeSet<rustc_middle::mir::Location>,
     branch_entries: FxIndexMap<rustc_hir::HirId, Cells>,
     arm_boundaries: FxIndexMap<rustc_hir::HirId, BTreeMap<usize, ArmBoundaryCells>>,
     /// Column names, in the facts' order.
@@ -581,6 +582,10 @@ impl StateTable {
         let bounds = self.bodies.get(&function.body)?.arm_boundaries.get(&arm.branch)?.get(&arm.index)?;
         let cells = if joining { &bounds.join } else { &bounds.entry };
         cells.as_ref()?.get(column)
+    }
+
+    pub(crate) fn returns_from_call(&self, function: FunctionStart, at: rustc_middle::mir::Location) -> bool {
+        self.bodies.get(&function.body).is_some_and(|body| body.call_returns.contains(&at))
     }
 
     pub(crate) fn arm_owns_row(&self, function: FunctionStart, arm: SourceArm, row: usize) -> Option<bool> {
@@ -1154,7 +1159,8 @@ fn body_table(b: &BodyFacts) -> BodyTable {
         }
     }
     let reference_points = b.reference_points.iter().map(|(&point, state)| (point, cells_of(state))).collect();
-    BodyTable { iterator_restrictions, collection_handoffs, successor_counts, reference_points, closure_captures: b.closure_captures.clone(), drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    let call_returns = b.call_relationships.calls.iter().filter(|call| call.can_return).map(|call| call.location).collect();
+    BodyTable { iterator_restrictions, collection_handoffs, successor_counts, reference_points, call_returns, closure_captures: b.closure_captures.clone(), drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 fn body_joins(b: &BodyFacts) -> BodyJoins {

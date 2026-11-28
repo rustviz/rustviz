@@ -48925,6 +48925,205 @@ fn p4_one_line_arm_below_its_store_holds_a_reference() {
 }
 
 #[test]
+fn issue_1962_reference_legs_show_their_own_paths() {
+    let mut failures = Vec::new();
+    for (fixture, name, rows, active, skipped, skipped_access) in [
+        ("same_dot_reborrow_1888", "b", 9..11, "b@L9-10", "b@L9-10", "can read and write"),
+        ("reference_loan_holders_1862", "b", 11..14, "b@L11-13", "b@L11-13", "can read and write"),
+        ("aggregate_operand_loans_1657", "p", 10..11, "p@L10-11", "p@L10-11", "tracks this borrow through h"),
+        ("reference_arm_privileges_1962", "r", 8..12, "r@L8-12", "r@L7-17", "tracks this borrow through held"),
+        ("reference_arm_privileges_1962", "r", 13..17, "r@L13-17", "r@L7-17", "tracks this borrow through held"),
+        ("reference_arm_privileges_1962", "r", 25..27, "r@L25-26", "r@L25-27", "mutably borrowed by child"),
+        ("reference_arm_privileges_1962", "r", 38..41, "r@L38-41", "r@L38-41", "tracks this borrow through choice"),
+    ] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let active = format!("{active}:branch_line:full_privilege");
+        if !rv_elements(&svg, &active).iter().any(|(_, tip, ..)| tip.contains("can read and write")) {
+            failures.push(format!("{fixture}: missing usable arm at {active}"));
+        }
+        let skipped = format!("{skipped}:branch_line:full_privilege_gray");
+        let padding: Vec<_> = rv_elements(&svg, &skipped).into_iter().filter(|(id, _, (left, right), _)|
+            !id.contains('/') && *right - *left < 4.0).collect();
+        if !padding.iter().any(|(_, title, ..)| title.contains("The underlined code is not part of that branch")
+            && title.contains(skipped_access) && (skipped_access == "can read and write" || !title.contains("can read and write")))
+        {
+            failures.push(format!("{fixture}: wrong or missing inactive sibling at {skipped}: {padding:?}"));
+        }
+        // rustc accepts both a read and a write on these arms. The other
+        // arm's vertical padding should indicate that its code is skipped.
+        let prefix = format!("{name}@L");
+        for (id, _, (left, right), _) in rv_elements(&svg, &prefix) {
+            let Some((range, kind)) = id[prefix.len()..].split_once(":branch_line:revoked_privilege") else { continue };
+            if kind.contains('/') || right - left > 4.0 { continue; }
+            let (start, end) = range.split_once('-').unwrap_or((range, range));
+            let start = start.parse::<usize>().unwrap();
+            let end = end.parse::<usize>().unwrap();
+            if start < rows.end && end.max(start + 1) > rows.start {
+                failures.push(format!("{fixture}: revoked vertical stroke beside a usable arm: {id}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn issue_1962_shared_only_reference_legs_explain_the_restriction() {
+    let holders = run_with_local_backend("reference_loan_holders_1862").timeline_panel_string();
+    let mut connectors: Vec<_> = rv_elements(&holders, "first@L40:branch_line:").into_iter()
+        .filter(|(id, ..)| !id.contains('/')).collect();
+    connectors.sort_by(|a, b| a.2.0.total_cmp(&b.2.0));
+    let [then_arm, else_arm] = connectors.as_slice() else { panic!("missing a join connector: {connectors:?}") };
+    // Rustc accepts a read and rejects a write after assigning left and
+    // again after assigning right, on their respective paths to the join.
+    for connector in [then_arm, else_arm] {
+        assert!(connector.0.starts_with("first@L40:branch_line:partial_privilege")
+            && !connector.0.contains("_gray")
+            && connector.1.contains("can only use it the way a shared reference can")
+            && !connector.1.contains("can read and write"), "{connector:?}");
+    }
+    assert!(then_arm.2.0 < else_arm.2.0, "{connectors:?}");
+}
+
+#[test]
+fn issue_1962_shared_only_trunk_explains_access_before_the_test() {
+    let rv = run_with_local_backend("edition2024/normal_fork_ends_1884");
+    let y = code_row_y(&rv.code_panel_string(), "if let Alternative::First(p) = value {");
+    // This part of the trunk is above the fork and below the preceding
+    // row. Here rustc accepts a shared read of *s and rejects a write.
+    let tips: Vec<_> = rv_elements(&rv.timeline_panel_string(), "s@L").into_iter()
+        .filter(|(id, _, _, (top, bottom))| id.contains(":line:") && *top <= y && y < *bottom)
+        .collect();
+    assert_eq!(tips.len(), 1, "{tips:?}");
+    assert!(tips[0].0.ends_with(":line:partial_privilege")
+        && tips[0].1.contains("allows only shared access through s while the borrow may be live")
+        && !tips[0].1.contains("currently shared through"), "{tips:?}");
+}
+
+#[test]
+fn issue_1962_nested_empty_sibling_releases_the_shared_borrow() {
+    let svg = run_with_local_backend("edition2024/normal_fork_ends_1884").timeline_panel_string();
+    // rustc rejects a write before see(r), but accepts one after the
+    // call and inside the empty sibling, which never uses r.
+    check_review_tip(&svg, "s@L19:branch_line:partial_privilege",
+        &["can only use it the way a shared reference can"], &[]);
+    let mut legs: Vec<_> = rv_elements(&svg, "s@L20-21:branch_line:").into_iter()
+        .filter(|(id, ..)| !id.contains('/')).collect();
+    legs.sort_by(|a, b| a.2.0.total_cmp(&b.2.0));
+    let [after_call, empty] = legs.as_slice() else { panic!("missing a vertical leg: {legs:?}") };
+    assert!(after_call.2.1 < empty.2.0);
+    for (id, tip, ..) in [after_call, empty] {
+        assert!(id.contains(":full_privilege") && tip.contains("can read and write"), "{id}: {tip}");
+    }
+}
+
+#[test]
+fn issue_1962_nested_reference_reborrow_revokes_access() {
+    let svg = run_with_local_backend("p4_reference_segments").timeline_panel_string();
+    // Reading the original referent conflicts with kept. Replacing *slot
+    // and writing through the new reference while kept is in use compile.
+    check_review_tip(&svg, "slot@L74-78:line:revoked_privilege",
+        &["**slot is mutably borrowed by kept", "The original referent cannot be accessed through slot",
+          "An unborrowed intermediate reference can still be replaced"],
+        &["prevents access through slot", "can read and write"]);
+}
+
+#[test]
+fn issue_1962_nested_mutable_path_controls_access_after_join() {
+    let svg = run_with_local_backend("reference_arm_privileges_1962").timeline_panel_string();
+    // The Shared arm alone permits a read. With the Exclusive arm also
+    // reaching the join, a read conflicts with a live borrow (E0502).
+    check_review_tip(&svg, "slot@L58-59:line:",
+        &["The borrow checker treats **slot as exclusively borrowed here", "The original referent cannot be accessed through slot"],
+        &["allows only shared access", "can read and write"]);
+    assert!(tooltip_of_id(&svg, "slot@L58-59:line:revoked_privilege").is_some());
+}
+
+#[test]
+fn issue_1962_nested_reservation_permits_reads_and_blocks_writes() {
+    let svg = run_with_local_backend("reference_arm_privileges_1962").timeline_panel_string();
+    // Vec::len compiles as an argument to push. Writing to its element
+    // in that argument overlaps the reservation (E0499).
+    check_review_tip(&svg, "slot@L63-64:line:",
+        &["A mutable borrow of **slot is reserved", "Shared reads of **slot are allowed", "prevents writes to **slot"],
+        &["can read and write"]);
+    assert!(tooltip_of_id(&svg, "slot@L63-64:line:partial_privilege").is_some());
+}
+
+#[test]
+fn issue_1962_neighboring_else_remains_shared_until_its_call() {
+    let svg = run_with_local_backend("edition2024/normal_fork_ends_1884").timeline_panel_string();
+    let mut legs: Vec<_> = rv_elements(&svg, "s@L31-32:branch_line:").into_iter()
+        .filter(|(id, ..)| !id.contains('/')).collect();
+    legs.sort_by(|a, b| a.2.0.total_cmp(&b.2.0));
+    let [then_arm, else_arm] = legs.as_slice() else { panic!("missing a vertical leg: {legs:?}") };
+    // A write after the first arm's call compiles. A write before the
+    // else arm's call fails with E0502. A shared read compiles on both.
+    assert!(then_arm.0.contains(":full_privilege") && then_arm.1.contains("can read and write"), "{then_arm:?}");
+    assert!(else_arm.0.ends_with(":partial_privilege")
+        && else_arm.1.contains("can only use it the way a shared reference can")
+        && !else_arm.1.contains("can read and write"), "{else_arm:?}");
+}
+
+#[test]
+fn issue_1962_inactive_padding_preserves_the_arm_explanation() {
+    let holders = run_with_local_backend("reference_loan_holders_1862").timeline_panel_string();
+    // Before h is built, the chain from a through r to m remains live on
+    // the else path, where a.clear() would conflict with the reborrow.
+    check_review_tip(&holders, "a@L9-11:branch_line:full_privilege_gray",
+        &["This segment is for the else branch", "r took the original mutable reborrow",
+          "The borrow checker tracks this borrow through m"],
+        &["can read and write"]);
+    let last_use = run_with_local_backend("reborrow_last_used_in_one_arm_1513").timeline_panel_string();
+    // m2 has no use on the empty else path. Inserting m.clear() compiles.
+    check_review_tip(&last_use, "m@L47-48:branch_line:full_privilege_gray",
+        &["This segment is for the else branch", "m holds a mutable reference", "can read and write"],
+        &["can't be read"]);
+}
+
+#[test]
+fn issue_1962_initialized_connector_keeps_its_shared_reference() {
+    for (fixture, id) in [
+        ("branch_local_ref_value_1453", "x@L63:branch_line:partial_privilege"),
+        ("branch_extended_temp_1397", "t.0@L142:branch_line:partial_privilege"),
+        ("field_arms_lenders_siblings_1402", "o.inner.a@L58:branch_line:partial_privilege"),
+    ] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        let connectors: Vec<_> = rv_elements(&svg, id).into_iter()
+            .filter(|(id, ..)| !id.contains('/') && !id.contains("_gray")).collect();
+        assert!(!connectors.is_empty(), "{fixture}: {id}");
+        for (id, tip, ..) in connectors {
+            assert!(tip.contains("holds an immutable reference") && !tip.contains("has no value yet"), "{id}: {tip}");
+        }
+    }
+}
+
+#[test]
+fn issue_1962_same_lifetime_does_not_make_a_parameter_a_carrier() {
+    for (fixture, id) in [
+        ("two_field_borrow_through_ref_1080", "b@L22:branch_line:revoked_privilege"),
+        ("rv3_issues/1693_returned_first_mut", "b@L7:branch_line:revoked_privilege"),
+    ] {
+        let svg = run_with_local_backend(fixture).timeline_panel_string();
+        // Rustc accepts a.push(42) after saving b.first_mut() and before
+        // returning it. Nothing stores a new reference in a.
+        check_review_tip(&svg, id, &["mutably borrowed through b"], &["tracks this borrow through a"]);
+    }
+}
+
+#[test]
+fn issue_1962_empty_one_line_arm_uses_its_own_reference_state() {
+    let svg = run_with_local_backend("known_bugs/1823_shared_ref_of_mut_siblings").timeline_panel_string();
+    let legs: Vec<_> = rv_elements(&svg, "p10@L108:branch_line:").into_iter()
+        .filter(|(id, _, (left, right), _)| !id.contains('/') && *right - *left < 4.0).collect();
+    // Inserting p10.clear() before &b10 compiles. Inserting it before
+    // r10 on the other arm conflicts with the reborrow used by r10.
+    let [else_arm] = legs.as_slice() else { panic!("expected the else arm's vertical stroke: {legs:?}") };
+    assert!(else_arm.0.contains(":full_privilege") && else_arm.1.contains("can read and write"), "{else_arm:?}");
+    check_review_tip(&svg, "p10@L108:branch_line:revoked_privilege",
+        &["tracks this borrow through r10"], &["can read and write"]);
+}
+
+#[test]
 fn p4_review_indexed_stored_holders_and_drop_use() {
     let svg = run_with_local_backend("p4_indexed_review").timeline_panel_string();
     check_review_tip(&svg, "a@L118:dot:static_lend",
