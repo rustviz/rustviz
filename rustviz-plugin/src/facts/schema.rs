@@ -189,6 +189,12 @@ pub struct BodyFacts {
     /// identifies where this individual copy stopped carrying its loan.
     #[serde(skip)]
     pub inline_holder_ends: Vec<(usize, Ev)>,
+    /// Slots that carry this loan on every path to the holder end.
+    #[serde(skip)]
+    pub(crate) definite_hold_origins: BTreeMap<(Occurrence, usize), BTreeSet<TransientPlace>>,
+    /// A whole-pointee reborrow's one proven reference origin at issuance.
+    #[serde(skip)]
+    pub(crate) definite_reborrow_sources: BTreeMap<usize, usize>,
     #[serde(skip)]
     pub evaluated_spans: Vec<rustc_span::Span>,
     /// Mutable reborrows of a whole referent at the operand's MIR source span.
@@ -1306,7 +1312,7 @@ pub struct TransientPlace {
 }
 
 impl TransientPlace {
-    pub(super) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>) -> Self {
+    pub(crate) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>) -> Self {
         use rustc_middle::mir::ProjectionElem::*;
         let projection = p.projection.iter().map(|step| match step {
             Deref => EndProjection::Deref,

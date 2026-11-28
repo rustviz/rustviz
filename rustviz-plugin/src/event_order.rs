@@ -1118,6 +1118,46 @@ impl Order<'_, '_> {
                     p.local == local.index() && !p.projection.is_empty() && &p.name == field.name()))).map(|e| e.location)
     }
 
+    /// An aggregate transfer can end the source's use of the references
+    /// it carries, while their loans continue past that instruction.
+    fn aggregate_transfer_continuation(&self, event: &E) -> Option<String> {
+        use crate::facts::schema::{Occurrence, TransientPlace};
+        use crate::svg_generator::hover_messages as hover;
+        use rustc_middle::mir::Operand;
+        use rustc_middle::ty::TyKind;
+
+        let (E::Move { from: ResourceTy::Value(holder), to: ResourceTy::Value(receiver), .. }
+            | E::Copy { from: ResourceTy::Value(holder), to: ResourceTy::Value(receiver), .. }) = event else { return None };
+        let span = *self.spans.get(&event.get_id())?;
+        let exact = self.facts.value_flow.read(span).is_some_and(|read| read.exact);
+        for site in self.facts.value_flow.read_sites(span) {
+            let at = site.at;
+            let Some(statement) = self.body[at.block].statements.get(at.statement_index) else { continue };
+            let StatementKind::Assign(assign) = &statement.kind else { continue };
+            let place = match (&assign.1, event) {
+                (Rvalue::Use(Operand::Copy(place)), E::Copy { .. }) | (Rvalue::Use(Operand::Move(place)), E::Move { .. }) => *place,
+                _ => continue,
+            };
+            if holder.owner_local().map_or(!holder.is_member(), |local| local != place.local)
+                || holder.is_member() == place.projection.is_empty()
+                || receiver.is_member()
+                || exact && assign.0.as_local() != receiver.owner_local()
+                || !matches!(place.ty(&self.body.local_decls, self.tcx).ty.kind(),
+                    TyKind::Adt(..) | TyKind::Tuple(..) | TyKind::Array(..))
+            {
+                continue;
+            }
+            let source = TransientPlace::new(self.tcx, place);
+            let edge = Occurrence { at, exit: None, successor: Some(at.successor_within_block()) };
+            let loans = self.reference_facts.loans_outliving_place(self.facts, edge, source.local.index(), &source.projection);
+            if !loans.possible.is_empty() {
+                return Some(if exact { hover::continuing_loans(self.facts, &loans, false) }
+                    else { hover::POSSIBLY_CONTINUING_LOANS.to_owned() });
+            }
+        }
+        None
+    }
+
     /// A call consumes the moved argument before its return initializes the
     /// result. The operand and result can have different source lines. On a
     /// single line, reserve distinct drawing rows for the two instructions.
@@ -1311,6 +1351,9 @@ impl Order<'_, '_> {
             }
             if let Some(lender) = self.shadowed_borrow_lender(ev) {
                 layout.shadowed_borrow_lenders.insert(ev.get_id(), lender);
+            }
+            if let Some(clause) = self.aggregate_transfer_continuation(ev) {
+                layout.aggregate_transfer_continuations.insert(ev.get_id(), clause);
             }
             lines.entry(*line).or_default().push(i);
         }
@@ -1561,6 +1604,7 @@ pub struct RowLayout {
     /// Both column dots and the connecting arrow describe the same aggregate operand.
     pub(crate) pattern_payloads: BTreeMap<usize, (String, &'static str)>,
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
+    pub(crate) aggregate_transfer_continuations: BTreeMap<usize, String>,
     pub(crate) temporary_staged_moves: BTreeMap<u64, BTreeSet<String>>,
     pub(crate) collection_reborrow_ends: BTreeSet<usize>,
     pub(crate) yielded_reference_ends: BTreeSet<usize>,
@@ -1641,6 +1685,7 @@ impl RowLayout {
         self.temp_drop_flags.append(&mut other.temp_drop_flags);
         self.temp_moves.append(&mut other.temp_moves);
         self.aggregate_titles.append(&mut other.aggregate_titles);
+        self.aggregate_transfer_continuations.append(&mut other.aggregate_transfer_continuations);
         self.temporary_staged_moves.append(&mut other.temporary_staged_moves);
         self.collection_reborrow_ends.append(&mut other.collection_reborrow_ends);
         self.yielded_reference_ends.append(&mut other.yielded_reference_ends);

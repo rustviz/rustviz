@@ -4446,9 +4446,13 @@ pub(crate) fn part_name_html(place: &str) -> String {
 }
 
 pub(crate) fn projected_place_html(place: &crate::facts::ProjectedPlace) -> String {
+    projected_steps_html(&place.base, &place.steps)
+}
+
+fn projected_steps_html(base: &str, steps: &[crate::facts::PlaceStep]) -> String {
     use crate::facts::PlaceStep;
-    let mut shown = styled_name_html(&place.base);
-    for step in &place.steps {
+    let mut shown = styled_name_html(base);
+    for step in steps {
         shown = match step {
             PlaceStep::Deref => format!("what {shown} points to"),
             PlaceStep::Element => format!("an element of {shown}"),
@@ -7117,6 +7121,75 @@ pub(crate) fn reference_hold_end(holder: &str, lender: &str, kind: &str) -> Stri
     let lender = styled_name_html(lender);
     let borrow = if kind == "mut" { "original mutable borrow" } else { "shared borrow" };
     format!("{holder} stops using its shared reference. The {borrow} of {lender} remains live.")
+}
+
+pub(crate) const POSSIBLY_CONTINUING_LOANS: &str =
+    "The borrow checker can keep borrows live after this use.";
+
+pub(crate) fn continuing_loans(
+    facts: &crate::facts::BodyFacts, loans: &crate::facts::repoints::ContinuingLoans,
+    original_mutable: bool,
+) -> String {
+    use crate::facts::PlaceStep;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let lender = |id| {
+        let mut seen = BTreeSet::new();
+        let mut id = id;
+        while seen.insert(id) {
+            let loan = facts.loans.iter().find(|l| l.loan == id && l.runs)?;
+            match loan.source {
+                "borrow" => return Some(loan),
+                "untracked" => id = *facts.definite_reborrow_sources.get(&id)?,
+                _ => return None,
+            }
+        }
+        None
+    };
+    let mut uncertain = false;
+    let mut groups = BTreeMap::<_, BTreeMap<_, BTreeMap<usize, _>>>::new();
+    for id in &loans.possible {
+        let Some(loan) = loans.definite.contains(id).then(|| lender(*id)).flatten() else {
+            uncertain = true;
+            continue;
+        };
+        let Some(kind) = (if original_mutable && loan.kind == "mut" {
+            Some("original mutable")
+        } else {
+            loan_kind_word(loan)
+        }) else {
+            uncertain = true;
+            continue;
+        };
+        let projection = loan.payload.as_ref().or(loan.projected.as_ref());
+        let label = projection.map_or_else(|| styled_name_html(&loan.lender), projected_place_html);
+        // Copies and whole-pointee reborrows can lead back to the same
+        // loan. Distinct loans still count when they share a display label.
+        groups.entry(kind).or_default().entry(label).or_default().insert(loan.loan, projection);
+    }
+    let mut clauses = Vec::new();
+    for (kind, places) in groups {
+        let count: usize = places.values().map(BTreeMap::len).sum();
+        let names: Vec<_> = places.into_iter().map(|(label, loans)| {
+            if loans.len() > 1 {
+                if let Some(Some(place)) = loans.values().next() {
+                    if let Some((PlaceStep::Element, parent)) = place.steps.split_last() {
+                        return format!("elements of {}", projected_steps_html(&place.base, parent));
+                    }
+                }
+            }
+            label
+        }).collect();
+        if count == 1 {
+            clauses.push(format!("The {kind} borrow of {} remains live.", names[0]));
+        } else {
+            clauses.push(format!("The {kind} borrows of {} remain live.", join_names(&names)));
+        }
+    }
+    if uncertain || clauses.is_empty() {
+        clauses.push(POSSIBLY_CONTINUING_LOANS.to_owned());
+    }
+    clauses.join(" ")
 }
 
 /// The full title of an arrow between two columns: `arrow_title`, then

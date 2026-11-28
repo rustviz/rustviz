@@ -3427,6 +3427,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if !loan.direct_holders.contains(name) { loan.direct_holders.push(name.clone()); }
         }
     }
+    let mut definite_reborrow_sources = BTreeMap::new();
     if let Some(t) = table {
         let lmap = bwf.borrow_set.location_map();
         for l in loans.iter_mut() {
@@ -3446,6 +3447,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let refp = Place { local: bp.local, projection: tcx.mk_place_elems(&bp.projection[..last_deref]) };
             let mut v: Vec<usize> = held_by_place(refp, t.start_index(loc)).into_iter().filter(|x| *x != l.loan && published.contains(x)).collect();
             v.sort();
+            if l.source == "untracked" && bp.projection.last() == Some(&ProjectionElem::Deref)
+                && decl_place_ty(tcx, body, refp).is_ref()
+            {
+                if let Some(id) = direct.before(loc, refp).definite_loan().filter(|id| v.contains(id)) {
+                    definite_reborrow_sources.insert(l.loan, id);
+                }
+            }
             l.made_through = v;
         }
         let mut callees = std::collections::HashMap::new();
@@ -3975,6 +3983,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }
     // ---- per-holder ends ---------------------------------------------------------
     // Where a direct or via-call holder stops holding a loan that goes on.
+    let mut definite_hold_origins = BTreeMap::<_, BTreeSet<_>>::new();
     if let Some(t) = table {
         let killed: BTreeSet<_> = pfacts.into_iter().flat_map(|f| f.loan_killed_at.iter().copied()).collect();
         let succs_of = |loc: Location| -> Vec<Location> {
@@ -4019,6 +4028,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             true
         };
+        let mut definite_origins = std::collections::HashMap::new();
         for l in &loans {
             if unused.contains(&l.loan) {
                 continue;
@@ -4033,6 +4043,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let refs: Vec<_> = holders.iter().filter(|(p, _)| decl_place_ty(tcx, body, *p).is_ref()).collect();
             for (hp, h) in &holders {
                 let hp = *hp;
+                let mut slots = Vec::new();
+                direct_holders::reference_slots(tcx, body, hp, &array_offsets, &mut slots);
                 for (&loc, &row) in &cx.rows.row {
                     if !runs.contains(&loc.block) {
                         continue;
@@ -4064,6 +4076,16 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         f.1.occurrence.successor = Some(s);
                         let (_, paths, _, _) = end_provenance(&mut flow, loc, bi, l, Some(hp));
                         f.1.end_places.push(EndPlace::new(tcx, hp, h.clone()));
+                        if executable.contains(&s) {
+                            for &slot in &slots {
+                                let origin = definite_origins.entry((loc, slot))
+                                    .or_insert_with(|| direct.before(loc, slot).definite_loan());
+                                if *origin == Some(l.loan) {
+                                    definite_hold_origins.entry((f.1.occurrence, l.loan)).or_default()
+                                        .insert(super::schema::TransientPlace::new(tcx, slot));
+                                }
+                            }
+                        }
                         // Propagation across this edge requires the same live
                         // reference origin on both ends. The successor alone
                         // can contain a loan introduced by another predecessor.
@@ -7535,6 +7557,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         issued_operand_loans,
         returned_operand_loans,
         inline_holder_ends,
+        definite_hold_origins,
+        definite_reborrow_sources,
         evaluated_spans,
         implicit_mut_reborrows,
         effect_sites,

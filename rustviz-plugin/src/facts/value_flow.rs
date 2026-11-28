@@ -185,6 +185,11 @@ impl ValueFlow {
         Operands::common_read(self.operands.reads.get(&span.with_parent(None))?.iter())
     }
 
+    /// Executable MIR occurrences of an expression that may lower more than once.
+    pub fn read_sites(&self, span: Span) -> impl Iterator<Item = Site> + '_ {
+        self.operands.reads.get(&span.with_parent(None)).into_iter().flatten().map(|read| read.site)
+    }
+
     pub fn returned_read(&self, span: Span) -> Option<Read> {
         let reads = self.operands.reads.get(&span.with_parent(None))?.iter();
         Operands::common_read(reads.filter(|read| returned_part(&read.destinations).is_some()))

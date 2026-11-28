@@ -46951,7 +46951,8 @@ fn direct_holder_array_reports_shared_access() {
 fn direct_holder_array_drawing_separates_holder_uses_from_release() {
     let rv = run_with_local_backend("p4_direct_holders");
     let svg = rv.timeline_panel_string();
-    check_review_tip(&svg, "items@L35:dot:", &["items stops using its shared reference"], &["items's immutable borrow ends"]);
+    check_review_tip(&svg, "items@L35:dot:", &["items stops using the value holding these borrows", "shared borrows of other and value remain live"],
+        &["items's immutable borrow ends", "shared borrow of value remains live", "shared borrow of other remains live"]);
     check_review_tip(&svg, "first@L36:dot:", &["first stops using its shared reference", "shared borrow of value remains live"],
         &["first's immutable borrow ends"]);
     for holder in ["items", "first", "second"] {
@@ -46961,6 +46962,124 @@ fn direct_holder_array_drawing_separates_holder_uses_from_release() {
     assert_eq!(release.len(), 1, "{release:?}");
     check_review_tip(&svg, "value@L37:dot:static_reacquire",
         &["The shared borrow of value ends. This borrow no longer restricts access to value"], &["If items holds"]);
+}
+
+// Each `.clear()` is accepted after the last reference use, and rustc
+// rejects it with E0502 just after the transfer while the copy is in use.
+fn check_aggregate_hold_end_1941(id: &str, transfer: &str, lenders: &str, individual: &[&str]) {
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    let single_lender: Vec<_> = individual.iter().map(|lender| format!("shared borrow of {lender} remains live")).collect();
+    let forbidden: Vec<_> = single_lender.iter().map(String::as_str).collect();
+    check_review_tip(&svg, id, &[transfer, &format!("The shared borrows of {lenders} remain live.")], &forbidden);
+}
+
+#[test]
+fn aggregate_hold_end_1941_array() {
+    check_aggregate_hold_end_1941("items@L9:dot:static_die", "items stops using", "a and b", &["a", "b"]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_tuple() {
+    check_aggregate_hold_end_1941("pair@L20:dot:duplicate", "pair's value is copied", "a and b", &["a", "b"]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_struct() {
+    check_aggregate_hold_end_1941("record@L36:dot:move", "record's value is moved", "a and b", &["a", "b"]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_nested() {
+    check_aggregate_hold_end_1941("nested@L48:dot:duplicate", "nested's value is copied", "a, b, and c", &["a", "b", "c"]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_conditional() {
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    // The first element contains one of &a or &b, selected at runtime.
+    check_review_tip(&svg, "items@L62:dot:duplicate+static_die",
+        &["The shared borrow of c remains live.", "The borrow checker can keep borrows live after this use."],
+        &["borrow of a remains live", "borrow of b remains live", "borrows of a", "borrows of b"]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_joined_origins() {
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    // Both issues run. The branch selects one reference and can write
+    // through the unused lender. Only the c slot has the same reference.
+    for line in [84, 102] {
+        check_review_tip(&svg, &format!("pair@L{line}:dot:duplicate"),
+            &["pair's value is copied", "The shared borrow of c remains live.",
+                "The borrow checker can keep borrows live after this use."],
+            &["borrow of a remains live", "borrow of b remains live", "borrows of a", "borrows of b"]);
+    }
+}
+
+#[test]
+fn aggregate_hold_end_1941_element_places() {
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    check_review_tip(&svg, "pair@L111:dot:duplicate",
+        &["pair's value is copied", "The shared borrows of elements of data remain live."],
+        &["The shared borrow of an element of data remains live."]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_mutable_element_places() {
+    // `let [ref mut x, ref mut y] = data` makes two mutable loans of
+    // different elements, both rendered "an element of data".
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    check_review_tip(&svg, "pair@L197:dot:move",
+        &["pair's value is moved", "The mutable borrows of elements of data remain live."],
+        &["The mutable borrow of an element of data remains live."]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_one_loan() {
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    check_review_tip(&svg, "pair@L119:dot:duplicate",
+        &["pair's value is copied", "The shared borrow of a remains live."],
+        &["The borrow checker can keep borrows live", "The shared borrow of a ends"]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_projected_transfer() {
+    check_aggregate_hold_end_1941("wrapper.0@L128:dot:duplicate",
+        "wrapper.0's value is copied", "a and b", &["a", "b"]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_branch_stop() {
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    check_review_tip(&svg, "r@L143:dot:static_lend+static_reacquire+static_die+pass_by_static_reference",
+        &["r stops using its shared reference", "The shared borrow of a remains live."],
+        &["r stops using its value", "The shared borrow of a ends"]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_inexact_transfer() {
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    check_review_tip(&svg, "pair@L154:dot:duplicate",
+        &["pair's value is copied. The borrow checker can keep borrows live after this use."],
+        &["The shared borrow of a remains live."]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_opaque_reborrow() {
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    // The call signature ties the result to ra, but the function returns
+    // a reference to EMPTY. Reborrowing the result does not prove a.
+    check_review_tip(&svg, "pair@L174:dot:duplicate",
+        &["pair's value is copied", "The shared borrow of c remains live.",
+            "The borrow checker can keep borrows live after this use."],
+        &["borrow of a remains live", "borrows of a"]);
+}
+
+#[test]
+fn aggregate_hold_end_1941_ambiguous_shared_stop() {
+    let svg = run_with_local_backend("aggregate_hold_end_1941").timeline_panel_string();
+    check_review_tip(&svg, "r@L186:dot:branch_join+static_die",
+        &["r stops using its shared reference", "The borrow checker can keep borrows live after this use."],
+        &["r stops using its value"]);
 }
 
 #[test]
@@ -47013,6 +47132,9 @@ fn direct_holder_copy_explains_payload_restriction_in_source_terms() {
     check_review_tip(&svg, "slots>r@L99:arrow:copy",
         &["Through the array's common lifetime", "keeps the value inside pack borrowed"],
         &["(pack as Some).0", "*payload"]);
+    check_review_tip(&svg, "slots@L99:dot:",
+        &["The shared borrows of value and the value inside pack remain live."],
+        &["shared borrow of value remains live", "(pack as Some).0", "*payload"]);
 }
 
 #[test]

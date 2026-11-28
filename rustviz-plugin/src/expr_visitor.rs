@@ -13503,7 +13503,35 @@ pub fn print_out_of_scope(&mut self){
           use crate::svg_generator::hover_messages as hover;
           let title = match end {
             End::Arrow(_) => Some(hover::array_loan_release(Some(k), &loan.lender, loan.kind)),
-            End::Own(_) => Some(hover::reference_hold_end(k, &loan.lender, loan.kind)),
+            End::Own(line) => {
+              let mut stops = self.reference_effects.ends(loan.loan)
+                .filter(|b| !b.release && b.row == line)
+                .flat_map(|b| b.fact.end_places.iter().filter(|p| is_slot(p, slot, &self.raps))
+                  .map(move |p| (b.fact.occurrence, p)))
+                .collect::<BTreeSet<_>>().into_iter();
+              let proven = stops.next().filter(|_| stops.next().is_none()).and_then(|(edge, holder)| {
+                let facts = facts?;
+                let continuing = self.reference_effects.loans_outliving_place(facts, edge, holder.local, &holder.projection);
+                let clause = hover::continuing_loans(facts, &continuing, true);
+                let holder_ty = self.mir_body.local_decls[Local::from_usize(holder.local)].ty;
+                let single_shared = holder.projection.is_empty() && matches!(holder_ty.kind(),
+                  TyKind::Array(ty, len) if matches!(ty.kind(), TyKind::Ref(_, _, rustc_middle::mir::Mutability::Not))
+                    && len.try_to_target_usize(self.tcx) == Some(1));
+                let value = if (from_ro.is_ref() && !from_ro.is_mutref()) || single_shared {
+                  "its shared reference"
+                } else if from_ro.is_mutref() { "its mutable reference" }
+                else if continuing.definite != continuing.possible || continuing.definite.is_empty() { "its value" }
+                else if continuing.definite.len() == 1 { "the value holding this borrow" }
+                else { "the value holding these borrows" };
+                Some(format!("{} stops using {value}. {clause}", hover::styled_name_html(k)))
+              });
+              Some(proven.unwrap_or_else(|| {
+                let value = if from_ro.is_mutref() { "its mutable reference" }
+                  else if from_ro.is_ref() { "its shared reference" }
+                  else { "its value" };
+                format!("{} stops using {value}. {}", hover::styled_name_html(k), hover::POSSIBLY_CONTINUING_LOANS)
+              }))
+            }
             _ => None,
           };
           if let Some(title) = title {

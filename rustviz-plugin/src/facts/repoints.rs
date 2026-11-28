@@ -44,6 +44,13 @@ pub(crate) struct ReferenceEffects<'a, 'tcx> {
     assignments: HashMap<Span, Vec<Store<'a, 'tcx>>>,
     calls: HashMap<Span, BTreeSet<Location>>,
     boundaries: BTreeMap<usize, Vec<Boundary<'a>>>,
+    hold_ends: BTreeMap<Occurrence, Vec<Boundary<'a>>>,
+}
+
+#[derive(Default)]
+pub(crate) struct ContinuingLoans {
+    pub possible: BTreeSet<usize>,
+    pub definite: BTreeSet<usize>,
 }
 
 impl<'a, 'tcx> ReferenceEffects<'a, 'tcx> {
@@ -79,12 +86,16 @@ impl<'a, 'tcx> ReferenceEffects<'a, 'tcx> {
                     effects.assignments.entry(stmt.source_info.span.with_parent(None)).or_default().push(store);
                 }
                 Fact::BorrowEnd { loan, .. } | Fact::HoldEnd { loan, .. } => {
-                    effects.boundaries.entry(*loan).or_default().push(Boundary {
+                    let boundary = Boundary {
                         row,
                         loan: *loan,
                         fact,
                         release: matches!(fact.fact, Fact::BorrowEnd { .. }),
-                    });
+                    };
+                    effects.boundaries.entry(*loan).or_default().push(boundary);
+                    if !boundary.release {
+                        effects.hold_ends.entry(fact.occurrence).or_default().push(boundary);
+                    }
                 }
                 _ => {}
             }
@@ -130,6 +141,26 @@ impl<'a, 'tcx> ReferenceEffects<'a, 'tcx> {
 
     pub fn ends(&self, loan: usize) -> impl Iterator<Item = Boundary<'a>> + '_ {
         self.boundaries.get(&loan).into_iter().flatten().copied()
+    }
+
+    /// A HoldEnd proves the restriction continues. The value origins of
+    /// the ending slots separately establish which references reached it.
+    pub fn loans_outliving_place(
+        &self, facts: &BodyFacts, edge: Occurrence, local: usize, projection: &[super::EndProjection],
+    ) -> ContinuingLoans {
+        let mut loans = ContinuingLoans::default();
+        for end in self.hold_ends.get(&edge).into_iter().flatten() {
+            let definite = facts.definite_hold_origins.get(&(edge, end.loan)).is_some_and(|slots| {
+                slots.iter().any(|p| p.local.index() == local && p.projection.starts_with(projection))
+            });
+            if definite {
+                loans.definite.insert(end.loan);
+            }
+            if definite || end.fact.end_places.iter().any(|p| p.local == local && p.projection.starts_with(projection)) {
+                loans.possible.insert(end.loan);
+            }
+        }
+        loans
     }
 }
 
