@@ -452,7 +452,7 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   pub tcx: TyCtxt<'tcx>, // type context
   pub event_spans: HashMap<usize, rustc_span::Span>,
   pub(crate) transfer_sites: BTreeMap<usize, Site>,
-  argument_slots: BTreeMap<usize, (rustc_middle::mir::Location, usize)>,
+  pub(crate) argument_slots: BTreeMap<usize, (rustc_middle::mir::Location, usize)>,
   /// Ends drawn for the previous fields of an overwritten whole value.
   pub field_overwrite_ends: BTreeSet<usize>,
   pub emitting_expr: Option<&'tcx Expr<'tcx>>,
@@ -6675,6 +6675,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let read = value_flow.and_then(|flow| {
       if in_macro { flow.read(arg.span) } else { flow.argument_read(arg.span, slots) }
     });
+    let joined_argument = self.break_alt.as_ref().and_then(|_| {
+      value_flow?.unique_argument(read.as_ref().filter(|r| r.exact)?, slots)
+    });
     if read.is_none() && !in_macro && slots.projected_literal.is_none() {
       if let Some(read) = value_flow.and_then(|flow| flow.read(arg.span)) {
         if let OperandEffect::Move(src) = &read.effect {
@@ -6875,6 +6878,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         _ => from_ro,
       };
       let id = *self.unique_id;
+      if let Some(slot) = joined_argument {
+        self.argument_slots.insert(id, slot);
+      }
       match arg_mut {
         Mutability::Not => {
           // `bump(rc)` with `rc: &Cell<i32>` (#1149): bump can change
@@ -13733,6 +13739,7 @@ pub fn print_out_of_scope(&mut self){
     // both arms of a nested test. Otherwise it adds another at the join.
     self.place_let_else_ends();
     self.place_exit_ends(&empty_payloads);
+    self.describe_joined_argument_ends();
     mark_exhaustion_paths(self.preprocessed_events, &self.exit_scopes);
     self.print_out_of_scope();
     if let Some(facts) = facts {

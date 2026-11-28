@@ -4,7 +4,7 @@ use crate::expr_visitor::ExprVisitor;
 use crate::facts::{EndPlace, Ev, Fact};
 use crate::svg_generator::data::{BranchType, ExternalEvent, ResourceTy};
 use crate::svg_generator::hover_messages::styled_name_html;
-use rustc_middle::mir::{Local, Location, Operand, Rvalue, StatementKind, TerminatorKind};
+use rustc_middle::mir::{Local, Location, Operand, ProjectionElem, Rvalue, StatementKind, TerminatorKind};
 use rustc_utils::BodyExt;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,10 +14,19 @@ fn call_return(body: &rustc_middle::mir::Body<'_>, e: &Ev) -> bool {
       if e.occurrence.successor == Some(t.start_location()))
 }
 
+/// A write through this reference can finish the loan after the old value
+/// has been dropped and the new value installed.
+fn write_through(body: &rustc_middle::mir::Body<'_>, at: Location, holder: Local) -> bool {
+  body[at.block].statements.get(at.statement_index).is_some_and(|st| {
+    matches!(&st.kind, StatementKind::Assign(pair)
+      if pair.0.local == holder && pair.0.projection.first() == Some(&ProjectionElem::Deref))
+  })
+}
+
 impl ExprVisitor<'_, '_> {
   /// A later operand in a let-chain is drawn on the success leg after it
   /// passes the earlier MIR switch, even when its own test ultimately fails.
-  fn normal_fork_site(
+  pub(super) fn normal_fork_site(
     &self,
     facts: &crate::facts::BodyFacts,
     switches: &BTreeMap<usize, Vec<Location>>,
@@ -316,11 +325,27 @@ impl ExprVisitor<'_, '_> {
           && events()
             .filter(|e| matches!(e.fact, Fact::BorrowEnd { loan: l, .. } if l == loan))
             .all(|e| sites.values().any(|end| end.occurrence == e.occurrence));
+      // A replacement through the reference ends its loan after the
+      // write. The bypass end belongs on its own edge, even if another
+      // borrow of the same lender starts on that leg.
+      let write_fork = holder.ref_local().zip(sites.keys().next()).is_some_and(|(local, (first, _))| {
+        let [(branch, _)] = first.path.as_slice() else { return false };
+        let Some((_, ExternalEvent::Branch { branches, .. })) =
+          branch_at(self.preprocessed_events, *branch, &mut Vec::new()) else { return false };
+        sites.len() == branches.len()
+          && sites.iter().all(|((s, hold), e)| !hold && matches!(s.path.as_slice(), [(id, _)] if id == branch)
+            && matches!(e.end_places.as_slice(), [p] if p.local == local.index() && p.projection.is_empty()
+              && e.exact_end_places.contains(p)))
+          && (0..branches.len()).all(|arm| sites.keys().any(|(s, _)| s.path == [(*branch, arm)]))
+          && sites.values().any(|e| write_through(&self.bwf.body, e.location, local))
+          && events().filter(|e| matches!(e.fact, Fact::BorrowEnd { loan: l, .. } if l == loan))
+            .all(|e| sites.values().any(|end| end.occurrence == e.occurrence))
+      });
       let cases_complete = !qualified.is_empty() && events()
         .filter(|e| e.drop_route == crate::facts::DropRoute::Normal && matches!(e.fact, Fact::BorrowEnd { loan: l, .. } if l == loan))
         .all(|e| sites.iter().any(|((_, hold), end)| !hold && end.occurrence == e.occurrence)
           || represented.values().any(|end| end.occurrence == e.occurrence));
-      if !cases_complete && sibling_calls.is_none() && !all_read {
+      if !cases_complete && sibling_calls.is_none() && !all_read && !write_fork {
         continue;
       }
       if let Some(sibling_calls) = sibling_calls {
@@ -453,7 +478,34 @@ impl ExprVisitor<'_, '_> {
           }
         }
         self.row_layout.record_arm_point(e.get_id(), edge);
-        let reserve = first && s.row == *line && !s.path.is_empty() && e.is_var_arrow_ev();
+        // The write can already occupy stacked rows of its own. The end
+        // follows those effects, so it cannot keep the template's earlier
+        // arrow reservation on that source line.
+        let after_write = write_fork && holder.ref_local().is_some_and(|local|
+          write_through(&self.bwf.body, edge.location, local));
+        if let (true, Some(&(branch, arm)), Some(lender)) =
+          (after_write, s.path.last(), to.extract_rap().and_then(|r| r.owner_local()))
+        {
+          if let Some((_, ExternalEvent::Branch { branches, join_id, .. })) =
+            branch_at(self.preprocessed_events, branch, &mut Vec::new())
+          {
+            let state = branches[arm].source.and_then(|arm| facts.arm_boundaries.get(&arm.branch)?.get(&arm.index)?.join.as_ref())
+              .or_else(|| facts.joins.get(&(*join_id)?).filter(|j| !j.checked_only).map(|j| &j.state));
+            if let Some(state) = state {
+              for column in facts.columns.iter().filter(|c| c.local == lender) {
+                let name = &column.name;
+                if state.state.get(name) == Some(&"own") && state.locals.get(name) == Some(&Some(lender))
+                  && !state.parts.contains_key(name)
+                {
+                  if let Some(data) = self.raps.place(lender, name).filter(|d| !d.rap.is_ref()) {
+                    self.row_layout.fork_write_owners.insert((branch, arm, *data.rap.hash()));
+                  }
+                }
+              }
+            }
+          }
+        }
+        let reserve = !after_write && first && s.row == *line && !s.path.is_empty() && e.is_var_arrow_ev();
         let stack = reserve && self.event_line_map.get(line).is_some_and(|es| es.len() > 1);
         if reserve {
           reserved.insert(original);

@@ -12151,6 +12151,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "A shared reference through re is passed to look, if the loop ended with break re. look may read through it",
             "the resource rf points to is immutably borrowed by look, if the loop ended with break rf",
             "A shared reference through rf is passed to look, if the loop ended with break rf. look may read through it",
+            "take no longer borrows the resource ra points to, if the loop ended with break ra",
+            "take no longer borrows the resource rb points to, if the loop ended with break rb",
+            "look no longer borrows the resource re points to, if the loop ended with break re",
+            "look no longer borrows the resource rf points to, if the loop ended with break rf",
             // A single `break`: the call always gets rg.
             "the resource rg points to is mutably borrowed by take through rg; rg can't be used while the borrow is live",
             "A mutable reference through rg is passed to take. take may read or write through it (mutable reborrow — rg can't be used while the reborrow is live)",
@@ -12166,6 +12170,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=A shared reference through re is passed to look. look may read through it",
             "=the resource rf points to is immutably borrowed by look",
             "=A shared reference through rf is passed to look. look may read through it",
+            "=take no longer borrows the resource ra points to",
+            "=take no longer borrows the resource rb points to",
+            "=look no longer borrows the resource re points to",
+            "=look no longer borrows the resource rf points to",
             "if the loop ended with break rg",
             // `a` is a String that is never moved: it is dropped (#759).
             "a goes out of scope. No resource is dropped.",
@@ -38667,7 +38675,9 @@ fn loop_call_arg_borrows_end_at_the_call() {
     ] {
         let brk_row = code_row_y(&code, brk);
         // The last such dot: `e.len()` before the loop also lends `e`.
-        let back = dots_listing_tooltip(&tl, &format!("{lender}'s resource is no longer {kind} borrowed"))
+        let standalone = format!("{lender}'s resource is no longer {kind} borrowed");
+        let joined = format!("borrow of {lender} ends when ");
+        let back = dots_where(&tl, |lines| lines.iter().any(|tip| *tip == standalone || tip.contains(&joined)))
             .into_iter().map(|d| d.1).fold(f64::MIN, f64::max);
         let calls = dots_where(&tl, |lines| lines.iter().any(|l| l.starts_with(call)));
         assert!(
@@ -38689,16 +38699,17 @@ fn loop_call_arg_borrows_end_at_the_call() {
 fn loop_break_row_returns_only_the_lenders_the_break_doesnt_carry() {
     let rv = run_with_local_backend("loop_break_call_arg");
     let (tl, code) = (rv.timeline_panel_string(), rv.code_panel_string());
-    for (brk, kind, borrow, [(l1, r1), (l2, r2)]) in [
-        ("if c { break ra; } else { break rb; }", "mutably", "mutable", [("a", "ra"), ("b", "rb")]),
-        ("if c { break re; } else { break rf; }", "immutably", "immutable", [("e", "re"), ("f", "rf")]),
+    let doc = roxmltree::Document::parse(&tl).unwrap();
+    for (brk, source_row, kind, borrow, [(l1, r1), (l2, r2)]) in [
+        ("if c { break ra; } else { break rb; }", 15, "mutably", "mutable", [("a", "ra"), ("b", "rb")]),
+        ("if c { break re; } else { break rf; }", 31, "immutably", "immutable", [("e", "re"), ("f", "rf")]),
     ] {
         // The `break` arms' rows: the line's, and the `else` arm's own row
         // below it (the two arms' return arrows would share a stretch of
         // one row, #1264).
         let row = code_row_y(&code, brk);
         let on_row = |text: String| dots_listing_tooltip(&tl, &text).into_iter()
-            .filter(|d| d.1 == row || d.1 == row + 30.0).map(|d| d.0).collect::<Vec<f64>>();
+            .filter(|d| d.1 == row || d.1 == row + 30.0).collect::<Vec<_>>();
         let [lender1, lender2] = [l1, l2].map(|l| on_row(format!("{l}'s resource is no longer {kind} borrowed")));
         let [ref1, ref2] = [r1, r2].map(|r| on_row(format!("{r}'s {borrow} borrow ends")));
         // The first branch breaks with r1: it gives l2 back (r2 is dead
@@ -38709,11 +38720,18 @@ fn loop_break_row_returns_only_the_lenders_the_break_doesnt_carry() {
                 "{what} dots on the `{brk}` row: {} for {l1}/{r1}, {} for {l2}/{r2}; want one each",
                 xs[0].len(), xs[1].len());
         }
-        for (l, r) in [(l1, r1), (l2, r2)] {
+        for (l, r, y, lender) in [(l1, r1, row + 30.0, &lender1), (l2, r2, row, &lender2)] {
             let kind = if borrow == "mutable" { "mutable" } else { "shared" };
-            let arrow = format!("{r}'s {kind} borrow of {l} ends. This borrow no longer restricts access to {l}. Ending the borrow doesn't move the resource");
-            assert_eq!(timeline_tooltips(&tl).iter().filter(|t| **t == arrow).count(), 2,
-                "one return arrow {r} -> {l} on the `{brk}` row and one on the call's row");
+            let prefix = format!("{r}>{l}@L{source_row}:arrow:");
+            let [arrow] = rv_elements(&tl, &prefix).try_into().unwrap_or_else(|arrows: Vec<_>| panic!("{arrows:?}"));
+            assert_eq!(arrow.1, format!("{r}'s {kind} borrow of {l} ends. This borrow no longer restricts access to {l}. Ending the borrow doesn't move the resource"));
+            assert_eq!(lender[0].1, y, "the lender dot belongs to the bypass arm");
+            let head = doc.descendants().find(|el| el.attribute("data-rv-id") == Some(&arrow.0)).unwrap()
+                .descendants().find(|el| el.has_tag_name("polygon")).unwrap();
+            let tip: Vec<f64> = head.attribute("points").unwrap().split([' ', ','])
+                .filter(|p| !p.is_empty()).skip(2).take(2).map(|p| p.parse().unwrap()).collect();
+            assert!((tip[0] - lender[0].0).abs() < 8.0 && (tip[1] - y).abs() < 6.0,
+                "{prefix} should return to the bypass arm's dot at {:?}, tip {tip:?}", lender[0]);
         }
     }
 }
@@ -46375,6 +46393,164 @@ fn proven_fork_end_keeps_the_borrow_end_teaching_clause_1884() {
         assert!(tip.contains("m's mutable borrow of s2 ends. This borrow no longer restricts access to s2"), "{tip}");
         assert!(tip.contains("Ending the borrow doesn't move the value"), "{tip}");
     }
+}
+
+#[test]
+fn replacement_in_one_fork_arm_precedes_the_loan_end_1884() {
+    let svg = run_with_local_backend("fork_write_ends_1884").timeline_panel_string();
+    // rustc drops the old Item and assigns the replacement through original
+    // before ending that loan. The other successor never executes the write
+    // and releases the old loan before it creates the new reference.
+    let dots = rv_elements(&svg, "item@L7:dot:");
+    let write = dots.iter().find(|(_, tip, ..)| tip.contains("its previous resource is dropped")).unwrap();
+    let end = dots.iter().find(|(_, tip, ..)| tip.contains("no longer mutably borrowed")).unwrap();
+    assert!(write.3.0 <= end.3.0, "write {write:?}, end {end:?}");
+    if write.0 == end.0 {
+        assert!(write.1.find("its previous resource is dropped").unwrap()
+            < end.1.find("no longer mutably borrowed").unwrap(), "{}", end.1);
+    }
+    let releases = rv_elements(&svg, "original>item@");
+    assert_eq!(releases.len(), 2, "one end on each arm");
+    for (_, tip, ..) in &releases {
+        assert!(tip.contains("This borrow no longer restricts access to item"), "{tip}");
+        assert!(tip.contains("Ending the borrow doesn't move the resource"), "{tip}");
+    }
+    let [bypass] = rv_elements(&svg, "item@L9:dot:mutable_reacquire").try_into().unwrap_or_else(|dots: Vec<_>| panic!("{dots:?}"));
+    let [next] = rv_elements(&svg, "next@L10:dot:mutable_borrow").try_into().unwrap_or_else(|dots: Vec<_>| panic!("{dots:?}"));
+    assert!(bypass.3.0 < next.3.0, "the bypass releases before the next borrow");
+}
+
+#[test]
+fn stacked_fork_write_keeps_the_lender_borrowed_until_the_replacement_1884() {
+    let svg = run_with_local_backend("field_moves_with_struct_1283").timeline_panel_string();
+    // On Some, rustc evaluates the move of t, drops the old P and writes
+    // through r before releasing that loan. The arrows for the struct and
+    // its field can put the write below the start of the source row.
+    let dots = rv_elements(&svg, "p@L19:dot:");
+    let write = dots.iter().find(|(_, tip, ..)| tip.contains("its previous resource is dropped")).unwrap();
+    let end = dots.iter().find(|(_, tip, ..)| tip.contains("no longer mutably borrowed")).unwrap();
+    assert!(write.3.0 <= end.3.0, "write {write:?}, end {end:?}");
+    if write.0 == end.0 {
+        assert!(write.1.find("its previous resource is dropped").unwrap()
+            < end.1.find("no longer mutably borrowed").unwrap(), "{}", end.1);
+    }
+    let arrow = rv_elements(&svg, "r>p@L19:arrow:mutable_die");
+    assert_eq!(arrow.len(), 1);
+    assert!((arrow[0].3.0 - end.3.0).abs() < 5.0, "the return arrow starts at its end dot");
+    let segments = rv_elements(&svg, "p@L");
+    let legs: Vec<_> = segments.iter().filter(|(id, _, _, _)| {
+        let Some((rows, _)) = id["p@L".len()..].split_once(":branch_line:") else { return false };
+        let (first, last) = rows.split_once('-').unwrap_or((rows, rows));
+        !id.contains('/') && (first.parse::<usize>().unwrap()..=last.parse().unwrap()).contains(&19)
+    }).collect();
+    let owned = legs.iter().find(|(id, ..)| id.contains(":full_privilege")).expect("the Some leg after the write");
+    assert!(owned.1.contains("p is the owner of the resource"), "{}", owned.1);
+    assert!(!owned.1.contains("p can't be used until the borrow ends"), "{}", owned.1);
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let dot = doc.descendants().find(|el| el.attribute("data-rv-id") == Some(&write.0)).unwrap()
+        .descendants().find(|el| el.has_tag_name("circle")).unwrap();
+    let write_x: f64 = dot.attribute("cx").unwrap().parse().unwrap();
+    let write_y: f64 = dot.attribute("cy").unwrap().parse().unwrap();
+    assert!(owned.3.0 >= write_y, "the owned continuation begins at or below the write");
+    assert!(legs.iter().any(|(id, ..)| id.contains(":revoked_privilege")), "the sibling leg stays borrowed until its end");
+    assert!(segments.iter().any(|(id, _, x, y)| id.contains(":branch_line:revoked_privilege") && !id.contains('/')
+        && x.0 <= write_x && x.1 >= write_x && y.0 < write_y && y.1 >= write_y),
+        "the Some leg reaches the write while the lender is still borrowed");
+    for (_, _, x, y) in legs.iter().filter(|(id, ..)| id.contains(":full_privilege")) {
+        assert!(!legs.iter().any(|(id, _, other_x, other_y)| id.contains(":revoked_privilege")
+            && x.0 < other_x.1 && other_x.0 < x.1 && y.0 < other_y.1 && other_y.0 < y.1),
+            "the same leg shows both borrowed and owned at {y:?}");
+    }
+}
+
+#[test]
+fn field_replacement_keeps_the_owner_teaching_on_the_continuation_1884() {
+    let svg = run_with_local_backend("field_write_return_in_line_1349").timeline_panel_string();
+    // The MIR drop and assignment replace p.name in place. The moved
+    // source loses the String and p.name owns it on the arm's exit.
+    check_review_tip(&svg, "p.name@L22-23:branch_line:full_privilege_gray",
+        &["This segment is for the Some branch", "p.name is the owner of the resource"],
+        &["p.name was moved out", "p.name can't be used until the borrow ends"]);
+}
+
+#[test]
+fn joined_call_ends_describe_both_breaks_1884() {
+    let svg = run_with_local_backend("loop_break_call_arg").timeline_panel_string();
+    // The two reborrows assign the same MIR argument temporary. One is
+    // passed at the call. The other lender was released on the bypass edge.
+    for (holder, lender, other, call, kind, adverb, row) in [
+        ("ra", "a", "rb", "take", "mutable", "mutably", 16),
+        ("rb", "b", "ra", "take", "mutable", "mutably", 16),
+        ("re", "e", "rf", "look", "shared", "immutably", 32),
+        ("rf", "f", "re", "look", "shared", "immutably", 32),
+    ] {
+        let release = rv_elements(&svg, &format!("{holder}>{lender}@L{row}:arrow:"));
+        assert_eq!(release.len(), 1);
+        let tip = &release[0].1;
+        for clause in [format!("{holder}'s {kind} borrow of {lender} ends when {call} returns, if the loop ended with break {holder}"),
+            format!("The borrow has already ended, if the loop ended with break {other}"),
+            format!("This borrow no longer restricts access to {lender}"),
+            "Ending the borrow doesn't move the resource".to_owned(),
+        ] {
+            assert!(tip.contains(&clause), "{tip}");
+        }
+        assert!(!tip.contains(&format!("borrow of {lender} ends. This borrow")), "{tip}");
+        for column in [holder, lender] {
+            assert!(rv_elements(&svg, &format!("{column}@L{row}:dot:")).iter()
+                .any(|(_, dot, ..)| dot.contains(tip)), "the dot for {column} must qualify the same end");
+        }
+        check_review_tip(&svg, &format!("{lender}@L{row}:dot:"),
+            &[&format!("{lender}'s resource is no longer {adverb} borrowed")],
+            &["still borrowed"]);
+    }
+}
+
+#[test]
+fn joined_call_accounts_for_the_direct_third_operand_1884() {
+    let svg = run_with_local_backend("joined_call_histories_1884").timeline_panel_string();
+    // All three MIR assignments reach take's argument. The third issues a
+    // borrow directly and both of the named holders are dead on that path.
+    for (holder, lender) in [("ra", "a"), ("rb", "b")] {
+        check_review_tip(&svg, &format!("{holder}>{lender}@L15:arrow:mutable_die"),
+            &[&format!("ends when take returns, if the loop ended with break {holder}"),
+                "This borrow has already ended on paths that pass a different reference"],
+            &["The borrow has already ended, if the loop ended with"]);
+    }
+    check_review_tip(&svg, "third@L15:dot:", &["third is passed to take by mutable reference", "break &mut third"], &[]);
+}
+
+#[test]
+fn joined_call_does_not_assume_the_holder_borrowed_the_local_1884() {
+    let svg = run_with_local_backend("joined_call_histories_1884").timeline_panel_string();
+    // The same reborrow of ra can reach look with a borrow of a or with a
+    // promoted reference. Rustc lowers both values into the same slot.
+    for id in ["ra>a@L27:arrow:static_die", "ra@L27:dot:", "a@L27:dot:"] {
+        check_review_tip(&svg, id,
+            &["If ra held this shared borrow and supplied the argument", "the borrow ends when look returns",
+                "no longer restricts access to the borrowed place", "Ending the borrow doesn't move the value"],
+            &["ra's shared borrow of a ends when look returns", "The borrow has already ended", "move the resource"]);
+    }
+}
+
+#[test]
+fn joined_call_keeps_release_text_on_the_return_edge_1884() {
+    let svg = run_with_local_backend("joined_call_histories_1884").timeline_panel_string();
+    // The borrow checker rejects writing a through its owner before the
+    // call, which can still reborrow it. The two bypasses occur on other
+    // edges and the else arm has a separate, ordinary release.
+    check_review_tip(&svg, "a@L36-37:branch_line:revoked_privilege",
+        &["a's resource is mutably borrowed", "a can't be used until the borrow ends"],
+        &["no longer restricts access", "has already ended"]);
+    for (row, required, forbidden) in [
+        (38, "ends. This borrow no longer restricts access", "returns"),
+        (39, "ends when take returns, if the loop ended with break ra", "ends. This borrow"),
+        (41, "ends. This borrow no longer restricts access", "returns"),
+    ] {
+        check_review_tip(&svg, &format!("ra>a@L{row}:arrow:mutable_die"), &[required], &[forbidden]);
+    }
+    check_review_tip(&svg, "ra@L39:dot:",
+        &["take no longer borrows the resource ra points to, if the loop ended with break ra"],
+        &["take no longer borrows the resource ra points to•"]);
 }
 
 #[test]

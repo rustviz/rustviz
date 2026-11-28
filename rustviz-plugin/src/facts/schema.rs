@@ -142,6 +142,16 @@ pub struct BodyFacts {
     pub(crate) scope_ends: ScopeEnds,
     #[serde(skip)]
     pub(crate) value_flow: super::value_flow::ValueFlow,
+    /// Complete sources of a joined reference operand, keyed by its MIR call
+    /// and argument index. Missing entries include opaque or unknown sources.
+    #[serde(skip)]
+    pub(crate) joined_argument_loans: BTreeMap<(Location, usize), BTreeSet<usize>>,
+    /// The one loan that supplied the whole reference at reborrow issuance.
+    #[serde(skip)]
+    pub(crate) exact_reborrow_parents: BTreeMap<usize, usize>,
+    /// Normal loan ends that leave the initialized lender unrestricted.
+    #[serde(skip)]
+    pub(crate) usable_after_release: BTreeSet<(usize, Occurrence)>,
     /// Number of owned resource fields in the binding's closure type.
     #[serde(skip)]
     pub closure_captures: BTreeMap<String, usize>,

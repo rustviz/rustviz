@@ -1,8 +1,9 @@
 //! Several condition edges can enter one drawn arm. Find the loan boundary
 //! on each incoming history before attributing the end to a particular slot.
-use super::ExprVisitor;
+use super::{ExprVisitor, Path};
 use crate::facts::{real_successor_blocks, Ev, Fact, SourceArm, SwitchEdge};
-use crate::svg_generator::hover_messages::styled_name_html;
+use crate::svg_generator::data::{AltRuntime, ExternalEvent, ResourceTy};
+use crate::svg_generator::hover_messages::{break_alt_if_suffix, styled_name_html};
 use rustc_middle::mir::{Body, Location, Operand, Rvalue, StatementKind, TerminatorKind};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -61,6 +62,115 @@ pub(super) struct ForkCases {
 }
 
 impl ExprVisitor<'_, '_> {
+  /// Match each drawn end to the normal return edge of the argument's
+  /// MIR call. The bypass and return can share both endpoints and loan ID.
+  pub(crate) fn describe_joined_argument_ends(&mut self) {
+    let Some(facts) = self.body_facts else { return };
+    if self.argument_slots.is_empty() { return; }
+    let body = &self.bwf.body;
+    let switches = self.branch_switches();
+    let mut groups = vec![(Path::new(), &*self.preprocessed_events)];
+    while let Some((path, events)) = groups.pop() {
+      let mut calls = BTreeMap::<_, Vec<_>>::new();
+      for (_, event) in events {
+        match event {
+          ExternalEvent::Branch { id, branches, .. } => {
+            groups.extend(branches.iter().enumerate().map(|(i, arm)| {
+              ([path.as_slice(), &[(*id, i)]].concat(), &arm.e_data)
+            }));
+          }
+          ExternalEvent::PassByStaticReference { id, from, to, break_alt: Some(alt), .. }
+          | ExternalEvent::PassByMutableReference { id, from, to, break_alt: Some(alt), .. }
+            if alt.runtime == AltRuntime::Possible && alt.brk.is_some() =>
+          {
+            let Some(&slot) = self.argument_slots.get(id) else { continue };
+            let Some(holder) = from.extract_rap().and_then(|r| r.ref_local()) else { continue };
+            let Some(reborrow) = facts.loans.iter().find(|l| Some(l.loan) == alt.reborrow && l.lender_local == Some(holder)) else { continue };
+            calls.entry(slot).or_default().push((holder, to, alt, reborrow));
+          }
+          _ => {}
+        }
+      }
+      for (slot @ (at, _), operands) in calls {
+        let Some(sources) = facts.joined_argument_loans.get(&slot) else { continue };
+        let TerminatorKind::Call { target: Some(target), .. } = body[at.block].terminator().kind else { continue };
+        let successor = Some(target.start_location());
+        let ends = |loan| self.reference_effects.ends(loan)
+          .filter(|end| end.release && end.fact.drop_route == crate::facts::DropRoute::Normal);
+        let at_call = |end: &Ev| end.occurrence.at == at && end.occurrence.successor == successor;
+        for &(holder, func, alt, reborrow) in &operands {
+          if !sources.contains(&reborrow.loan) || !ends(reborrow.loan).any(|e| at_call(e.fact)) { continue; }
+          let &[parent] = reborrow.made_through.as_slice() else { continue };
+          let Some(loan) = facts.loans.iter().find(|l| l.loan == parent) else { continue };
+          let Some(kind) = borrow_kind(loan.kind) else { continue };
+          let Some(lender_local) = self.bwf.borrow_set.location_map().get_index(parent).and_then(|(_, data)| data.borrowed_place().as_local()) else { continue };
+          let mut slots = events.iter().filter_map(|(row, event)| {
+            let (ExternalEvent::StaticDie { from: ResourceTy::Value(from), to: ResourceTy::Value(to), still_borrowed_by, id, .. }
+              | ExternalEvent::MutableDie { from: ResourceTy::Value(from), to: ResourceTy::Value(to), still_borrowed_by, id, .. }) = event else { return None };
+            if from.ref_local() != Some(holder) || to.is_member() || to.owner_local() != Some(lender_local)
+              || !still_borrowed_by.is_empty() || self.end_loans.get(id).is_none_or(|ids| ids != &[parent]) {
+              return None;
+            }
+            let mut boundaries = ends(parent).filter(|e| {
+              if let Some(occurrence) = self.row_layout.arm_end_occurrences.get(id) {
+                return e.fact.occurrence == *occurrence;
+              }
+              let Fact::BorrowEnd { to_line, .. } = e.fact.fact else { return false };
+              let (site, _) = self.normal_fork_site(facts, &switches, e.row, e.fact, to_line);
+              site.matches(self.preprocessed_events, &path, *row, *id)
+            });
+            let boundary = boundaries.next()?.fact;
+            (boundaries.all(|e| e.fact.occurrence == boundary.occurrence) && at_call(boundary))
+              .then_some((*id, from, to, boundary))
+          });
+          let Some((id, from, to, boundary)) = slots.next() else { continue };
+          if slots.next().is_some() { continue; }
+          let selected = break_alt_if_suffix(alt);
+          let func = styled_name_html(&func.name());
+          let holder_name = styled_name_html(from.name());
+          let what = if to.drops_nothing() { "value" } else { "resource" };
+          let exact = facts.exact_reborrow_parents.get(&reborrow.loan) == Some(&parent);
+          let lender = styled_name_html(to.name());
+          let mut title = if exact {
+            format!("{holder_name}'s {kind} borrow of {lender} ends when {func} returns{selected}.")
+          } else {
+            format!("If {holder_name} held this {kind} borrow and supplied the argument, the borrow ends when {func} returns and no longer restricts access to the borrowed place.")
+          };
+          let others = || sources.iter().copied().filter(|&id| id != reborrow.loan);
+          // Account for unnamed alternatives too, such as a direct borrow
+          // of an owner. Every alternate source needs a proved bypass.
+          let has_bypass = |id| facts.loans.iter().find(|l| l.loan == id).is_some_and(|other| {
+            other.issuance_path.iter().any(|edge| reborrow.issuance_path.iter().any(|chosen|
+              chosen.switch == edge.switch && chosen.successor != edge.successor)
+              && ends(parent).any(|e| e.fact.occurrence.at == edge.switch
+                && e.fact.occurrence.successor == Some(edge.successor.start_location())
+                && e.fact.exact_end_places.iter().any(|p| p.local == holder.index() && p.projection.is_empty())))
+          });
+          if exact && others().all(has_bypass) {
+            let other_alt = (sources.len() == 2).then(|| {
+              operands.iter().find(|(_, _, _, other)| other.loan != reborrow.loan && sources.contains(&other.loan))
+                .map(|(_, _, alt, _)| *alt)
+            }).flatten();
+            if let Some(other_alt) = other_alt.filter(|other| other.brk != alt.brk) {
+              title.push_str(&format!(" The borrow has already ended{}.", break_alt_if_suffix(other_alt)));
+            } else {
+              title.push_str(" This borrow has already ended on paths that pass a different reference.");
+            }
+          }
+          if exact {
+            title.push_str(&format!(" This borrow no longer restricts access to {lender}."));
+          }
+          title.push_str(&format!(" Ending the borrow doesn't move the {what}"));
+          let restored = (exact && facts.usable_after_release.contains(&(parent, boundary.occurrence))).then(|| {
+            let kind = if kind == "mutable" { "mutably" } else { "immutably" };
+            format!("{lender}'s {what} is no longer {kind} borrowed")
+          });
+          self.row_layout.joined_end_titles.insert(id, (title, restored));
+        }
+      }
+    }
+  }
+
   /// Use a source column or the fact layer's projection wording. Some MIR
   /// downcasts have no source-level name for the borrowed payload.
   pub(super) fn fork_lender(&self, loan: &crate::facts::LoanInfo) -> Option<String> {
