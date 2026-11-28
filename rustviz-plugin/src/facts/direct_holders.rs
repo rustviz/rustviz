@@ -27,6 +27,8 @@ pub(super) struct Origins<'tcx> {
     pub loans: BTreeSet<usize>,
     pub retained: BTreeMap<usize, bool>,
     pub unknown: bool,
+    /// At least one path does not initialize this slot.
+    may_be_absent: bool,
     /// An actual reference was issued with no pictured lender, such as
     /// a reference made through a raw pointer.
     pub unpictured: bool,
@@ -45,6 +47,13 @@ enum Path {
 }
 
 impl Origins<'_> {
+    /// A direct reference slot has one value regardless of the incoming path.
+    pub fn definite_loan(&self) -> Option<usize> {
+        (!self.unknown && !self.may_be_absent && !self.unpictured
+            && self.calls.is_empty() && self.loans.len() == 1)
+            .then(|| self.loans.first().copied()).flatten()
+    }
+
     fn record(&mut self, id: usize, path: Path) {
         match path {
             Path::Value => {
@@ -188,6 +197,7 @@ impl<'tcx> DirectHolders<'_, 'tcx> {
             let Some(site) = site else {
                 let incoming = self.stores.definitions(at, slot);
                 out.unknown |= incoming.unknown && value_path;
+                out.may_be_absent |= incoming.uninitialized && value_path;
                 if incoming.argument {
                     if let Some(id) = self.issue(None, slot) {
                         out.record(id, path);
@@ -256,6 +266,7 @@ impl<'tcx> DirectHolders<'_, 'tcx> {
                     (Rvalue::Aggregate(kind, _), Some(ProjectionElem::Downcast(_, selected)))
                         if matches!(&**kind, AggregateKind::Adt(_, variant, ..) if selected != variant));
                 out.unknown |= value_path && !different_variant;
+                out.may_be_absent |= value_path && different_variant;
             }
         }
         out

@@ -1128,6 +1128,8 @@ mod tests {
             conditional_ends: Default::default(),
             argument_stores: Default::default(), receiver_loans: Default::default(), restored_reborrows: Default::default(), direct_releases: Default::default(),
             inline_holder_ends: vec![],
+            definite_hold_origins: Default::default(),
+            definite_reborrow_sources: Default::default(),
             evaluated_spans: Vec::new(),
             implicit_mut_reborrows: Default::default(),
             effect_sites: Default::default(),

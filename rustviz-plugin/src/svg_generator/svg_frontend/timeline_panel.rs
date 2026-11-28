@@ -3157,6 +3157,12 @@ fn render_dot(
             data.title.push_str("&lt;br&gt;");
             data.title.push_str(note);
         }
+        if matches!(event, Event::Duplicate { .. } | Event::Move { .. }) {
+            if let Some(clause) = visualization_data.row_layout.aggregate_transfer_continuations.get(&event.get_id()) {
+                data.title.push_str(". ");
+                data.title.push_str(clause);
+            }
+        }
         let mut event_kind = rv_attrs::event_name(event);
         if matches!(event, Event::StaticLend { .. } | Event::MutableLend { .. }
             | Event::StaticBorrow { .. } | Event::MutableBorrow { .. }) {
