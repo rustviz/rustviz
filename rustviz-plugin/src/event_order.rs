@@ -6,7 +6,7 @@ mod repoints;
 pub(crate) use repoints::DrawnReferenceEffects;
 
 use crate::expr_visitor::ExprVisitor;
-use crate::facts::schema::{BodyFacts, DropRoute, Ev, Fact, LoanInfo, ReferencePoint, Row};
+use crate::facts::schema::{BodyFacts, DropRoute, Ev, Fact, LoanInfo, SegmentPoint, Row};
 use crate::svg_generator::data::{ExternalEvent as E, InitBy, ResourceAccessPoint, ResourceTy};
 use rustc_middle::mir::{Body, Location, Place, Rvalue, StatementKind, TerminatorKind};
 use rustc_span::Span;
@@ -1426,21 +1426,25 @@ impl<'tcx> Order<'_, 'tcx> {
     /// Carry the ordering pass's compiler boundary to the visual mark.
     /// Distinct successor facts at a common location are ambiguous unless
     /// the arm end already selects one of them.
-    fn reference_point(&self, event: &E, row: &Row, straight: bool, layout: &RowLayout) -> Option<ReferencePoint> {
-        // A loan carried into a reference result reaches that binding
-        // on the call's normal return. Several argument loans can share
-        // this mark, so use the call's MIR destination identity.
-        if let E::StaticBorrow { to, via: Some(_), .. } | E::MutableBorrow { to, via: Some(_), .. } = event {
+    fn segment_point(&self, event: &E, row: &Row, straight: bool, layout: &RowLayout) -> Option<SegmentPoint> {
+        // A call result or a successful let-else pattern may carry a
+        // loan issued before the binding exists. Use the initialization
+        // of the MIR destination for the segment after the mark.
+        if let E::StaticBorrow { to, via, .. } | E::MutableBorrow { to, via, .. } = event {
             if let Some(local) = to.extract_rap().and_then(ResourceAccessPoint::ref_local) {
-                let mut returns = normal_facts(row).filter_map(|fact| {
+                let matched = layout.let_else_success_events.get(&event.get_id());
+                let mut stores = normal_facts(row).filter_map(|fact| {
                     let at = fact.occurrence.at;
+                    let call_result = via.is_some() && at == self.body.terminator_loc(at.block)
+                        && matches!(self.body[at.block].terminator().kind, TerminatorKind::Call { target: Some(_), .. });
+                    let pattern_store = matched.is_some_and(|span|
+                        span.contains(self.body.source_info(at).span.source_callsite()));
                     (fact.place_local == Some(local) && matches!(fact.fact, Fact::Init { .. })
-                        && at == self.body.terminator_loc(at.block)
-                        && matches!(self.body[at.block].terminator().kind, TerminatorKind::Call { target: Some(_), .. }))
+                        && (call_result || pattern_store))
                         .then_some(at)
                 });
-                if let Some(at) = returns.next().filter(|_| returns.next().is_none()) {
-                    return Some(ReferencePoint::After(at));
+                if let Some(at) = stores.next().filter(|_| stores.next().is_none()) {
+                    return Some(SegmentPoint::After(at));
                 }
             }
         }
@@ -1449,9 +1453,9 @@ impl<'tcx> Order<'_, 'tcx> {
         let block = *self.body.basic_blocks.reverse_postorder().get(rank)?;
         let at = Location { block, statement_index };
         if phase == BEFORE_STORE {
-            return Some(ReferencePoint::Before(at));
+            return Some(SegmentPoint::Before(at));
         }
-        if let Some(&point) = layout.reference_points.get(&event.get_id()) {
+        if let Some(&point) = layout.segment_points.get(&event.get_id()) {
             return Some(point);
         }
         if matches!(event, E::PassByMutableReference { .. } | E::MutableBorrow { via: Some(_), .. }) {
@@ -1461,17 +1465,74 @@ impl<'tcx> Order<'_, 'tcx> {
             });
             if let Some(&(block, statement_index, _, _)) = calls.next().filter(|_| calls.next().is_none()) {
                 let block = *self.body.basic_blocks.reverse_postorder().get(block)?;
-                return Some(ReferencePoint::After(Location { block, statement_index }));
+                return Some(SegmentPoint::After(Location { block, statement_index }));
             }
         }
         if end(event) {
             let mut successors = normal_facts(row).filter(|f| f.occurrence.at == at && self.matches(event, f))
                 .filter_map(|f| f.occurrence.successor);
             if let Some(to) = successors.next() {
-                return successors.all(|s| s == to).then_some(ReferencePoint::Edge { from: at, to });
+                return successors.all(|s| s == to).then_some(SegmentPoint::Edge { from: at, to });
             }
         }
-        Some(ReferencePoint::After(at))
+        Some(SegmentPoint::After(at))
+    }
+
+    fn aggregate_move(&self, event: &E) -> Option<(SegmentPoint, usize)> {
+        let E::Move { from: ResourceTy::Value(from), .. } = event else { return None };
+        if !from.is_member() { return None; }
+        let local = from.owner_local()?;
+        let span = *self.spans.get(&event.get_id())?;
+        let mut sites = self.facts.rows.iter().flat_map(|row| normal_facts(row).filter_map(move |fact| {
+            let Fact::Move { path, .. } = &fact.fact else { return None };
+            let at = fact.occurrence.at;
+            let statement = self.body[at.block].statements.get(at.statement_index)?;
+            (fact.place_local == Some(local) && path == from.name() && statement.source_info.span == span
+                && matches!(&statement.kind, rustc_middle::mir::StatementKind::Assign(assign)
+                    if matches!(assign.1, rustc_middle::mir::Rvalue::Aggregate(..))))
+                .then_some((SegmentPoint::After(at), row.line))
+        }));
+        let site = sites.next()?;
+        sites.all(|other| other == site).then_some(site)
+    }
+
+    fn stages_mutable_reference(&self, event: &E, row: &Row) -> bool {
+        use rustc_middle::mir::{AggregateKind, Operand, ProjectionElem, Rvalue, StatementKind};
+        let E::MutableBorrow { from, to, .. } = event else { return false };
+        let Some(destination) = to.extract_rap().and_then(ResourceAccessPoint::ref_local) else { return false };
+        let lender = from.extract_rap().and_then(ResourceAccessPoint::owner_local);
+        let assignments = normal_facts(row).filter(|f| matches!(f.fact, Fact::Move { .. }))
+            .filter_map(|f| self.body[f.location.block].statements.get(f.location.statement_index))
+            .filter_map(|stmt| match &stmt.kind {
+                StatementKind::Assign(assign) if assign.0.as_local() == Some(destination) => match &assign.1 {
+                    Rvalue::Use(Operand::Move(place)) => Some(*place),
+                    _ => None,
+                },
+                _ => None,
+            }).collect::<Vec<_>>();
+        if assignments.is_empty() { return false; }
+        let issue = self.issues.get(&event.get_id());
+        normal_facts(row).any(|fact| {
+            let Fact::Borrow { loan, kind: "mut", .. } = fact.fact else { return false };
+            if !self.facts.issued_operand_loans.contains(&loan) { return false; }
+            let data = &self.body[fact.location.block];
+            let Some(stmt) = data.statements.get(fact.location.statement_index) else { return false };
+            let StatementKind::Assign(borrow) = &stmt.kind else { return false };
+            let Rvalue::Ref(_, _, borrowed) = borrow.1 else { return false };
+            if !issue.map_or_else(|| lender.is_some_and(|local| borrowed.as_local() == Some(local)), |id| *id == loan) {
+                return false;
+            }
+            data.statements.iter().skip(fact.location.statement_index + 1).any(|stmt| {
+                let StatementKind::Assign(assign) = &stmt.kind else { return false };
+                let Rvalue::Aggregate(kind, operands) = &assign.1 else { return false };
+                matches!(&**kind, AggregateKind::Tuple) && assign.0.projection.is_empty()
+                    && assignments.iter().any(|place| {
+                        let [ProjectionElem::Field(field, _)] = place.projection.as_slice() else { return false };
+                        place.local == assign.0.local
+                            && matches!(operands.get(*field), Some(Operand::Move(source)) if *source == borrow.0)
+                    })
+            })
+        })
     }
 
 
@@ -1547,17 +1608,47 @@ impl<'tcx> Order<'_, 'tcx> {
         }
         let mut handoffs = BTreeMap::new();
         for (line, indices) in lines {
+            for &i in &indices {
+                let event = &events[i].1;
+                if let Some(site) = self.aggregate_move(event).filter(|(point, row)|
+                    *row > line && self.facts.segment_points.contains_key(point))
+                {
+                    layout.aggregate_moves.insert(event.get_id(), site);
+                }
+            }
             let Some(row) = self.facts.rows.iter().find(|r| r.line == line) else {
                 continue;
             };
+            for &i in &indices {
+                let event = &events[i].1;
+                if self.stages_mutable_reference(event, row) {
+                    layout.staged_mutable_references.insert(event.get_id());
+                }
+                if let E::StaticBorrow { via: Some(via), .. } = event {
+                    if via.tie.tied.len() == 2 && via.tie.returns_alternatives
+                        && via.carrier == crate::svg_generator::data::ViaCarrier::Reference
+                    {
+                        layout.alternative_reference_results.insert(event.get_id());
+                    }
+                }
+                if let E::MutableBorrow { to, via: Some(_), .. } = event {
+                    if to.extract_rap().and_then(ResourceAccessPoint::ref_local).is_some_and(|local|
+                        self.body.local_decls[local].ty.ref_mutability().is_some_and(|mutability| mutability.is_not()))
+                        && normal_facts(row).any(|f| matches!(f.fact, Fact::Borrow { kind: "mut", .. })
+                            && self.matches(event, f))
+                    {
+                        layout.shared_results_from_mutable.insert(event.get_id());
+                    }
+                }
+            }
             let straight_line = !indices.iter().any(|&i| matches!(events[i].1, E::Branch { .. }));
-            if !self.facts.reference_points.is_empty() {
+            if !self.facts.segment_points.is_empty() {
                 for &i in &indices {
                     let event = &events[i].1;
-                    if let Some(point) = self.reference_point(event, row, straight_line, layout)
-                        .filter(|p| self.facts.reference_points.contains_key(p))
+                    if let Some(point) = self.segment_point(event, row, straight_line, layout)
+                        .filter(|p| self.facts.segment_points.contains_key(p))
                     {
-                        layout.reference_points.insert(event.get_id(), point);
+                        layout.segment_points.insert(event.get_id(), point);
                     }
                 }
             }
@@ -1877,7 +1968,11 @@ pub struct RowLayout {
     pub(crate) scope_end_ids: BTreeSet<usize>,
     pub(crate) holder_handoff_titles: BTreeMap<usize, String>,
     pub(crate) result_lend_titles: BTreeMap<usize, String>,
-    pub(crate) reference_points: BTreeMap<usize, ReferencePoint>,
+        pub(crate) segment_points: BTreeMap<usize, SegmentPoint>,
+    pub(crate) alternative_reference_results: BTreeSet<usize>,
+    pub(crate) shared_results_from_mutable: BTreeSet<usize>,
+    pub(crate) staged_mutable_references: BTreeSet<usize>,
+    pub(crate) aggregate_moves: BTreeMap<usize, (SegmentPoint, usize)>,
     pub(crate) closure_receivers: BTreeMap<usize, String>,
     /// Bindings whose callable representation is unknown in this body.
     pub(crate) opaque_callable_columns: BTreeSet<u64>,
@@ -1923,8 +2018,12 @@ impl RowLayout {
         self.uncertain_store_ends.append(&mut other.uncertain_store_ends);
         self.available_after_store_end.append(&mut other.available_after_store_end);
         self.arm_points.append(&mut other.arm_points);
-        self.reference_points.append(&mut other.reference_points);
         self.end_before_fork.append(&mut other.end_before_fork);
+        self.segment_points.append(&mut other.segment_points);
+        self.alternative_reference_results.append(&mut other.alternative_reference_results);
+        self.shared_results_from_mutable.append(&mut other.shared_results_from_mutable);
+        self.staged_mutable_references.append(&mut other.staged_mutable_references);
+        self.aggregate_moves.append(&mut other.aggregate_moves);
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.terminal_calls.append(&mut other.terminal_calls);
         self.scope_ends.append(&mut other.scope_ends);
@@ -2004,7 +2103,7 @@ impl RowLayout {
         self.arm_points.insert(id, fact_point(edge));
         self.arm_end_occurrences.insert(id, edge.occurrence);
         if let Some(to) = edge.occurrence.successor {
-            self.reference_points.insert(id, ReferencePoint::Edge { from: edge.occurrence.at, to });
+            self.segment_points.insert(id, SegmentPoint::Edge { from: edge.occurrence.at, to });
         }
     }
 

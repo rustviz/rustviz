@@ -255,7 +255,7 @@ pub struct BodyFacts {
     #[serde(skip)]
     pub closure_captures: BTreeMap<String, usize>,
     #[serde(skip)]
-    pub(crate) reference_points: BTreeMap<ReferencePoint, State>,
+    pub(crate) segment_points: BTreeMap<SegmentPoint, State>,
     /// Named holders still carrying each loan when their destructor runs.
     #[serde(skip)]
     pub drop_holders: BTreeMap<usize, BTreeSet<String>>,
@@ -891,7 +891,7 @@ pub(crate) struct ReferenceType {
 /// The boundary at a displayed MIR effect. An ending edge may select one
 /// successor independently of the other ways out of the instruction.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum ReferencePoint {
+pub(crate) enum SegmentPoint {
     Before(Location),
     After(Location),
     Edge { from: Location, to: Location },
@@ -1062,6 +1062,9 @@ pub struct Lent {
     /// holders need not denote the same borrow on every incoming path.
     #[serde(skip)]
     pub current: BTreeSet<String>,
+    /// References proved to contain this loan's value after a call.
+    #[serde(skip)]
+    pub(crate) forwarded_to: BTreeSet<String>,
     /// The drop-use origins of this holder carry the loan to a reassignment drop.
     #[serde(skip)]
     pub drop_holder: Option<DropLoanHolder>,
@@ -1276,6 +1279,13 @@ pub struct Row {
     /// up to this successor lie on the same path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continues_to: Option<usize>,
+    /// The compiler source scopes and dominating arm entries of each exit.
+    #[serde(skip)]
+    pub(crate) arm_paths: Vec<Vec<super::SourceArm>>,
+    #[serde(skip)]
+    pub(crate) before_arm_paths: Vec<Vec<super::SourceArm>>,
+    #[serde(skip)]
+    pub(crate) single_incoming_row: Option<usize>,
     /// The columns' states after the row, as the next row of the same
     /// path sees them. A row with no MIR location on a path that goes on
     /// (blank, `} else {`, the `};` of a `let ... else { return }`) is

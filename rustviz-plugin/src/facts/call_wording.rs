@@ -106,6 +106,94 @@ fn operand_assignment<'a, 'tcx>(
     None
 }
 
+/// The index of the argument returned directly by this function's MIR.
+/// A signature or an indirect callee cannot prove that value transfer.
+pub(super) fn returned_argument(tcx: TyCtxt<'_>, def: rustc_hir::def_id::DefId) -> Option<usize> {
+    if !def.is_local() || tcx.trait_of_assoc(def).is_some() || !tcx.is_mir_available(def) {
+        return None;
+    }
+    let body = tcx.optimized_mir(def);
+    if body.basic_blocks.len() != 1 { return None; }
+    let block = &body[Location::START.block];
+    let [statement] = block.statements.as_slice() else { return None };
+    let StatementKind::Assign(assign) = &statement.kind else { return None };
+    let Rvalue::Use(Operand::Move(source) | Operand::Copy(source)) = assign.1 else { return None };
+    let argument = source.as_local()?.index().checked_sub(1)?;
+    (assign.0.as_local() == Some(rustc_middle::mir::RETURN_PLACE)
+        && matches!(block.terminator().kind, TerminatorKind::Return)
+        && argument < body.arg_count).then_some(argument)
+}
+
+/// Follow a reference back through direct stores and aggregate operands.
+/// A control-flow join or an indirect write leaves the source unproved.
+pub(super) fn reaching_borrow<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    mut loc: Location,
+    mut place: Place<'tcx>,
+    address_taken: &[Place<'tcx>],
+    returned_argument: impl Fn(rustc_hir::def_id::DefId) -> Option<usize>,
+) -> Option<(Location, bool)> {
+    use rustc_middle::mir::AggregateKind;
+
+    let mut seen = BTreeSet::new();
+    let mut forwarded = false;
+    while seen.insert(loc.block) {
+        let block = &body[loc.block];
+        for (index, stmt) in block.statements[..loc.statement_index].iter().enumerate().rev() {
+            match &stmt.kind {
+                StatementKind::Assign(assign) if assign.0.is_indirect() => return None,
+                StatementKind::Assign(assign) if assign.0.local == place.local
+                    && place.projection.starts_with(assign.0.projection) =>
+                {
+                    let suffix = &place.projection[assign.0.projection.len()..];
+                    let (source, rest) = match &assign.1 {
+                        Rvalue::Ref(..) if suffix.is_empty() =>
+                            return Some((Location { block: loc.block, statement_index: index }, forwarded)),
+                        Rvalue::Use(Operand::Copy(source) | Operand::Move(source)) => (*source, suffix),
+                        Rvalue::Aggregate(kind, operands) => {
+                            let [ProjectionElem::Field(field, _), rest @ ..] = suffix else { return None };
+                            match &**kind {
+                                AggregateKind::Tuple => {}
+                                AggregateKind::Adt(def, _, _, _, None) if tcx.adt_def(*def).is_struct() => {}
+                                _ => return None,
+                            }
+                            (operands.get(*field)?.place()?, rest)
+                        }
+                        _ => return None,
+                    };
+                    if source.is_indirect() { return None; }
+                    place = source.project_deeper(rest, tcx);
+                    if address_taken.iter().any(|&address| super::places::place_under(place, address)) {
+                        return None;
+                    }
+                }
+                StatementKind::StorageLive(local) | StatementKind::StorageDead(local) if *local == place.local =>
+                    return None,
+                _ => {}
+            }
+        }
+        let preds = super::rows::real_predecessors(body, loc.block);
+        let pred = *preds.first().filter(|_| preds.len() == 1)?;
+        match &body[pred].terminator().kind {
+            TerminatorKind::Call { func, args, destination, target, .. } if destination.local == place.local => {
+                if place != *destination || *target != Some(loc.block) { return None; }
+                let (def, _) = func.const_fn_def()?;
+                let source = args.get(returned_argument(def)?)?.node.place()?;
+                if source.is_indirect() || address_taken.iter().any(|&address| super::places::place_under(source, address)) {
+                    return None;
+                }
+                place = source;
+                forwarded = true;
+            }
+            TerminatorKind::InlineAsm { .. } => return None,
+            _ => {}
+        }
+        loc = body.terminator_loc(pred);
+    }
+    None
+}
+
 pub(crate) fn binding_place<'tcx>(
     body: &Body<'tcx>,
     bindings: &BodyBindings,
