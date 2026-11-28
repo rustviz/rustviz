@@ -23469,9 +23469,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // sits (and where none does) is pinned by
         // `approximation_notes_sit_on_their_constructs`.
         must_contain: &[
-            "(get is an async fn; RustViz doesn't draw its body, which runs when the future it returns is awaited.)",
-            "(get is an async fn; RustViz doesn't draw its body, which runs when fut is awaited.)",
-            "(RustViz doesn't draw the async block's body, which runs when block is awaited.)",
+            "(get is an async fn; RustViz doesn't draw its body, which runs when the future it returns is polled.)",
+            "(get is an async fn; RustViz doesn't draw its body, which runs when fut is polled.)",
+            "(RustViz doesn't draw the async block's body, which runs when block is polled.)",
         ],
         must_not_contain: &[
             "plain is an async fn",
@@ -40656,9 +40656,9 @@ fn approximation_notes_sit_on_their_constructs() {
             ("(RustViz draws g's captures here; the uses in g's body aren't drawn where g is called.)", &["let g = || f();"]),
         ]),
         ("approx_async_135", &[
-            ("(get is an async fn; RustViz doesn't draw its body, which runs when the future it returns is awaited.)", &["async fn get(s: String) -> usize {"]),
-            ("(get is an async fn; RustViz doesn't draw its body, which runs when fut is awaited.)", &["let fut = get(a);"]),
-            ("(RustViz doesn't draw the async block's body, which runs when block is awaited.)", &["let block = async { 1 };"]),
+            ("(get is an async fn; RustViz doesn't draw its body, which runs when the future it returns is polled.)", &["async fn get(s: String) -> usize {"]),
+            ("(get is an async fn; RustViz doesn't draw its body, which runs when fut is polled.)", &["let fut = get(a);"]),
+            ("(RustViz doesn't draw the async block's body, which runs when block is polled.)", &["let block = async { 1 };"]),
         ]),
     ];
     for (fixture, notes) in cases {
@@ -48111,4 +48111,98 @@ fn p4_review_indexed_stored_holders_and_drop_use() {
     check_review_tip(&svg, "b@L110:dot:", &["still immutably borrowed by r"], &["borrowed by shelf.items"]);
     check_review_tip(&svg, "a@L128:dot:", &["still immutably borrowed by slots"], &[]);
     check_review_tip(&svg, "a@L133:dot:", &["still immutably borrowed by slots"], &[]);
+}
+
+#[test]
+fn approximation_guard_note_follows_the_reachable_call() {
+    let rv = run_with_local_backend("p4_note_anchors");
+    let svg = rv.timeline_panel_string();
+    let guard = "RefCell also tracks this borrow at run time";
+    let notes: Vec<_> = rv_elements(&svg, "").into_iter()
+        .filter(|(_, title, ..)| title.contains(guard))
+        .collect();
+    // NLL MIR has a FalseEdge to the first borrow. Only as_ptr runs
+    // on L15. The second borrow is reached after the branch rejoins.
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].0.starts_with("cell@L16:dot:static_lend"), "{notes:?}");
+}
+
+#[test]
+fn borrow_spelling_uses_the_compiler_source_node() {
+    let rv = run_with_local_backend("p4_note_anchors");
+    let body = fact_body(rv.facts().unwrap(), "borrow_spelling");
+    let auto = fact_loan(body, 5, "pair.0");
+    let address = fact_loan(body, 6, "pair.0");
+    let pattern = fact_loan(body, 7, "pair.0");
+    // MIR contains three shared references of the same field. Rustc
+    // inserts the first for the receiver of len, regardless of trivia.
+    assert_eq!(auto["to_call"], "len");
+    assert_eq!(auto["implicit"], true, "{auto}");
+    assert_eq!(address["implicit"], false, "{address}");
+    assert_eq!(pattern["implicit"], false, "{pattern}");
+    let tuple_address = fact_loan(body, 8, "pair");
+    assert_eq!(tuple_address["implicit"], false, "{tuple_address}");
+}
+
+#[test]
+fn approximation_closure_note_describes_creation_on_a_shared_row() {
+    let svg = run_with_local_backend("one_line_move_closure_bindings_1536").timeline_panel_string();
+    let notes: Vec<_> = rv_elements(&svg, "f@L23:dot:").into_iter()
+        .filter(|(_, title, ..)| title.contains("the uses in f's body aren't drawn where f is called"))
+        .collect();
+    // MIR constructs f from a copy of n, then ends f's storage on
+    // the same source row. The note explains only the construction.
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].0.contains(":dot:acquire"), "{notes:?}");
+    assert!(notes[0].1.contains("Closure f captures: n"), "{notes:?}");
+}
+
+#[test]
+fn approximation_review_raw_cast_chain() {
+    let svg = run_with_local_backend("p4_note_review").timeline_panel_string();
+    for (dot, origin) in [("p@L20:dot:acquire", "p is a raw pointer to x"), ("q@L22:dot:acquire", "q is a raw pointer to y")] {
+        check_review_tip(&svg, dot, &[origin, "RustViz doesn't draw raw pointers as borrows"], &["immutably borrows", "mutably borrows"]);
+    }
+}
+
+#[test]
+fn approximation_review_nested_index_selects_the_outer_call() {
+    let svg = run_with_local_backend("p4_note_review").timeline_panel_string();
+    check_review_tip(&svg, "slots@L27:dot:duplicate", &["RustViz doesn't follow slots[", "*slots[0]", "to what it points to"], &[]);
+    for (_, tooltip, ..) in rv_elements(&svg, "slots@L28:dot:") {
+        assert!(!tooltip.contains("RustViz doesn't follow slots[\n"), "{tooltip}");
+    }
+}
+
+#[test]
+fn approximation_review_access_anchors_exclude_a_lone_scope_end() {
+    let svg = run_with_local_backend("p4_note_review").timeline_panel_string();
+    let access = "RustViz doesn't show this on what p points to";
+    check_review_tip(&svg, "p@L36:dot:owner_go_out_of_scope", &["p goes out of scope"], &[access]);
+    check_review_tip(&svg, "p@L42:dot:duplicate", &["*p's value is copied", "p goes out of scope", access], &[]);
+}
+
+#[test]
+fn approximation_review_async_execution_is_driven_by_polling() {
+    let svg = run_with_local_backend("p4_note_review").timeline_panel_string();
+    check_review_tip(&svg, "fut@L57:dot:static_borrow",
+        &["run is an async fn", "RustViz doesn't draw its body", "which runs when fut is polled"],
+        &["which runs when fut is awaited"]);
+}
+
+#[test]
+fn approximation_review_excludes_the_macro_generated_initializer() {
+    let svg = run_with_local_backend("p4_note_review").timeline_panel_string();
+    check_review_tip(&svg, "fut@L66:dot:acquire", &["fut acquires ownership"],
+        &["RustViz doesn't draw the async block's body"]);
+}
+
+#[test]
+fn borrow_spelling_review_distinguishes_the_match_guard_borrow() {
+    let rv = run_with_local_backend("p4_note_review");
+    let body = fact_body(rv.facts().unwrap(), "pattern_guard");
+    let payload = fact_loan(body, 13, "(value as Some).0");
+    let guard = fact_loan(body, 13, "x");
+    assert_eq!(payload["implicit"], false, "{payload}");
+    assert_eq!(guard["implicit"], true, "{guard}");
 }

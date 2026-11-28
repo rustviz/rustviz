@@ -1407,6 +1407,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                   let rcvr_ty = self.tcx.typeck(rcvr.hir_id.owner).node_type(rcvr.hir_id);
                   let pointee_interior_mut = rcvr_rap.is_ref() && !of_ref_var && matches!(rcvr_rty, ResourceTy::Value(_))
                     && rcvr_ty.builtin_deref(true).is_some_and(|t| self.ty_has_interior_mut(t, rcvr.hir_id.owner) == InteriorMut::Yes);
+                  self.runtime_lock_note(expr, *self.unique_id);
                   self.add_pass_by_sref_ev_full(line_num, ResourceTy::Value(fn_rap.clone()), rcvr_rty.clone(), autoref.clone(), refcell_borrow_mut, pointee_interior_mut, of_ref_var, deep.clone());
                 }
                 _ => {}
@@ -9474,13 +9475,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       {
         let head_from = self.in_scope.len();
         use crate::facts::IteratorInput;
-        // Match the compiler's marked constructor span, including its
-        // expansion context. Two loops on one row have distinct calls.
-        let storage = self.body_facts.and_then(|f| {
-          let mut sites = f.iterators.iter().filter(|it| it.site.with_parent(None) == guard_expr.span.with_parent(None));
-          let site = sites.next()?;
-          sites.next().is_none().then_some(site)
-        });
+        let storage = self.iterator_storage(guard_expr);
         let head = storage.and_then(|it| it.head.as_ref());
         let head_rty = head.and_then(|h| self.iterator_place(&h.place)).unwrap_or(ResourceTy::Anonymous);
         let place_head = head.is_some_and(|h| matches!(h.access, IteratorInput::Move | IteratorInput::Copy));

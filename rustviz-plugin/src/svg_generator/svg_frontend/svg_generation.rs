@@ -1625,8 +1625,12 @@ fn hide_source_lines(annotated_src_str: &str, source_rs_str: &str, visualization
             .collect();
         visualization_data.event_line_map = shifted_elm;
 
-        // The approximation notes' lines too (a note in a hidden fn
-        // finds no dot).
+        // Prune source anchors before shifting rows so a hidden note
+        // cannot land on the event that takes its place.
+        visualization_data.approx_notes.retain(|note| {
+            !matches!(note, crate::svg_generator::data::ApproxNote::SourceRow { line, .. }
+                if removed_set.contains(line))
+        });
         for note in visualization_data.approx_notes.iter_mut() {
             note.map_lines(|l| shift(l));
         }

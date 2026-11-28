@@ -97,6 +97,7 @@ struct Cx<'a, 'tcx> {
     body: &'a Body<'tcx>,
     names: Names<'tcx>,
     rows: RowModel,
+    borrow_spelling: super::borrow_spelling::BorrowSpelling<'tcx>,
     r: Rows<'a, 'tcx>,
     /// The call producing each expanded vec! (from a boxed array or a
     /// repeated element). Nested expansions have distinct compiler IDs.
@@ -1689,39 +1690,6 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         }
     }
 
-    /// The borrow at `l` is written in the source (`&x`, `&mut *r`, `ref
-    /// x`), not inserted by the compiler (a method call's auto-ref, the
-    /// reborrow of a reference passed on, a macro's).
-    fn written_borrow(&self, l: Location) -> bool {
-        let sp = self.body.source_info(l).span;
-        if sp.from_expansion() {
-            return false;
-        }
-        // rustc's reborrow of a written borrow, which has the written one's
-        // span (`&*m` passed where `&String` is expected: `_4 = &(*_5)`
-        // after `_5 = &(*m)`): a borrow through a MIR temporary that a
-        // borrow with this very span made.
-        let body = self.body;
-        if let Some(StatementKind::Assign(asg)) = body.basic_blocks[l.block].statements.get(l.statement_index).map(|st| &st.kind) {
-            if let Rvalue::Ref(_, _, p) = &asg.1 {
-                let temp = p.projection.first() == Some(&ProjectionElem::Deref)
-                    && !body.local_decls[p.local].is_user_variable()
-                    && p.local != RETURN_PLACE
-                    && p.local.index() > body.arg_count;
-                let made_here = temp && body.basic_blocks.iter().flat_map(|d| d.statements.iter()).any(|st| match &st.kind {
-                    StatementKind::Assign(a) => a.0.local == p.local && a.0.projection.is_empty() && matches!(a.1, Rvalue::Ref(..)) && st.source_info.span == sp,
-                    _ => false,
-                });
-                if made_here {
-                    return false;
-                }
-            }
-        }
-        let t = self.tcx.sess.source_map().span_to_snippet(sp).unwrap_or_default();
-        let t = t.trim_start();
-        t.starts_with('&') || t.starts_with("ref ") || t.starts_with("ref\t") || t.contains(" ref ")
-    }
-
     fn place_ev(&self, l: Location, local: Local, fact: Fact) -> (usize, Ev) {
         let mut event = self.ev(l, fact);
         event.1.place_local = Some(local);
@@ -2115,7 +2083,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 || tcx.is_diagnostic_item(rustc_span::Symbol::intern("vec_from_elem"), did)))
             .then_some((expansion, (Location { block: bb, statement_index: data.statements.len() }, *destination)))
     }).collect();
-    let cx = Cx { tcx, body, names, rows, r, vec_results };
+    let borrow_spelling = super::borrow_spelling::BorrowSpelling::collect(tcx, def_id.expect_local());
+    let cx = Cx { tcx, body, names, rows, r, vec_results, borrow_spelling };
     let skipped_closure_returns = skipped_closure_returns(tcx, body);
     let mut notes: Vec<String> = Vec::new();
 
@@ -2976,7 +2945,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             direct_holders: Vec::new(),
             holder_stores: Vec::new(),
             via_call: Vec::new(),
-            implicit: !cx.written_borrow(*loc),
+            implicit: !cx.borrow_spelling.is_written(tcx, body, *loc),
         });
     }
     for (i, u) in untracked.iter().enumerate() {
@@ -3045,7 +3014,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             direct_holders: Vec::new(),
             holder_stores: Vec::new(),
             via_call: Vec::new(),
-            implicit: u.place.is_some() && u.at.is_some_and(|loc| !cx.written_borrow(loc)),
+            implicit: u.place.is_some() && u.at.is_some_and(|loc| !cx.borrow_spelling.is_written(tcx, body, loc)),
         });
     }
     // The variable holding the loan (`h` for `h.r`): the one a column's

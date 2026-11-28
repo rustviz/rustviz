@@ -1,7 +1,7 @@
 use super::*;
 use crate::expr_visitor::ExprVisitor;
 use crate::expr_visitor_utils::collect_pat_bindings;
-use crate::svg_generator::data::ExternalEvent;
+use crate::svg_generator::data::{ApproxNote, ExternalEvent, ResourceAccessPoint, ResourceTy};
 use rustc_hir::intravisit::Visitor;
 use rustc_interface::interface::Compiler;
 use rustc_middle::mir::TerminatorKind;
@@ -10,6 +10,11 @@ use std::collections::{BTreeMap, HashSet};
 // These occurrences need not have a separate SVG dot. Inspect the same
 // borrowck query and visitor as the installed plugin, before layout.
 fn with_body(name: &str, check: impl Fn(TyCtxt<'_>, &BodyFacts) + Send) {
+    let fixture = if name == "exit_with_guard" { "diverging_field_holder_1884" } else { "scope_drop_review" };
+    with_fixture_body(fixture, name, check);
+}
+
+fn with_fixture_body(fixture: &str, name: &str, check: impl Fn(TyCtxt<'_>, &BodyFacts) + Send) {
     struct Check<'a, F>(&'a str, F);
     impl<F: Fn(TyCtxt<'_>, &BodyFacts) + Send> rustc_driver::Callbacks for Check<'_, F> {
         fn config(&mut self, cfg: &mut rustc_interface::Config) {
@@ -34,7 +39,6 @@ fn with_body(name: &str, check: impl Fn(TyCtxt<'_>, &BodyFacts) + Send) {
         }
     }
     let sysroot = std::process::Command::new("rustc").args(["--print", "sysroot"]).output().unwrap();
-    let fixture = if name == "exit_with_guard" { "diverging_field_holder_1884" } else { "scope_drop_review" };
     let path = format!("{}/tests/{fixture}.rs", env!("CARGO_MANIFEST_DIR"));
     let args = ["rustc", &path, "--sysroot", std::str::from_utf8(&sysroot.stdout).unwrap().trim(),
         "--edition=2024", "--crate-type=lib", "-Awarnings", "-Zmir-opt-level=0", "-Zmaximal-hir-to-mir-coverage"].map(str::to_owned);
@@ -92,12 +96,16 @@ fn scope_review_merged_effect_is_independent_of_operand_order() {
 }
 
 fn with_visitor(name: &str, check: impl Fn(&ExprVisitor<'_, '_>) + Send) {
-    with_body(name, move |tcx, facts| {
+    with_fixture_visitor("scope_drop_review", name, move |visitor| check(visitor));
+}
+
+fn with_fixture_visitor(fixture: &str, name: &str, check: impl Fn(&mut ExprVisitor<'_, '_>) + Send) {
+    with_fixture_body(fixture, name, move |tcx, facts| {
         let local = facts.def_id.expect_local();
         let bwf = rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, local);
         let hir = tcx.hir_body_owned_by(local);
-        let lines: BTreeMap<_, _> = include_str!("../../tests/scope_drop_review.rs").lines().enumerate()
-            .map(|(i, line)| (i + 1, line.to_owned())).collect();
+        let src = std::fs::read_to_string(format!("{}/tests/{fixture}.rs", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let lines: BTreeMap<_, _> = src.lines().enumerate().map(|(i, line)| (i + 1, line.to_owned())).collect();
         let mut annotations = lines.iter().map(|(&i, s)| (i, vec![s.clone()])).collect();
         let mut line_events = lines.keys().map(|&i| (i, Vec::new())).collect();
         let (mut events, mut ids, mut next, skip) = (Vec::new(), Default::default(), 0, HashSet::new());
@@ -105,7 +113,7 @@ fn with_visitor(name: &str, check: impl Fn(&ExprVisitor<'_, '_>) + Send) {
             &mut line_events, &mut events, 1, &lines, &mut annotations, &mut ids, &mut next, false, &skip);
         visitor.facts = Some(facts);
         visitor.visit_body(hir);
-        check(&visitor);
+        check(&mut visitor);
     });
 }
 
@@ -188,4 +196,130 @@ fn scope_review_returning_helper_does_not_make_process_exit_unwind() {
         let local = facts.bindings.columns["text"][0];
         assert!(facts.scope_ends.for_place(local, "text").is_empty());
     });
+}
+
+
+#[test]
+fn note_review_distinguishes_deref_coercion_from_the_written_borrow() {
+    with_fixture_body("p4_note_review", "coercion", |tcx, facts| {
+        use rustc_middle::mir::{Location, Rvalue, StatementKind};
+        let owner = facts.def_id.expect_local();
+        let body = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, owner).body;
+        let spelling = super::borrow_spelling::BorrowSpelling::collect(tcx, owner);
+        let s = facts.bindings.columns["s"][0];
+        let mut written = Vec::new();
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            for (statement_index, st) in data.statements.iter().enumerate() {
+                let StatementKind::Assign(assignment) = &st.kind else { continue };
+                let Rvalue::Ref(_, _, place) = assignment.1 else { continue };
+                let at = Location { block, statement_index };
+                written.push((place.as_local() == Some(s), spelling.is_written(tcx, body, at)));
+            }
+        }
+        // Rustc creates &String, reborrows it for Deref::deref, and
+        // reborrows the returned &str for take, all at the span of &s.
+        assert_eq!(written, [(true, true), (false, false), (false, false)]);
+    });
+}
+
+#[test]
+fn note_review_match_ergonomics_inserts_a_field_borrow() {
+    with_fixture_body("p4_note_anchors", "borrow_spelling", |tcx, facts| {
+        use rustc_middle::mir::{Location, Rvalue, StatementKind};
+        let owner = facts.def_id.expect_local();
+        let body = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, owner).body;
+        let spelling = super::borrow_spelling::BorrowSpelling::collect(tcx, owner);
+        let inferred = facts.bindings.columns["inferred"][0];
+        let mut checked = 0;
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            for (statement_index, st) in data.statements.iter().enumerate() {
+                let StatementKind::Assign(assignment) = &st.kind else { continue };
+                if assignment.0.as_local() == Some(inferred) && matches!(assignment.1, Rvalue::Ref(..)) {
+                    assert!(!spelling.is_written(tcx, body, Location { block, statement_index }));
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 1);
+    });
+}
+
+#[test]
+fn note_review_nested_for_uses_its_own_iterator_binding() {
+    with_fixture_visitor("p4_note_review", "nested_iter", |visitor| {
+        visitor.collect_approx_notes(visitor.tcx.hir_body_owned_by(visitor.mir_body.source.def_id().expect_local()));
+        let heads: Vec<_> = visitor.approx_notes.iter().filter_map(|note| {
+            let ApproxNote::Loop { head_cols, .. } = note else { return None };
+            Some(head_cols.as_slice())
+        }).collect();
+        let group = *visitor.raps.get("group").unwrap().rap.hash();
+        let item = *visitor.raps.get("item").unwrap().rap.hash();
+        // The successful next of outer binds group, the successful
+        // next of group binds item. Layout can mask a mixed head list.
+        assert_eq!(heads, [&[group][..], &[item][..]]);
+    });
+}
+
+#[test]
+fn note_review_guard_ignores_a_deref_event_with_the_same_receiver_span() {
+    with_fixture_visitor("p4_note_review", "guarded", |visitor| {
+        let (line, mut deref_event) = visitor.preprocessed_events.iter().find(|(_, ev)| {
+            matches!(ev, ExternalEvent::PassByStaticReference { to, .. } if to.name() == "borrow_mut")
+        }).cloned().unwrap();
+        let at = visitor.mir_body.basic_blocks.iter().find_map(|bb| {
+            let term = bb.terminator();
+            let TerminatorKind::Call { func, args, .. } = &term.kind else { return None };
+            let (def, _) = func.const_fn_def()?;
+            (visitor.tcx.trait_of_assoc(def) == visitor.tcx.lang_items().deref_trait())
+                .then(|| (def, args.first().unwrap().span))
+        }).unwrap();
+        let ExternalEvent::PassByStaticReference { id, to: ResourceTy::Value(ResourceAccessPoint::Function(callee)), .. } = &mut deref_event else {
+            unreachable!()
+        };
+        let guard_id = *id;
+        // Picture the real compiler-inserted Deref alongside the guard
+        // call. Both use the same source receiver, but only one locks.
+        *id = *visitor.unique_id;
+        visitor.event_spans.insert(*id, at.1);
+        callee.name = visitor.tcx.item_name(at.0).to_string();
+        visitor.preprocessed_events.push((line, deref_event));
+        visitor.collect_approx_notes(visitor.tcx.hir_body_owned_by(visitor.mir_body.source.def_id().expect_local()));
+        let ids: Vec<_> = visitor.approx_notes.iter().filter_map(|note| {
+            let ApproxNote::Operation { id, .. } = note else { return None };
+            Some(*id)
+        }).collect();
+        assert_eq!(ids, [guard_id]);
+    });
+}
+
+fn check_extended_temporary_fallback(body: &str, temporary: &'static str) {
+    with_fixture_visitor("p4_note_review", body, move |visitor| {
+        // Exercise the fallback with compiler facts intact and
+        // without the mapping to the pictured temporary.
+        visitor.branch_temp_names.clear();
+        visitor.collect_approx_notes(visitor.tcx.hir_body_owned_by(visitor.mir_body.source.def_id().expect_local()));
+        let notes: Vec<_> = visitor.approx_notes.iter().filter_map(|note| {
+            let ApproxNote::SourceRow { hash, event: crate::svg_generator::data::NoteEvent::ScopeEnd, text, .. } = note else {
+                return None;
+            };
+            Some((*hash, text))
+        }).collect();
+        let holder = *visitor.raps.get("r").unwrap().rap.hash();
+        assert_eq!(notes.len(), 1, "{body}: {notes:?}");
+        let (hash, text) = notes[0];
+        assert_eq!(hash, holder);
+        assert!(text.contains(temporary) && text.contains("the temporary it borrows is dropped here"), "{text}");
+        assert!(!text.contains("holds a reference to it"), "{text}");
+        assert!(text.contains("The original binding of") && text.contains("to the end of this block"), "{text}");
+    });
+}
+
+#[test]
+fn note_review_extended_temporary_survives_the_binding_being_reassigned() {
+    check_extended_temporary_fallback("reassigned", "extended");
+}
+
+#[test]
+fn note_review_destructured_binding_gets_the_temporary_fallback() {
+    check_extended_temporary_fallback("destructured", "tuple");
 }

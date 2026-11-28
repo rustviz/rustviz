@@ -1,36 +1,21 @@
 //! Approximation notes (`ApproxNote`): where a figure simplifies what a
 //! construct does in a way a student could misread, the dot drawn on it
-//! says so in one parenthetical sentence. Found by a pass over a fn's
-//! HIR after its events are collected, so the rest of the visitor is
-//! unchanged by them.
-//!
-//! Each note is only made where the construct is recognised for sure
-//! from the HIR; a note on code it doesn't apply to would be a new
-//! false statement.
+//! says so in one parenthetical sentence. MIR proves which operation
+//! happens and which place it uses. HIR supplies the user-facing spelling
+//! and the bridge between that compiler occurrence and its drawn event.
 
 use crate::expr_visitor::ExprVisitor;
-use crate::expr_visitor_utils::{binding_name, span_end_line, span_to_line};
-#[allow(non_snake_case)]
-use crate::svg_generator::data::ApproxNote;
+use crate::expr_visitor_utils::{span_end_line, span_to_line};
+use crate::svg_generator::data::{ApproxNote, NoteEvent};
 use crate::svg_generator::hover_messages;
 use rustc_hir::def::Res;
+use rustc_middle::mir::visit::{PlaceContext, Visitor as MirVisitor};
+use rustc_middle::mir::{AggregateKind, Local, Location, Place, ProjectionElem, Rvalue, StatementKind, TerminatorKind};
+use rustc_span::Span;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{
   ClosureKind, CoroutineDesugaring, CoroutineKind, Expr, ExprKind, LetStmt, LoopSource, Pat, PatKind, QPath, UnOp,
 };
-
-/// The loops of a body (not inside closures, whose bodies aren't drawn),
-/// outermost first.
-struct Loops<'tcx>(Vec<&'tcx Expr<'tcx>>);
-
-impl<'tcx> Visitor<'tcx> for Loops<'tcx> {
-  fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
-    if matches!(e.kind, ExprKind::Loop(..)) {
-      self.0.push(e);
-    }
-    intravisit::walk_expr(self, e);
-  }
-}
 
 /// The expressions and `let`s of a body, in source order (not inside
 /// closures).
@@ -67,20 +52,19 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// The approximation notes of the fn whose body is `body`, added to
   /// `self.approx_notes`.
   pub fn collect_approx_notes(&mut self, body: &'tcx rustc_hir::Body<'tcx>) {
-    self.loop_notes(body);
     let mut sites = Sites { exprs: Vec::new(), lets: Vec::new() };
     sites.visit_expr(body.value);
+    self.loop_notes(&sites.exprs);
     self.async_fn_notes(body);
     for e in &sites.exprs {
       if e.span.from_expansion() {
         continue;
       }
-      self.runtime_lock_note(e);
       self.raw_deref_note(e);
       self.element_ref_deref_note(e);
     }
     for l in &sites.lets {
-      if l.span.from_expansion() {
+      if l.span.from_expansion() || l.init.is_some_and(|init| init.span.from_expansion()) {
         continue;
       }
       self.raw_cast_note(l);
@@ -105,10 +89,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     Some((*rd.rap.hash(), rd.rap.name().to_owned()))
   }
 
-  /// `text` on the first dot of column `hash` on the lines of `span`.
-  fn note_at(&mut self, hash: u64, span: rustc_span::Span, text: String) {
-    let lines = (span_to_line(&span, &self.tcx), span_end_line(&span, &self.tcx));
-    self.approx_notes.push(ApproxNote::At { hash, lines, text });
+  /// A projected source row, for notes on pictured bindings and writes.
+  fn note_at_line(&mut self, hash: u64, span: Span, event: NoteEvent, text: String) {
+    let line = span_to_line(&span, &self.tcx);
+    self.approx_notes.push(ApproxNote::SourceRow { hash, line, event, text });
+  }
+
+  fn definition_span(&self, local: Local) -> Span {
+    self.mir_body.local_decls[local].source_info.span
+  }
+
+  fn assignments(&self) -> impl Iterator<Item = (Location, Place<'tcx>, &Rvalue<'tcx>)> + '_ {
+    self.mir_body.basic_blocks.iter_enumerated().flat_map(move |(block, bb)| {
+      bb.statements.iter().enumerate().filter_map(move |(statement_index, statement)| {
+        let StatementKind::Assign(a) = &statement.kind else { return None };
+        let at = Location { block, statement_index };
+        self.runs_at(at).then_some((at, a.0, &a.1))
+      })
+    })
   }
 
   /// The source text of `e`, for a note that names a place.
@@ -120,22 +118,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `write` (#685): at compile time a shared borrow of the receiver,
   /// which is what's drawn; the run-time borrow or lock lasts until the
   /// guard the call returns is dropped, and isn't drawn.
-  fn runtime_lock_note(&mut self, e: &'tcx Expr<'tcx>) {
-    let Some(text) = self.runtime_lock_text(e) else { return };
+  pub(crate) fn runtime_lock_note(&mut self, e: &Expr<'tcx>, id: usize) {
     let ExprKind::MethodCall(_, recv, ..) = e.kind else { return };
     let Some((hash, _)) = self.local_column(recv) else { return };
-    self.note_at(hash, e.span, text);
+    let Some(def_id) = self.tcx.typeck(e.hir_id.owner).type_dependent_def_id(e.hir_id) else { return };
+    let Some(text) = self.runtime_lock_text(def_id) else { return };
+    // The receiver event is emitted for the resolved method, rather
+    // than for any compiler-inserted deref call with the same span.
+    let Some(site) = self.mir_call(e).and_then(|call| call.site) else { return };
+    if !e.span.from_expansion() && self.runs_at(site.at) {
+      self.approx_notes.push(ApproxNote::Operation { hash, id, text });
+    }
   }
 
-  /// The note of `runtime_lock_note` for the call `e`, if it is one of
-  /// those methods.
-  fn runtime_lock_text(&self, e: &'tcx Expr<'tcx>) -> Option<String> {
-    let ExprKind::MethodCall(seg, ..) = e.kind else { return None };
-    let typeck = self.tcx.typeck(e.hir_id.owner);
-    let def_id = typeck.type_dependent_def_id(e.hir_id)?;
+  fn binding_local(&self, expr: &Expr<'_>) -> Option<Local> {
+    let ExprKind::Path(QPath::Resolved(None, path)) = expr.kind else { return None };
+    let Res::Local(id) = path.res else { return None };
+    self.raps.bindings.declarations.get(&id).copied()
+  }
+
+  fn runs_at(&self, at: Location) -> bool {
+    let span = self.mir_body.source_info(at).span.with_parent(None);
+    self.body_facts.and_then(|b| b.effect_sites.get(&span))
+      .is_some_and(|sites| sites.contains(&(at.block, true)))
+  }
+
+  /// Runtime behavior of a resolved standard-library guard acquisition.
+  fn runtime_lock_text(&self, def_id: rustc_hir::def_id::DefId) -> Option<String> {
     let impl_id = self.tcx.impl_of_assoc(def_id)?;
     let adt = self.tcx.type_of(impl_id).skip_binder().ty_adt_def()?;
-    let method = seg.ident.name.as_str();
+    let method = self.tcx.item_name(def_id);
+    let method = method.as_str();
     let is = |sym| self.tcx.is_diagnostic_item(sym, adt.did());
     match method {
       "borrow" | "borrow_mut" if is(rustc_span::sym::RefCell) => Some(hover_messages::approx_note_refcell(method)),
@@ -145,33 +158,34 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// `let r = if c { &String::from("x") } else { &s };` (also a `match`
-  /// arm, `Some(&..)` in a branch, #1383): Rust extends the temporary a
-  /// branch borrows to the end of the `let`'s block, but only the path
-  /// through that branch makes it, so it is dropped there by a drop
-  /// flag. Such a temporary gets a column of its own that says so
-  /// (`declare_branch_temps`, #1397). One that got none (its branch
-  /// wasn't visited, or its `let` is on a hidden line) is stated by a
-  /// note on the first binding's dot at the block's end.
+  /// When an extended temporary lacks a column, explain the drop on
+  /// its proven holder's normal scope end.
   fn branch_extended_temp_note(&mut self, l: &'tcx LetStmt<'tcx>) {
     let Some(init) = l.init else { return };
-    let mut temps = self.branch_extended_temps(init);
-    temps.retain(|(tmp, _, _)| !self.branch_temp_names.get(&tmp.hir_id).is_some_and(|n| self.raps.contains_key(n)));
-    if temps.is_empty() {
-      return;
-    }
-    let mut first = None;
-    l.pat.walk_always(|p| {
-      if first.is_none() && matches!(p.kind, PatKind::Binding(..)) && !p.span.from_expansion() {
-        first = Some(p.hir_id);
+    let Some(facts) = self.body_facts else { return };
+    let mut bindings = Bindings(Vec::new());
+    bindings.visit_pat(l.pat);
+    for (expr, borrow, end) in self.branch_extended_temps(init) {
+      if self.branch_temp_names.get(&expr.hir_id).is_some_and(|n| self.raps.contains_key(n)) {
+        continue;
       }
-    });
-    let Some((hash, name)) = first.and_then(|id| self.column_of_binding(id)) else { return };
-    for (_, b, end) in temps {
-      let line = span_to_line(&b.span, &self.tcx);
-      let code = self.snippet(b).filter(|t| t.chars().count() <= 32 && !t.contains('\n'));
-      let text = hover_messages::approx_note_branch_extended_temp(&name, code.as_deref(), line);
-      self.approx_notes.push(ApproxNote::At { hash, lines: (end, end), text });
+      let Some(temp) = facts.expression_temp(expr.hir_id) else { continue };
+      if !temp.root_flags.contains_key(&None) {
+        continue;
+      }
+      for p in &bindings.0 {
+        let Some(&holder) = self.raps.bindings.declarations.get(&p.hir_id) else { continue };
+        if !facts.loans.iter().any(|loan| {
+          loan.runs && loan.lender_local == Some(temp.local) && loan.direct_locals.contains(&holder)
+        }) {
+          continue;
+        }
+        let Some((hash, name)) = self.column_of_binding(p.hir_id) else { continue };
+        let line = span_to_line(&borrow.span, &self.tcx);
+        let code = self.snippet(borrow).filter(|t| t.chars().count() <= 32 && !t.contains('\n'));
+        let text = hover_messages::approx_note_branch_extended_temp(&name, code.as_deref(), line);
+        self.approx_notes.push(ApproxNote::SourceRow { hash, line: end, event: NoteEvent::ScopeEnd, text });
+      }
     }
   }
 
@@ -189,34 +203,76 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `*p` with `p` a raw pointer (#194): drawn on p's column only.
   fn raw_deref_note(&mut self, e: &'tcx Expr<'tcx>) {
     let ExprKind::Unary(UnOp::Deref, inner) = e.kind else { return };
-    if !self.tcx.typeck(e.hir_id.owner).expr_ty(inner).is_raw_ptr() {
+    let Some((hash, name)) = self.local_column(inner) else { return };
+    let Some(local) = self.binding_local(inner) else { return };
+    if !self.mir_body.local_decls[local].ty.is_raw_ptr() {
       return;
     }
-    let Some((hash, name)) = self.local_column(inner) else { return };
-    self.note_at(hash, e.span, hover_messages::approx_note_raw_deref(&name));
+    let Some(at) = self.deref_site(e.span, |p| {
+      p.local == local && p.projection.first() == Some(&ProjectionElem::Deref)
+    }) else { return };
+    self.note_at_line(hash, self.mir_body.source_info(at).span, NoteEvent::Access, hover_messages::approx_note_raw_deref(&name));
   }
 
-  /// `let p = &mut x as *mut T;` (#194): no borrow of x is drawn.
+  /// `let p = &mut x as *mut T;` (#194). The place behind the
+  /// conversion must be the reaching reference borrow's actual place.
   fn raw_cast_note(&mut self, l: &'tcx LetStmt<'tcx>) {
     let (PatKind::Binding(..), Some(init)) = (l.pat.kind, l.init) else { return };
-    let typeck = self.tcx.typeck(l.hir_id.owner);
-    if !typeck.expr_ty(init).is_raw_ptr() {
+    let Some((hash, name)) = self.column_of_binding(l.pat.hir_id) else { return };
+    let Some(&local) = self.raps.bindings.declarations.get(&l.pat.hir_id) else { return };
+    if !matches!(init.kind, ExprKind::Cast(..)) || !self.mir_body.local_decls[local].ty.is_raw_ptr() {
       return;
     }
-    let mut inner = init;
-    let mut cast = false;
-    while let ExprKind::Cast(e, _) = inner.kind {
-      inner = e;
-      cast = true;
+    let mut origins = self.assignments().filter(|(at, dest, _)| {
+      dest.as_local() == Some(local) && init.span.contains(self.mir_body.source_info(*at).span)
+    });
+    let Some((at, _, rhs)) = origins.next() else { return };
+    if origins.next().is_some() {
+      return;
     }
-    let ExprKind::AddrOf(_, _, place) = inner.kind else { return };
-    let (true, Some((_, lender))) = (cast, self.local_column(place)) else { return };
-    let Some((hash, name)) = self.column_of_binding(l.pat.hir_id) else { return };
-    self.note_at(hash, l.span, hover_messages::approx_note_raw_cast(&name, &lender));
+    let origin = match rhs {
+      Rvalue::RawPtr(_, place) => Some((at, *place)),
+      Rvalue::Cast(rustc_middle::mir::CastKind::PtrToPtr, operand, _) => operand.place().and_then(|p| {
+        crate::facts::call_wording::raw_pointer_origin(self.mir_body, at, p)
+      }),
+      _ => None,
+    };
+    let Some((raw_at, place)) = origin else { return };
+    if place.projection.as_slice() != [ProjectionElem::Deref] {
+      return;
+    }
+    let Some((_, lender)) = crate::facts::call_wording::operand_borrow(self.mir_body, raw_at, Place::from(place.local)) else { return };
+    let Some(lender) = lender.as_local().and_then(|local| self.raps.bindings.locals.get(&local)) else { return };
+    let text = hover_messages::approx_note_raw_cast(&name, lender);
+    drop(origins);
+    self.note_at_line(hash, self.definition_span(local), NoteEvent::Acquire, text);
+  }
+
+  /// Finds an assignment with a place access for this source expression.
+  /// Rustc can give a write the containing assignment's span.
+  fn deref_site(&self, span: Span, accepts: impl Fn(Place<'tcx>) -> bool) -> Option<Location> {
+    struct Access<F> {
+      accepts: F,
+      found: bool,
+    }
+    impl<'tcx, F: Fn(Place<'tcx>) -> bool> MirVisitor<'tcx> for Access<F> {
+      fn visit_place(&mut self, place: &Place<'tcx>, _: PlaceContext, _: Location) {
+        self.found |= (self.accepts)(*place);
+      }
+    }
+    self.assignments().find_map(|(at, dest, rhs)| {
+      let site = self.mir_body.source_info(at).span;
+      if !site.contains(span) && !span.contains(site) {
+        return None;
+      }
+      let mut access = Access { accepts: &accepts, found: accepts(dest) };
+      access.visit_rvalue(rhs, at);
+      access.found.then_some(at)
+    })
   }
 
   /// `*slots[0]` with `slots[0]` a reference stored in an element
-  /// (#689): drawn on slots's column, not on what it borrows from.
+  /// (#689): drawn on slots's column.
   fn element_ref_deref_note(&mut self, e: &'tcx Expr<'tcx>) {
     let ExprKind::Unary(UnOp::Deref, place) = e.kind else { return };
     if !self.tcx.typeck(e.hir_id.owner).expr_ty(place).is_ref() {
@@ -226,43 +282,84 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     while let ExprKind::Field(b, _) = base.kind {
       base = b;
     }
-    let ExprKind::Index(coll, ..) = base.kind else { return };
+    let ExprKind::Index(coll, _, brackets) = base.kind else { return };
     let Some((hash, _)) = self.local_column(coll) else { return };
+    let Some(local) = self.binding_local(coll) else { return };
+    let site = if let Some(method) = self.tcx.typeck(base.hir_id.owner).type_dependent_def_id(base.hir_id) {
+      // In overloaded indexing the call yields a reference to the
+      // selected element. The explicit dereference of that element can
+      // be lowered into a macro's argument borrow through another temp.
+      self.index_call(brackets, method)
+    } else {
+      self.deref_site(e.span, |p| {
+        p.local == local && p.projection.split_last().is_some_and(|(last, prefix)| {
+          *last == ProjectionElem::Deref && prefix.iter().any(|part| {
+            matches!(part, ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. })
+          })
+        })
+      })
+    };
+    let Some(at) = site else { return };
     let Some(text) = self.snippet(place) else { return };
-    self.note_at(hash, e.span, hover_messages::approx_note_element_ref(&text));
+    self.note_at_line(hash, self.mir_body.source_info(at).span, NoteEvent::Access, hover_messages::approx_note_element_ref(&text));
   }
 
-  /// `let f = || …;` with captures (#133, #278, #347): what f captures
-  /// is drawn; what its body does where f is called isn't (an `Fn` /
-  /// `FnMut` closure's calls aren't drawn at all).
-  /// `let fut = async { … };` (#135): the block's body isn't drawn.
+  /// The call selecting the element of the resolved receiver.
+  fn index_call(&self, brackets: Span, method: rustc_hir::def_id::DefId) -> Option<Location> {
+    // THIR gives this call the brackets' span. The full index expression
+    // also contains any nested index calls used to calculate its operand.
+    let mut calls = self.mir_body.basic_blocks.iter_enumerated().filter_map(|(bb, data)| {
+      let term = data.terminator();
+      let TerminatorKind::Call { func, .. } = &term.kind else { return None };
+      let at = self.mir_body.terminator_loc(bb);
+      (brackets.source_equal(term.source_info.span) && func.const_fn_def()?.0 == method && self.runs_at(at)).then_some(at)
+    });
+    let at = calls.next()?;
+    calls.next().is_none().then_some(at)
+  }
+
+  /// Captures may have a picture while uses in the closure or future
+  /// have none. The note belongs to the stored closure or call result.
   fn closure_let_note(&mut self, l: &'tcx LetStmt<'tcx>) {
     let (PatKind::Binding(..), Some(init)) = (l.pat.kind, l.init) else { return };
     let Some((hash, name)) = self.column_of_binding(l.pat.hir_id) else { return };
-    let text = match init.kind {
-      ExprKind::Closure(c) => match c.kind {
-        // Not an FnOnce closure: its call is drawn, with what happens to
-        // what it captured by value ("t … is dropped during the call").
-        ClosureKind::Closure if !self.tcx.closure_captures(c.def_id).is_empty() && !self.is_fn_once(init) => hover_messages::approx_note_closure(&name),
-        ClosureKind::Coroutine(CoroutineKind::Desugared(CoroutineDesugaring::Async, _)) => hover_messages::approx_note_async_block(&name),
-        _ => return,
-      },
-      // `let fut = get(&s);` with `get` an async fn.
-      ExprKind::Call(callee, _) => {
-        let ExprKind::Path(ref qpath) = callee.kind else { return };
-        let Res::Def(_, def_id) = self.tcx.typeck(callee.hir_id.owner).qpath_res(qpath, callee.hir_id) else { return };
-        if !matches!(self.tcx.def_kind(def_id), rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn) || !self.tcx.asyncness(def_id).is_async() {
-          return;
-        }
-        hover_messages::approx_note_async_call(&name, self.tcx.item_name(def_id).as_str())
+    let Some(&local) = self.raps.bindings.declarations.get(&l.pat.hir_id) else { return };
+    let (event, text) = match init.kind {
+      ExprKind::Closure(c) => {
+        let stored = self.assignments().any(|(_, dest, rhs)| {
+          dest.as_local() == Some(local) && matches!(rhs, Rvalue::Aggregate(kind, _)
+            if matches!(**kind, AggregateKind::Closure(id, _) | AggregateKind::Coroutine(id, _)
+              if id == c.def_id.to_def_id()))
+        });
+        if !stored { return; }
+        let text = match c.kind {
+          ClosureKind::Closure if !self.tcx.closure_captures(c.def_id).is_empty() && !self.is_fn_once(init) => hover_messages::approx_note_closure(&name),
+          ClosureKind::Coroutine(CoroutineKind::Desugared(CoroutineDesugaring::Async, _)) => hover_messages::approx_note_async_block(&name),
+          _ => return,
+        };
+        (NoteEvent::Initialize, text)
+      }
+      ExprKind::Call(..) | ExprKind::MethodCall(..) => {
+        let Some(def_id) = self.mir_body.basic_blocks.iter_enumerated().find_map(|(bb, data)| {
+          let term = data.terminator();
+          let TerminatorKind::Call { func, destination, .. } = &term.kind else { return None };
+          if destination.as_local() != Some(local) || !init.span.source_equal(term.source_info.span)
+            || !self.runs_at(self.mir_body.terminator_loc(bb))
+          {
+            return None;
+          }
+          let (id, _) = func.const_fn_def()?;
+          self.tcx.asyncness(id).is_async().then_some(id)
+        }) else { return };
+        (NoteEvent::Initialize, hover_messages::approx_note_async_call(&name, self.tcx.item_name(def_id).as_str()))
       }
       _ => return,
     };
-    self.note_at(hash, l.span, text);
+    self.note_at_line(hash, self.definition_span(local), event, text);
   }
 
   /// Whether `e` is a closure rustc inferred to be `FnOnce`.
-  fn is_fn_once(&self, e: &'tcx Expr<'tcx>) -> bool {
+  fn is_fn_once(&self, e: &Expr<'_>) -> bool {
     match self.tcx.typeck(e.hir_id.owner).expr_ty(e).kind() {
       rustc_middle::ty::Closure(_, args) => args.as_closure().kind() == rustc_middle::ty::ClosureKind::FnOnce,
       _ => false,
@@ -276,32 +373,37 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return;
     }
     let fn_name = self.tcx.item_name(owner.to_def_id()).as_str().to_owned();
-    // (rustc gives an async fn's parameters spans of its desugaring.)
-    let mut ids: Vec<rustc_hir::HirId> = Vec::new();
-    for param in body.params {
-      param.pat.walk_always(|p| if matches!(p.kind, PatKind::Binding(..)) { ids.push(p.hir_id) });
-    }
-    for id in ids {
-      let Some((hash, _)) = self.column_of_binding(id) else { continue };
-      let span = self.tcx.def_span(owner).to(body.value.span);
-      self.note_at(hash, span, hover_messages::approx_note_async_fn(&fn_name));
+    // The outer MIR takes these arguments and constructs a coroutine.
+    // In particular, the named bindings in the source pattern need not
+    // be the locals used inside the desugared coroutine body.
+    for (param, local) in body.params.iter().zip(self.mir_body.args_iter()) {
+      let span = self.definition_span(local);
+      param.pat.walk_always(|p| {
+        if let PatKind::Binding(..) = p.kind {
+          if let Some((hash, _)) = self.column_of_binding(p.hir_id) {
+            self.note_at_line(hash, span, NoteEvent::Parameter, hover_messages::approx_note_async_fn(&fn_name));
+          }
+        }
+      });
     }
   }
 
   /// A loop is drawn as one pass through its body (#853). One note per
   /// loop, on the first dot of a pass (see `ApproxNote::Loop`).
-  fn loop_notes(&mut self, body: &'tcx rustc_hir::Body<'tcx>) {
-    let mut loops = Loops(Vec::new());
-    loops.visit_expr(body.value);
+  fn loop_notes(&mut self, exprs: &[&'tcx Expr<'tcx>]) {
     // Each loop the user wrote, with its lines.
     let mut found: Vec<(&'tcx Expr<'tcx>, usize, usize)> = Vec::new();
-    for l in loops.0 {
+    for &l in exprs {
+      if !matches!(l.kind, ExprKind::Loop(..)) {
+        continue;
+      }
       // A loop a macro wrote (not `for` / `while`, which rustc lowers
       // to `loop` with a desugaring mark) isn't the user's code.
       if l.span.from_expansion() && l.span.desugaring_kind().is_none() {
         continue;
       }
-      found.push((l, span_to_line(&l.span, &self.tcx), span_end_line(&l.span, &self.tcx)));
+      let Some(boundary) = self.body_facts.and_then(|f| f.loops.get(&l.hir_id)) else { continue };
+      found.push((l, boundary.row, span_end_line(&l.span, &self.tcx)));
     }
     for &(l, head, end) in &found {
       let ExprKind::Loop(block, _, source, _) = l.kind else { continue };
@@ -328,15 +430,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let declares = !bindings.0.is_empty();
       let mut locals: Vec<u64> = Vec::new();
       let mut head_cols: Vec<u64> = Vec::new();
+      let storage = if matches!(source, LoopSource::ForLoop) {
+        self.tcx.hir_parent_iter(l.hir_id).find_map(|(_, node)| {
+          let rustc_hir::Node::Expr(parent) = node else { return None };
+          let ExprKind::Match(constructor, [arm], rustc_hir::MatchSource::ForLoopDesugar) = parent.kind else { return None };
+          (arm.body.hir_id == l.hir_id).then_some(constructor)
+        }).and_then(|constructor| self.iterator_storage(constructor))
+      } else {
+        None
+      };
       for p in &bindings.0 {
-        let name = binding_name(&self.tcx, p.hir_id);
-        let Some(rd) = self.raps.get(&name) else { continue };
+        let Some(rd) = self.raps.binding(p.hir_id) else { continue };
         let hash = *rd.rap.hash();
         if !locals.contains(&hash) {
           locals.push(hash);
         }
         // A `for` loop's pattern, bound on its first line on every pass.
-        if matches!(source, LoopSource::ForLoop) && span_to_line(&p.span, &self.tcx) == head && !head_cols.contains(&hash) {
+        if self.raps.bindings.declarations.get(&p.hir_id).is_some_and(|local| {
+            storage.is_some_and(|it| it.bindings.iter().any(|b| b.local == *local))
+          })
+          && !head_cols.contains(&hash)
+        {
           head_cols.push(hash);
         }
       }
