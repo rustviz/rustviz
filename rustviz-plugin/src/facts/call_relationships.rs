@@ -64,7 +64,7 @@ pub(crate) struct Capture {
     pub aggregate: Location,
     pub row: usize,
     #[serde(skip)]
-    closure: DefId,
+    pub(crate) closure: DefId,
     closure_body: String,
     pub field: usize,
     pub transfer: CaptureTransfer,
@@ -107,7 +107,20 @@ pub(crate) enum ReturnSource {
         projection: Vec<Projection>,
     },
     Constant,
+    /// This return reaches a different variant, with no value at this path.
+    Absent,
     Unknown,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct ReturnPayload {
+    pub projection: Vec<Projection>,
+    /// Presentation label from the variant's definition, when this path
+    /// names a reference in an enum's payload.
+    pub variant: String,
+    pub sources: BTreeSet<ReturnSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lender: Option<super::EndPlace>,
 }
 
 #[derive(Serialize)]
@@ -119,9 +132,17 @@ pub(crate) struct CallRelationship {
     pub can_return: bool,
     callee: Option<String>,
     pub return_sources: Option<BTreeSet<ReturnSource>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub return_payloads: Vec<ReturnPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_lender: Option<super::EndPlace>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub holders: Option<super::CallHolders>,
     pub capture_fates: Vec<BTreeSet<CaptureFate>>,
     #[serde(skip)]
     pub borrowed_captures: BTreeSet<usize>,
+    #[serde(skip)]
+    pub retained_captures: std::collections::HashSet<DefId>,
     #[serde(skip)]
     pub receiver_loans: BTreeSet<usize>,
     #[serde(skip)]
@@ -232,7 +253,7 @@ pub(super) fn collect<'tcx>(
                         )
                     };
                 let source_place = source.and_then(|place| {
-                    Some(CapturePlace { local: place.local.index(), projection: projection(place)? })
+                    Some(CapturePlace { local: place.local.index(), projection: projection(&place.projection)? })
                 });
                 let source = source.and_then(|place| super::call_wording::binding_place(body, bindings, place));
                 facts.captures.push(Capture {
@@ -251,7 +272,7 @@ pub(super) fn collect<'tcx>(
         if !runs.contains(&bb) {
             continue;
         }
-        let TerminatorKind::Call { func, target, .. } = &data.terminator().kind else { continue };
+        let TerminatorKind::Call { func, args, destination, target, .. } = &data.terminator().kind else { continue };
         let direct = func.const_fn_def();
         let kind = kind(tcx, direct.map(|(def, _)| def));
         let closure = direct.filter(|_| kind.is_callable()).and_then(|(_, args)| match args.types().next()?.kind() {
@@ -266,25 +287,63 @@ pub(super) fn collect<'tcx>(
             .or_else(|| callee.filter(|def| tcx.trait_of_assoc(*def).is_none()))
             .and_then(DefId::as_local)
             .filter(|id| tcx.hir_maybe_body_owned_by(*id).is_some());
-        let (return_sources, (capture_fates, borrowed_captures)) = local
+        let (return_sources, mut return_payloads, (capture_fates, borrowed_captures)) = local
             .map(|id| {
                 summaries
                     .entry((id, kind == CallKind::FnOnce))
                     .or_insert_with(|| {
                         let callee = &rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts(tcx, id).body;
                         let blocks = normal_blocks(callee);
-                        let sources = return_sources(tcx, callee, &blocks, None);
+                        let sources = return_sources(tcx, callee, &blocks, None, Place::from(RETURN_PLACE));
+                        let payloads = return_payloads(tcx, callee, &blocks);
                         let fates = if closure.is_some() && kind == CallKind::FnOnce {
                             capture_fates(tcx, callee, &blocks)
                         } else {
                             Default::default()
                         };
-                        (sources, fates)
+                        (sources, payloads, fates)
                     })
                     .clone()
             })
             .unwrap_or_default();
         let location = body.terminator_loc(bb);
+        let lender = |sources: &BTreeSet<ReturnSource>, result: Place<'tcx>| {
+            let mut present = sources.iter().filter(|source| **source != ReturnSource::Absent);
+            let ReturnSource::Input { index, projection, string_contents } = present.next()? else { return None };
+            if present.next().is_some()
+                || !matches!(projection.as_slice(), [] | [Projection::Deref])
+                || kind != CallKind::Direct
+            {
+                return None;
+            }
+            let mut arg = args.get(*index)?.node.place()?;
+            if !*string_contents && !projection.is_empty() {
+                let referent = |place: Place<'tcx>| place.ty(&body.local_decls, tcx).ty.builtin_deref(true)
+                    .map(|ty| tcx.erase_and_anonymize_regions(ty));
+                // Deref can reborrow the referent or load a reference
+                // stored in it. Only the first points into the argument.
+                if referent(arg) != referent(result) { return None; }
+            }
+            let mut at = location;
+            let place = loop {
+                let (issue, place) = operand_borrow(body, at, arg)?;
+                if !place.is_indirect() { break place; }
+                if place.projection.as_slice() != [ProjectionElem::Deref] { return None; }
+                arg = Place::from(place.local);
+                at = issue;
+            };
+            let name = super::call_wording::binding_place(body, bindings, place)?;
+            Some(super::EndPlace::new(tcx, place, name))
+        };
+        let return_lender = if destination.ty(&body.local_decls, tcx).ty.is_ref() {
+            return_sources.as_ref().and_then(|sources| lender(sources, *destination))
+        } else {
+            None
+        };
+        for payload in &mut return_payloads {
+            payload.lender = project(tcx, body, *destination, &payload.projection)
+                .and_then(|place| lender(&payload.sources, place));
+        }
         facts.calls.push(CallRelationship {
             location,
             row: row(location),
@@ -292,8 +351,12 @@ pub(super) fn collect<'tcx>(
             can_return: target.is_some() && (local.is_none() || return_sources.is_some()),
             callee: callee.map(|id| tcx.def_path_str(id)),
             return_sources: target.and(return_sources),
+            return_payloads: if target.is_some() { return_payloads } else { Vec::new() },
+            return_lender: target.and(return_lender),
+            holders: None,
             capture_fates,
             borrowed_captures,
+            retained_captures: Default::default(),
             receiver_loans: BTreeSet::new(),
             receiver_borrow_ends: false,
         });
@@ -301,17 +364,85 @@ pub(super) fn collect<'tcx>(
     facts
 }
 
-fn projection(place: Place<'_>) -> Option<Vec<Projection>> {
-    place
-        .projection
-        .iter()
-        .map(|e| match e {
+pub(super) fn projection(steps: &[rustc_middle::mir::PlaceElem<'_>]) -> Option<Vec<Projection>> {
+    steps.iter().map(|e| match e {
             ProjectionElem::Deref => Some(Projection::Deref),
             ProjectionElem::Field(field, _) => Some(Projection::Field(field.index())),
             ProjectionElem::Downcast(_, variant) => Some(Projection::Variant(variant.index())),
             _ => None,
         })
         .collect()
+}
+
+pub(super) fn project<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    mut place: Place<'tcx>,
+    steps: &[Projection],
+) -> Option<Place<'tcx>> {
+    for step in steps {
+        let ty = place.ty(&body.local_decls, tcx);
+        let elem = match *step {
+            Projection::Deref if ty.ty.builtin_deref(true).is_some() => ProjectionElem::Deref,
+            Projection::Variant(i) => {
+                let variant = ty.ty.ty_adt_def()?.variants().get(rustc_abi::VariantIdx::from_usize(i))?;
+                ProjectionElem::Downcast(Some(variant.name), i.into())
+            }
+            Projection::Field(i) => {
+                let field = match ty.ty.kind() {
+                    TyKind::Adt(def, args) => def.variant(ty.variant_index.unwrap_or(rustc_abi::FIRST_VARIANT))
+                        .fields.get(rustc_abi::FieldIdx::from_usize(i))?.ty(tcx, args),
+                    TyKind::Tuple(fields) => fields.get(i).copied()?,
+                    _ => return None,
+                };
+                ProjectionElem::Field(i.into(), field)
+            }
+            _ => return None,
+        };
+        place = place.project_deeper(&[elem], tcx);
+    }
+    Some(place)
+}
+
+/// Reference leaves in enum payloads. The compiler's variant and field
+/// indices identify the slot even when different variants use the same
+/// field name and lifetime.
+fn return_payloads<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    blocks: &BTreeSet<BasicBlock>,
+) -> Vec<ReturnPayload> {
+    let TyKind::Adt(def, args) = *body.return_ty().kind() else { return Vec::new() };
+    if !def.is_enum() { return Vec::new(); }
+    let mut work = Vec::new();
+    for (index, variant) in def.variants().iter_enumerated().rev() {
+        let base = Place::from(RETURN_PLACE).project_deeper(&[ProjectionElem::Downcast(Some(variant.name), index)], tcx);
+        for (field, ty) in variant.fields.iter_enumerated().rev() {
+            work.push((base.project_deeper(&[ProjectionElem::Field(field, ty.ty(tcx, args))], tcx), variant.name.to_string()));
+        }
+    }
+    let mut results = Vec::new();
+    while let Some((place, variant)) = work.pop() {
+        match place.ty(&body.local_decls, tcx).ty.kind() {
+            TyKind::Ref(..) => {
+                if let Some(sources) = return_sources(tcx, body, blocks, None, place) {
+                    results.push(ReturnPayload { projection: projection(&place.projection).unwrap(), variant, sources, lender: None });
+                }
+            }
+            TyKind::Tuple(fields) => {
+                for (i, ty) in fields.iter().enumerate().rev() {
+                    work.push((place.project_deeper(&[ProjectionElem::Field(i.into(), ty)], tcx), variant.clone()));
+                }
+            }
+            TyKind::Adt(def, args) if def.is_struct() => {
+                for (i, field) in def.non_enum_variant().fields.iter_enumerated().rev() {
+                    work.push((place.project_deeper(&[ProjectionElem::Field(i, field.ty(tcx, args))], tcx), variant.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+    results
 }
 
 fn starts_with<'tcx>(place: Place<'tcx>, prefix: Place<'tcx>) -> bool {
@@ -393,11 +524,12 @@ fn return_sources<'tcx>(
     body: &Body<'tcx>,
     blocks: &BTreeSet<BasicBlock>,
     span: Option<rustc_span::Span>,
+    result: Place<'tcx>,
 ) -> Option<BTreeSet<ReturnSource>> {
     let mut work: Vec<_> = blocks
         .iter()
         .filter(|&&bb| matches!(body[bb].terminator().kind, TerminatorKind::Return))
-        .map(|&bb| (body.terminator_loc(bb), Place::from(RETURN_PLACE), span.is_none(), false, false))
+        .map(|&bb| (body.terminator_loc(bb), result, span.is_none(), false, false))
         .collect();
     let exposed: Vec<_> = blocks
         .iter()
@@ -444,6 +576,37 @@ fn return_sources<'tcx>(
             selected |= span.is_some_and(|s| st.source_info.span.source_equal(s));
             place = match a.1 {
                 Rvalue::Use(Operand::Copy(p) | Operand::Move(p)) => p.project_deeper(suffix, tcx),
+                Rvalue::Aggregate(ref kind, ref operands) if !suffix.is_empty() => {
+                    let fields = match (&**kind, suffix) {
+                        (AggregateKind::Adt(def, actual, ..), [ProjectionElem::Downcast(_, variant), rest @ ..])
+                            if tcx.adt_def(*def).is_enum() =>
+                        {
+                            if actual != variant {
+                                sources.insert(ReturnSource::Absent);
+                                continue 'trace;
+                            }
+                            rest
+                        }
+                        (AggregateKind::Adt(def, ..), rest) if tcx.adt_def(*def).is_struct() => rest,
+                        (AggregateKind::Tuple, rest) => rest,
+                        _ => &[],
+                    };
+                    let operand = match fields {
+                        [ProjectionElem::Field(field, _), rest @ ..] => operands.get(*field).map(|op| (op, rest)),
+                        _ => None,
+                    };
+                    match operand {
+                        Some((op, rest)) if op.place().is_some() => op.place().unwrap().project_deeper(rest, tcx),
+                        Some((Operand::Constant(_), [])) => {
+                            sources.insert(ReturnSource::Constant);
+                            continue 'trace;
+                        }
+                        _ => {
+                            sources.insert(ReturnSource::Unknown);
+                            continue 'trace;
+                        }
+                    }
+                }
                 Rvalue::Ref(_, _, p) if suffix.is_empty() => {
                     address = true;
                     p
@@ -473,7 +636,7 @@ fn return_sources<'tcx>(
             let source = body
                 .args_iter()
                 .position(|l| l == place.local)
-                .zip(projection(place))
+                .zip(projection(&place.projection))
                 .map(|(index, projection)| {
                     if tcx.is_closure_like(body.source.def_id()) && index == 0 {
                         let fields = if body.local_decls[place.local].ty.is_ref() {
@@ -543,7 +706,7 @@ pub(crate) fn return_arguments<'tcx>(
     body: &Body<'tcx>,
     span: Option<rustc_span::Span>,
 ) -> Option<BTreeSet<Option<rustc_middle::mir::Local>>> {
-    return_sources(tcx, body, &normal_blocks(body), span)?
+    return_sources(tcx, body, &normal_blocks(body), span, Place::from(RETURN_PLACE))?
         .into_iter()
         .map(|source| match source {
             ReturnSource::Input { index, .. } => body.args_iter().nth(index).map(Some),

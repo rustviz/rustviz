@@ -1600,6 +1600,12 @@ pub struct ArgTie {
     pub reference_source: Option<(String, Option<&'static str>, bool)>,
     /// Body return assignments directly derive from each tied reference parameter.
     pub returns_alternatives: bool,
+    /// An input the callee's body always returns and its known caller place.
+    pub proven_lender: Option<String>,
+    /// Return-variant payloads with a single proven lender in each case.
+    pub variant_lenders: Vec<(String, String)>,
+    /// The call's receiver lifetime accepts this loan without a write.
+    pub storage_constraint_only: bool,
     /// The resolved callee constructs a variant with the argument in it.
     pub constructs_variant: bool,
 }

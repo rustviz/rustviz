@@ -3999,9 +3999,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let terminal = self.emitting_expr.and_then(|e| crate::facts::terminal_argument(self.tcx, self.mir_body, e.span));
     let mut stored_in = StoredIn::default();
     if is_reborrow && !ends_at_call && matches!(implicit, ImplicitRef::Receiver { .. }) {
-      if let Some(stores) = self.emitting_expr.and_then(|call| self.body_facts?.argument_stores.get(&(call.span.with_parent(None), 0))) {
-        if let [(holder, _)] = stores.as_slice() {
-          stored_in.0 = Some(holder.clone());
+      if let Some(holders) = self.emitting_expr.and_then(|call| self.call_relationship(call)?.holders.as_ref()) {
+        let mut stores = holders.stores.iter().filter(|s| s.argument == 0);
+        if let Some(store) = stores.next().filter(|_| stores.next().is_none()) {
+          stored_in.0 = Some(store.destination.name.clone());
         }
       }
     }
@@ -4972,7 +4973,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         if !matches!(p.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
           return None;
         }
-        match self.loans_issued_in_kept_after_call(p.span, closure.span) {
+        match self.call_relationship(p).filter(|call| call.can_return).map(|call|
+          call.retained_captures.contains(&c.def_id.to_def_id())) {
           Some(false) => kept = false,
           // `boxed(|x| … self.n)` returning `Box<dyn Fn + 'a>`: the
           // result doesn't name the closure but holds its borrows (#1104).
@@ -5255,7 +5257,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     }
   }
 
-  fn call_argument_site(&self, arg: &Expr<'tcx>) -> Option<(rustc_span::Span, usize)> {
+  fn enclosing_call_argument(&self, arg: &Expr<'tcx>) -> Option<(&'tcx Expr<'tcx>, usize)> {
     let rustc_hir::Node::Expr(call) = self.tcx.parent_hir_node(arg.hir_id) else { return None };
     let index = match call.kind {
       ExprKind::Call(_, args) => args.iter().position(|a| a.hir_id == arg.hir_id),
@@ -5263,7 +5265,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         std::iter::once(receiver).chain(args.iter()).position(|a| a.hir_id == arg.hir_id),
       _ => None,
     };
-    Some((call.span.with_parent(None), index?))
+    Some((call, index?))
+  }
+
+  fn call_argument_site(&self, arg: &Expr<'tcx>) -> Option<(rustc_span::Span, usize)> {
+    let (call, index) = self.enclosing_call_argument(arg)?;
+    Some((call.span.with_parent(None), index))
   }
 
   /// Draw a call's store only when the actual MIR source operand carries
@@ -5271,8 +5278,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   fn argument_stored_borrows(&mut self, arg: &'tcx Expr<'tcx>, from: &ResourceTy, line: usize, issued: Option<usize>)
       -> Vec<(ResourceTy, ResourceTy, usize, usize)> {
     let Some(facts) = self.body_facts else { return Vec::new() };
-    let Some(site) = self.call_argument_site(arg) else { return Vec::new() };
-    let Some(stores) = facts.argument_stores.get(&site) else { return Vec::new() };
+    let Some((call, argument)) = self.enclosing_call_argument(arg) else { return Vec::new() };
+    let Some(holders) = self.call_relationship(call).and_then(|call| call.holders.as_ref()) else { return Vec::new() };
     let from_call = match arg.kind {
       ExprKind::MethodCall(..) => true,
       ExprKind::Call(callee, _) => !crate::visitor::is_ctor_path(callee, self.tcx.typeck(arg.hir_id.owner)),
@@ -5286,15 +5293,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       return Vec::new();
     };
     let mut out = Vec::new();
-    for (holder, ids) in stores {
-      let Some(place) = self.raps.get(holder).map(|d| &d.rap) else { continue };
+    for store in holders.stores.iter().filter(|s| s.argument == argument) {
+      let local = Local::from_usize(store.destination.local);
+      let Some(place) = self.raps.place(local, &store.destination.name).map(|d| &d.rap) else { continue };
+      // A non-reference member is part of the containing value's drop
+      // and transfer history. Reference slots have their own arrows.
+      let place = if !place.is_ref() && place.is_member() && store.target_argument.projection != store.destination.projection {
+        self.raps.place(local, &store.target_argument.name).map_or(place, |d| &d.rap)
+      } else {
+        place
+      };
       for lender in &lenders {
         let ResourceTy::Value(l) = lender else { continue };
         if l.is_fn() { continue; }
-        for loan in facts.loans.iter().filter(|loan| ids.contains(&loan.loan) && loan.lender == *l.name()) {
+        for loan in facts.loans.iter().filter(|loan| store.loans.contains(&loan.loan) && loan.lender == *l.name()) {
           if !from_call && issued != Some(loan.loan) { continue; }
           let Some(end) = loan.end_lines.last().copied().filter(|&end| end > line) else { continue };
-          let dest = ResourceTy::Index(place.clone(), holder.clone(), PlaceWrite::Update);
+          let dest = ResourceTy::Index(place.clone(), place.name().clone(), PlaceWrite::Update);
           out.push((lender.clone(), dest, end, loan.loan));
         }
       }
@@ -6890,6 +6905,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         Mutability::Mut => {
           let ends_at_call = self.call_argument_site(arg).is_some_and(|key| self.facts.is_some_and(|b| b.short_call_borrows.contains(&key)));
           self.add_pass_by_mref_ev_deep(line_num, to_ro, from_ro.clone(), is_reborrow, ends_at_call, ImplicitRef::No, of_ref_var, deep);
+          if let Some(note) = self.through_argument_store_note(arg, &fn_name) {
+            self.row_layout.call_store_notes.insert(id, note);
+          }
           // `grow(&mut r.name)` with `r = &mut p`: the call can modify
           // p.name, drawn on its column too (#1216).
           self.write_field_behind_ref(&from_ro, arg, line_num);
@@ -6903,6 +6921,23 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
     }
 
+  }
+
+  /// The call transferred the reference already in this slot.
+  fn through_argument_store_note(&self, arg: &Expr<'tcx>, call_name: &str) -> Option<String> {
+    let (call, argument) = self.enclosing_call_argument(arg)?;
+    let holders = self.call_relationship(call)?.holders.as_ref()?;
+    let mut stores = holders.stores.iter().filter(|s|
+      s.argument == argument && s.replaces && s.through_source && s.reference_value);
+    let store = stores.next().filter(|_| stores.next().is_none())?;
+    let source = &store.source;
+    let destination = &store.destination;
+    if source.name.is_empty() || destination.name.is_empty() { return None; }
+    let facts = self.body_facts?;
+    let lender = store.effective_loan.and_then(|id| facts.loans.iter().find(|loan| loan.loan == id))
+      .filter(|loan| loan.through.is_none() && self.raps.place(loan.lender_local.unwrap_or(rustc_middle::mir::RETURN_PLACE), &loan.lender).is_some())
+      .map(|loan| loan.lender.as_str());
+    Some(crate::svg_generator::hover_messages::reference_slot_transfer(call_name, &source.name, &destination.name, lender))
   }
 
   /// `get_ref_data` plus, when the lender has no column, the
@@ -8212,7 +8247,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       // borrow yet; `record_receiver_store` adds each one.
       // So is a value a branch builds around a borrow that isn't known
       // until the branch is visited (`add_arm_holder_lenders`, #1435).
-      if self.filled_with_borrows_later(init, ty) || self.holder_lenders_in_branch(init, ty) {
+      let receives_store = self.raps.root_local(name).is_some_and(|local| {
+        self.body_facts.is_some_and(|facts| facts.call_relationships.calls.iter().any(|call| {
+          call.holders.as_ref().and_then(|holders| holders.receiver.as_ref()).is_some_and(|receiver| {
+            receiver.place.local == local.index() && receiver.place.name == *name
+          })
+        }))
+      });
+      if receives_store || self.assigned_borrows_later(init, ty) || self.holder_lenders_in_branch(init, ty) {
         self.mark_holder(name);
       }
       return;
@@ -8388,8 +8430,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// .collect()` gets v, which `iter` borrows, though the result holds
   /// only the references stored in v (`copied` and `collect` keep the
   /// items, `&'a String`, not the iterator's borrow of v). Keep only
-  /// those whose loans rustc's borrow checker puts in the lifetimes of
-  /// `name`'s type (`loans_held_by`), as for a reference result
+  /// those whose loans rustc's borrow checker puts in the resulting
+  /// slot on this call's normal edge, as for a reference result
   /// (`narrow_call_result_lenders`, #756). A lender with no loan in
   /// this body (a reference, a place behind one, a variable of another
   /// body) stays. Returns whether a lender was dropped (#1094).
@@ -8406,14 +8448,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     if lenders.is_empty() || !matches!(init.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
       return false;
     }
-    let mut parts = name.split('.');
-    let base = parts.next().unwrap_or_default();
-    let fields: Vec<&str> = parts.collect();
-    let Some(held) = self.loans_held_by(base, &fields) else { return false };
+    let Some(facts) = self.body_facts else { return false };
+    let Some(result) = self.call_relationship(init).and_then(|call| call.holders.as_ref()?.result.as_ref()) else { return false };
+    let Some(slot) = result.slots.iter().find(|slot| {
+      slot.place.name == name && self.raps.place(Local::from_usize(slot.place.local), name).is_some()
+    }) else { return false };
     let kept = |l: &ResourceTy| match l {
       ResourceTy::Value(r) if !r.is_ref() => {
-        let lb = r.name().split('.').next().unwrap_or_default();
-        held.contains_key(lb) || !self.is_body_local(lb)
+        let local = self.raps.root_local(r.name());
+        local.is_none() || facts.loans.iter().any(|loan| {
+          loan.lender_local == local && slot.loans.contains(&loan.loan)
+            && (loan.lender == *r.name() || loan.columns.contains(r.name()))
+        })
       }
       _ => true,
     };
@@ -8527,49 +8573,40 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// returned, and that closure holds the reference its capture made,
   /// so `s` stays borrowed while `g` is in use, not just during the
   /// call (#686). rustc's facts say which loans `g` holds once the
-  /// call has returned (`loans_kept_after_call`). Each is drawn as a
+  /// call has returned. Each is drawn as a
   /// capture borrow into `g` that returns where the loan ends, as for
   /// `let f = || s.len();`. Called after `match_rhs` drew `g`'s value
   /// arriving from the call.
   pub fn draw_kept_closure_borrows(&mut self, name: &str, init: &'tcx Expr<'tcx>) {
-    let (func, args): (String, Vec<&'tcx Expr<'tcx>>) = match init.kind {
-      ExprKind::Call(f, args) => match hirid_to_var_name(f.hir_id, &self.tcx) {
-        Some(n) => (n, args.iter().collect()),
+    let func = match init.kind {
+      ExprKind::Call(f, _) => match hirid_to_var_name(f.hir_id, &self.tcx) {
+        Some(n) => n,
         None => return,
       },
-      ExprKind::MethodCall(seg, rcvr, args, _) =>
-        (seg.ident.as_str().to_owned(), std::iter::once(rcvr).chain(args.iter()).collect()),
+      ExprKind::MethodCall(seg, ..) => seg.ident.as_str().to_owned(),
       _ => return,
     };
     let Some(to_rap) = self.raps.get(name).map(|rd| rd.rap.to_owned()) else { return };
-    if !to_rap.is_closure() {
-      return;
-    }
+    if !to_rap.is_closure() { return; }
+    let Some(facts) = self.body_facts else { return };
+    let Some(result) = self.call_relationship(init).and_then(|call| call.holders.as_ref()?.result.as_ref()) else { return };
+    let Some(slot) = result.slots.iter().find(|slot| self.raps.place(
+      Local::from_usize(slot.place.local), &slot.place.name
+    ).is_some_and(|r| r.rap.hash() == to_rap.hash())) else { return };
     let to = ResourceTy::Value(to_rap);
     let line = expr_to_line(init, &self.tcx);
-    for k in self.loans_kept_after_call(init.span) {
-      if k.holder != name {
-        continue;
-      }
-      // A capture made by a closure literal in the arguments is drawn
-      // on the captured place's column (`p.name`), as `let f = || ..`
-      // draws it, when it's the closure's only capture of that variable.
-      let literal_capture = args.iter().find_map(|a| match a.kind {
-        ExprKind::Closure(c) if a.span.contains(k.span) => {
-          let typeck = self.tcx.typeck(c.def_id);
-          let caps: Vec<_> = typeck.closure_min_captures_flattened(c.def_id)
-            .filter(|cap| matches!(cap.info.capture_kind, rustc_middle::ty::UpvarCapture::ByRef(_)))
-            .filter(|cap| matches!(cap.place.base, rustc_middle::hir::place::PlaceBase::Upvar(u)
-              if binding_name(&self.tcx, u.var_path.hir_id) == k.lender))
-            .collect();
-          match caps.as_slice() {
-            [cap] => self.capture_rap(&cap.place, &k.lender),
-            _ => None,
-          }
-        }
-        _ => None,
-      });
-      let Some(lender) = literal_capture.or_else(|| self.raps.get(&k.lender).map(|rd| rd.rap.to_owned())) else { continue };
+    for loan in facts.loans.iter().filter(|loan| slot.loans.contains(&loan.loan) && loan.source == "borrow") {
+      let Some(local) = loan.lender_local else { continue };
+      if local.index() == slot.place.local { continue; }
+      let through_ref = loan.through.is_some();
+      let is_mut = loan.kind == "mut";
+      let column = loan.through.as_ref().unwrap_or(&loan.lender);
+      let capture = facts.call_relationships.captures.iter().find(|capture|
+        loan.issue.is_some() && capture.issue == loan.issue).and_then(|capture| capture.source.as_ref());
+      let Some(lender) = capture.and_then(|column| self.raps.place(local, column))
+        .or_else(|| self.raps.place(local, column))
+        .or_else(|| self.raps.place(local, facts.bindings.locals.get(&local)?))
+        .map(|r| r.rap.clone()) else { continue };
       if lender.is_fn() {
         continue;
       }
@@ -8579,36 +8616,27 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
         lenders: vec![lender.name().to_owned()],
         also_unnamed: false,
         tie: ArgTie::default(),
-        carrier: ViaCarrier::ReturnedClosure { mutable: k.is_mut, through_ref: k.through_ref },
+        carrier: ViaCarrier::ReturnedClosure { mutable: is_mut, through_ref },
         passed_on: Vec::new(),
       };
       let id = *self.unique_id;
       *self.unique_id += 1;
-      let ev = if k.is_mut {
-        ExternalEvent::MutableBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, break_alt: None, via: Some(via), id, of_ref_var: false }
+      let ev = if is_mut {
+        ExternalEvent::MutableBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: through_ref, break_alt: None, via: Some(via), id, of_ref_var: false }
       } else {
-        ExternalEvent::StaticBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: k.through_ref, break_alt: None, via: Some(via), id, of_ref_var: false }
+        ExternalEvent::StaticBorrow { from: from.clone(), to: to.clone(), is_partial: false, is_reborrow: through_ref, break_alt: None, via: Some(via), id, of_ref_var: false }
       };
       self.update_rap(&lender, line);
       self.add_external_event(line, ev);
       // add_ev maps (lhs, rhs) to a Die { from: rhs, to: lhs }: the
       // borrow goes back from g to s, as in the closure literal arm.
-      let die = if k.is_mut { Evt::MDie } else { Evt::SDie };
-      self.add_ev(k.end_line.max(line), die, from, to.clone(), false);
+      let die = if is_mut { Evt::MDie } else { Evt::SDie };
+      self.add_ev(loan.end_lines.last().copied().unwrap_or(line).max(line), die, from, to.clone(), false);
     }
   }
 
-  /// `let mut refs = Vec::new();` (a type that can hold references)
-  /// whose variable is later the receiver of a `&mut self` method that
-  /// can store a borrow into it (`refs.push(&s)`; see
-  /// `call_stores_into_receiver`, #392), or is later assigned a whole
-  /// new value (`let mut q: Option<&String> = None; q = Some(r);`,
-  /// #875): `reassign_holder` then records the new value's borrow.
-  ///
-  /// A field of a struct literal bound by a `let` (`let mut shelf =
-  /// Shelf { items: Vec::new() };`) is filled the same way through its
-  /// place (`shelf.items.push(w.as_str())`, #1096).
-  fn filled_with_borrows_later(&self, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) -> bool {
+  /// An initially empty holder can receive a borrowed value by assignment.
+  fn assigned_borrows_later(&self, init: &'tcx Expr<'tcx>, ty: Ty<'tcx>) -> bool {
     if ty.is_ref() || !ty.walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
       return false;
     }
@@ -8631,13 +8659,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
     };
     let PatKind::Binding(_, hir_id, _, None) = local.pat.kind else { return false };
-    struct StoreFinder<'v, 'a, 'tcx> {
-      ev: &'v ExprVisitor<'a, 'tcx>,
+    struct StoreFinder {
       local: rustc_hir::HirId,
       path: Vec<rustc_span::Symbol>,
       found: bool,
     }
-    impl<'v, 'a, 'tcx> rustc_hir::intravisit::Visitor<'tcx> for StoreFinder<'v, 'a, 'tcx> {
+    impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for StoreFinder {
       fn visit_expr(&mut self, e: &'tcx Expr<'tcx>) {
         // `x` itself, or the place `x.f.g` for `path` `[f, g]`.
         fn is_place(x: &Expr<'_>, local: rustc_hir::HirId, path: &[rustc_span::Symbol]) -> bool {
@@ -8648,17 +8675,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           }
         }
         let is_local = |x: &Expr<'_>| is_place(x, self.local, &self.path);
-        match e.kind {
-          ExprKind::MethodCall(_, rcvr, _, _) if is_local(rcvr) && self.ev.call_stores_into_receiver(e) => {
-            self.found = true;
-          }
-          ExprKind::Assign(lhs, _, _) if is_local(lhs) => self.found = true,
-          _ => {}
+        if let ExprKind::Assign(lhs, _, _) = e.kind {
+          self.found |= is_local(lhs);
         }
         rustc_hir::intravisit::walk_expr(self, e);
       }
     }
-    let mut finder = StoreFinder { ev: self, local: hir_id, path, found: false };
+    let mut finder = StoreFinder { local: hir_id, path, found: false };
     rustc_hir::intravisit::Visitor::visit_expr(&mut finder, self.hir_body.value);
     finder.found
   }
@@ -8667,18 +8690,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// stores `s`'s borrow in `refs`, which keeps `s` borrowed until
   /// refs's last use. Record `s` as one of refs's lenders and draw the
   /// borrow into `refs`.
-  pub fn record_receiver_store(&mut self, call: &'tcx Expr<'tcx>, rcvr: &ResourceAccessPoint, line: usize) {
-    if !rcvr.holds_borrow() {
-      return;
-    }
+  pub fn record_receiver_store(&mut self, call: &'tcx Expr<'tcx>, line: usize) {
     let ExprKind::MethodCall(seg, ..) = call.kind else { return };
-    let name = rcvr.name().to_owned();
     let Some(facts) = self.body_facts else { return };
-    let Some(inputs) = facts.receiver_loans.get(&(call.span.with_parent(None), name.clone())) else { return };
-    let inputs = self.receiver_input_loans(call, inputs);
-    let operands: Vec<_> = self.receiver_aggregate_operands(call).into_iter()
-      .filter(|b| b.loan.projected.is_none() || inputs.contains_key(&b.loan.loan)).collect();
+    let Some(receiver) = self.call_relationship(call).and_then(|call| call.holders.as_ref()?.receiver.as_ref()) else { return };
+    let name = &receiver.place.name;
+    let Some(rcvr) = self.raps.place(Local::from_usize(receiver.place.local), name).map(|r| r.rap.clone())
+      .filter(|r| r.holds_borrow()) else { return };
     use crate::facts::StoredOperand;
+    let mut inputs = BTreeMap::new();
+    for loan in &receiver.loans {
+      inputs.entry(loan.loan).and_modify(|op| {
+        if *op != loan.operand { *op = StoredOperand::Carrier; }
+      }).or_insert(loan.operand);
+    }
+    let operands: Vec<_> = self.aggregate_loan_operands(&receiver.operands, true).into_iter()
+      .filter(|b| b.loan.projected.is_none() || inputs.contains_key(&b.loan.loan)).collect();
     struct Store {
       place: ResourceTy,
       exclusive: bool,
@@ -8733,7 +8760,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       if s.binding { self.stored_ref_var_lends.insert((name.clone(), s.place.real_name())); }
     }
     let any_mut = stored.iter().any(|s| s.exclusive);
-    match self.borrow_map.get_mut(&name) {
+    match self.borrow_map.get_mut(name) {
       Some(rd) => {
         let mut muts: Vec<_> = rd.all_lenders().into_iter().map(|l| {
           let m = rd.mut_of(&l);
@@ -8754,8 +8781,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       }
       None => {
         let aliasing = get_aliasing_data(&lenders[0], &self.borrow_map);
-        let local = self.raps.local(&name);
-        self.borrow_map.insert(name, RefData {
+        let local = Some(Local::from_usize(receiver.place.local));
+        self.borrow_map.insert(name.clone(), RefData {
           local,
           lender: lenders[0].clone(),
           assigned_at: line,
@@ -8776,7 +8803,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       func: seg.ident.as_str().to_owned(),
       lenders: lenders.iter().map(|l| l.name()).collect(),
       also_unnamed: false,
-      tie: ArgTie::default(),
+      tie: ArgTie { storage_constraint_only: receiver.unchanged, ..ArgTie::default() },
       carrier: ViaCarrier::StoredBy,
       passed_on: Vec::new(),
     };
@@ -9821,7 +9848,9 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   // an `if` / `match` initializer, `borrow_map` holds the union over
   // all branches (#337).
   let Some(rd) = self.borrow_map.get(lhs_rap.name()).cloned() else { return false };
-  let own = self.call_lenders(call);
+  let own = self.enum_call_borrows(call)
+    .map(|operands| operands.into_iter().map(|operand| operand.lender).collect())
+    .unwrap_or_else(|| self.call_lenders(call));
   // `self.items.first_mut().unwrap()`: only the field (#1073), or
   // fields (#1080).
   let own: Vec<ResourceTy> = match self.field_call_lenders(call, &own) {

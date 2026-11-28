@@ -7602,7 +7602,7 @@ fn render_generic_arrow(
             let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
 
             let receiver = layout.closure_receivers.get(&id);
-            let title = if let Some(title) = receiver {
+            let mut title = if let Some(title) = receiver {
                 title.clone()
             } else if visualization_data.row_layout.reassigned_receivers.contains(&external_event.get_id()) {
                 format!("{} may read or write through the receiver reserved before {} was reassigned", styled_name_html(&function.name), styled_name_html(&from_variable.name()))
@@ -7617,6 +7617,10 @@ fn render_generic_arrow(
             } else {
                 hover_messages::arrow_call_title(external_event, function, from_variable)
             };
+            if let Some(note) = layout.call_store_notes.get(&id) {
+                title.push_str(" ");
+                title.push_str(note);
+            }
             if dots.lanes.recording || dots.lanes.probing {
                 return;
             }

@@ -4032,9 +4032,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // reborrows `&mut *n` instead of moving n (#289); n is
             // usable again after m's last use.
             "Mutable reborrow from n to m",
-            // `t = first(&y, &x)` reassigns t with a reference that
-            // borrows both arguments (#171), so it is drawn as borrows.
-            "Immutable borrow from y to t: first's signature gives the reference it returns the same lifetime as both arguments. At the caller, both stay borrowed while t is in use",
+            // The signature keeps both arguments borrowed. The reference
+            // actually returned points into y, the first argument.
+            "Immutable borrow from y to t: first's signature gives the reference it returns the same lifetime as both arguments. At the caller, both stay borrowed while t is in use. The reference first returns points into y.",
             "Immutable borrow from a to u",
         ],
         must_not_contain: &[
@@ -4803,7 +4803,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Since #1361 v and w, which hold borrows, take the stored one
         // as `v.push(&u)` would: an arrow into v / w and back.
         must_contain: &[
-            "u is passed to point by shared reference. point may read it; point's signature lets it store this reference in h, so u stays borrowed while h is in use",
+            "u is passed to point by shared reference. point may read it; point's signature lets it store this reference in h.r, so u stays borrowed while h.r is in use",
             "u's resource is immutably borrowed by v; u is read-only while the borrow is live",
             "Immutable borrow from u to v",
             "If v holds a shared borrow affecting u, that borrow ends here. It no longer restricts access to u",
@@ -6031,9 +6031,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // can't store its argument: u's borrow ends at that call.
         must_contain: &[
             "t's resource is immutably borrowed by point; t is read-only while the borrow is live",
-            "t is passed to point by shared reference. point may read it; point's signature lets it store this reference in hold, so t stays borrowed while hold is in use",
-            "s is passed to set by shared reference. set may read it; set's signature lets it store this reference in h2, so s stays borrowed while h2 is in use",
-            "b is passed to put by mutable reference. put may read or write it; put's signature lets it store this reference in m, so b stays borrowed while m is in use",
+            "t is passed to point by shared reference. point may read it; point's signature lets it store this reference in hold.r, so t stays borrowed while hold.r is in use",
+            "s is passed to set by shared reference. set may read it; set's signature lets it store this reference in h2.r, so s stays borrowed while h2.r is in use",
+            "b is passed to put by mutable reference. put may read or write it; put's signature lets it store this reference in m.r, so b stays borrowed while m.r is in use",
             "u is passed to look by shared reference. look may read it",
             "t's resource is no longer immutably borrowed",
             "b's resource is no longer mutably borrowed",
@@ -44988,6 +44988,109 @@ fn p4_closure_receiver_and_result_are_separate() {
     assert!(tips.iter().any(|tip| tip.contains("y is initialized with the value add_one() returns")));
     assert!(tips.iter().any(|tip| tip.contains("y receives the value add_one() returns")));
     assert!(!tips.iter().any(|tip| tip.contains("Copy of the value add_one() returns") || tip.contains("Copy from add_one to y")));
+}
+
+#[test]
+fn p4_call_receiver_constraint_does_not_imply_storage() {
+    let rv = run_with_local_backend("rv3_call_holders");
+    let body = fact_body(rv.facts().unwrap(), "receiver_constraint");
+    let calls = body["call_relationships"]["calls"].as_array().unwrap();
+    let inspect = calls.iter().find(|call| call["callee"].as_str().is_some_and(|name| name.ends_with("::inspect"))).unwrap();
+    assert_eq!(inspect["receiver"]["unchanged"], true);
+    assert!(inspect["stores"].is_null());
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    assert!(tips.iter().any(|tip| tip.contains("The signature of inspect can keep this loan active through bag.")));
+    assert!(!tips.iter().any(|tip| tip.contains("stored in bag by inspect")));
+}
+
+#[test]
+fn p4_call_variant_construction_identifies_its_operand() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_call_holders");
+    let body = fact_body(rv.facts().unwrap(), "construct");
+    let variant = &body["variant_constructions"][0];
+    let field = &variant["fields"][0];
+    // MIR constructs the Left variant with the tuple operand in field 0.
+    assert_eq!(variant["variant"], 0);
+    assert_eq!(field["place"]["projection"], json!([{"downcast": 0}, {"field": 0}]));
+    let loans = body["loans"].as_array().unwrap();
+    let stored = loans.iter().find(|loan| loan["lender"] == "stored").unwrap();
+    assert_eq!(field["loans"], json!([{"loan": stored["loan"], "issued": true, "conditional": false}]));
+}
+
+#[test]
+fn p4_call_returns_keep_constraints_and_effective_origins() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_call_holders");
+    let main = fact_body(rv.facts().unwrap(), "main");
+    let calls = main["call_relationships"]["calls"].as_array().unwrap();
+    let call = |name| calls.iter().find(|call| call["callee"] == name).unwrap();
+    let lenders = |ids: &serde_json::Value| {
+        ids.as_array().unwrap().iter().map(|id| {
+            main["loans"].as_array().unwrap().iter()
+                .find(|loan| loan["loan"] == *id).unwrap()["lender"].as_str().unwrap()
+        }).collect::<BTreeSet<_>>()
+    };
+    let first = call("first");
+    // The body returns a, but the signature makes both loans reach only.
+    assert_eq!(first["return_lender"]["name"], "alpha");
+    assert_eq!(lenders(&first["result"]["slots"][0]["loans"]), BTreeSet::from(["alpha", "beta"]));
+
+    let branch = call("choose");
+    let cases = branch["return_payloads"].as_array().unwrap();
+    assert_eq!(cases.len(), 2);
+    for (case, (variant, lender, index)) in cases.iter().zip([("Left", "alpha", 0), ("Right", "beta", 1)]) {
+        assert_eq!(case["variant"], variant);
+        assert_eq!(case["projection"], json!([{"variant": index}, {"field": 0}, {"field": 0}]));
+        assert_eq!(case["lender"]["name"], lender);
+        assert!(case["sources"].as_array().unwrap().contains(&json!({"kind": "absent"})));
+    }
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    assert!(tips.iter().any(|tip| tip.contains("The reference first returns points into alpha.")
+        && tip.contains("At the caller, both stay borrowed while only is in use")));
+    assert!(tips.iter().any(|tip| tip.contains("If branch is Left, it contains a reference into alpha.")
+        && tip.contains("If branch is Right, it contains a reference into beta.")
+        && tip.contains("both stay borrowed while branch is in use")));
+    assert!(!tips.iter().any(|tip| tip.contains("branch isn't a reference, but its value holds one")));
+
+    // fixed() returns None and receives no arguments. A different arm's
+    // loan can reach the join but cannot come from this call.
+    let fixed = run_with_local_backend("known_bugs/1662_arm_loan_kinds").timeline_panel_string();
+    let tips = timeline_tooltips(&fixed);
+    assert!(tips.iter().any(|tip| tip == "v receives the value fixed() returns"));
+    assert!(!tips.iter().any(|tip| tip.contains("borrow from s to v: fixed's signature")));
+}
+
+#[test]
+fn p4_call_repoint_and_swap_use_reaching_reference_slots() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_call_holders");
+    let facts = rv.facts().unwrap();
+    let main = fact_body(facts, "main");
+    let calls = main["call_relationships"]["calls"].as_array().unwrap();
+    let call = |name| calls.iter().find(|call| call["callee"] == name).unwrap();
+    let effective = |store: &serde_json::Value| {
+        main["loans"].as_array().unwrap().iter()
+            .find(|loan| loan["loan"] == store["effective_loan"]).and_then(|loan| loan["lender"].as_str())
+    };
+    assert_eq!(effective(&call("repoint")["stores"][0]), Some("gamma"));
+    let swapped = call("std::mem::swap")["stores"].as_array().unwrap();
+    assert_eq!(swapped.len(), 2);
+    for (from, to, lender) in [("left", "right", "gamma"), ("right", "left", "beta")] {
+        let store = swapped.iter().find(|store| store["destination"]["name"] == to).unwrap();
+        assert_eq!(store["source"]["name"], from);
+        assert_eq!(effective(store), Some(lender));
+    }
+    let projected = fact_body(facts, "projected_store")["call_relationships"]["calls"].as_array().unwrap()
+        .iter().find(|call| call["callee"] == "repoint_field").unwrap();
+    let stores = projected["stores"].as_array().unwrap();
+    assert_eq!(stores.len(), 1);
+    assert_eq!(stores[0]["destination"]["name"], "slots.first");
+    assert_eq!(stores[0]["destination"]["projection"], json!([{"field": 0}]));
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    assert!(tips.iter().any(|tip| tip.contains("std::mem::swap puts the reference from left, which points into gamma, in right.")));
+    assert!(!tips.iter().any(|tip| tip.contains("std::mem::swap puts the reference from left, which points into alpha")));
+    assert!(!tips.iter().any(|tip| tip.contains("std::mem::swap puts the reference from first_holder")));
 }
 
 #[test]

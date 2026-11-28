@@ -2981,6 +2981,14 @@ pub fn event_dot_mut_reacquire(my_name: &String, holds_value: bool) -> String {
 
 /* Arrow messages: shows up when someone hovers over an arrow */
 
+pub(crate) fn reference_slot_transfer(call: &str, source: &str, destination: &str, lender: Option<&str>) -> String {
+    let call = styled_name_html(call);
+    let source = styled_name_html(source);
+    let destination = styled_name_html(destination);
+    let into = lender.map_or_else(String::new, |name| format!(", which points into {},", styled_name_html(name)));
+    format!("{call} puts the reference from {source}{into} in {destination}.")
+}
+
 /// In a `BorrowVia`'s `passed_on`, the `?` operator (`v.first()?`,
 /// #1352), which passes the borrow on like `unwrap`.
 pub const TRY_PASSES_ON: &str = "\u{1d}?";
@@ -2996,6 +3004,9 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
     let func_fmt = styled_name_html(func);
     let to_fmt = styled_name_html(to_name);
     if carrier == ViaCarrier::StoredBy {
+        if tie.storage_constraint_only {
+            return format!(". The signature of {func_fmt} can keep this loan active through {to_fmt}.");
+        }
         // `refs.push(&s)` (#392): `func` is the method.
         return format!(
             ", stored in {0} by {1}; {0} isn't a reference, but its value now holds one",
@@ -3097,7 +3108,8 @@ fn arrow_borrow_via_call_suffix(to_name: &String, func: &String, lenders: &[Stri
     }
     // A value that isn't a reference (`let it = v.iter();`) or a
     // struct with a reference field can carry the borrow too (#336).
-    let may_be_none = option_ref && (!tie.constructs_variant || !passed_on.is_empty());
+    let may_be_none = !tie.variant_lenders.is_empty()
+        || option_ref && (!tie.constructs_variant || !passed_on.is_empty());
     let (noun, not_ref) = match carrier {
         ViaCarrier::Reference => ("reference", String::new()),
         ViaCarrier::Value if may_be_none => ("value", format!("; {to_fmt}'s value can hold a reference ({to_fmt} isn't a reference itself)")),
@@ -3243,6 +3255,14 @@ fn signature_tie(func_fmt: &str, what: &str, to_name: &String, names: &[String],
         } else if tie.returns_alternatives {
             let inputs = if tie.tied.len() == 2 { "both tied inputs" } else { "all the tied inputs" };
             format!(". The code in {func_fmt} has return paths from {inputs}. At the caller, {kept} while {to_fmt} is in use")
+        } else if let Some(lender) = &tie.proven_lender {
+            let lender = styled_name_html(lender);
+            format!(". At the caller, {kept} while {to_fmt} is in use. The reference {func_fmt} returns points into {lender}.")
+        } else if !tie.variant_lenders.is_empty() {
+            let cases = tie.variant_lenders.iter().map(|(variant, lender)| {
+                format!("If {to_fmt} is {}, it contains a reference into {}.", styled_name_html(variant), styled_name_html(lender))
+            }).collect::<Vec<_>>().join(" ");
+            format!(". {cases} At the caller, {kept} while {to_fmt} is in use")
         } else {
             format!(". At the caller, {kept} while {to_fmt} is in use")
         }

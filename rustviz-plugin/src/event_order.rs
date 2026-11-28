@@ -1370,6 +1370,7 @@ pub struct RowLayout {
     pub(crate) pattern_payloads: BTreeMap<usize, (String, &'static str)>,
     pub(crate) aggregate_titles: BTreeMap<usize, String>,
     pub(crate) returned_call_titles: BTreeMap<usize, String>,
+    pub(crate) call_store_notes: BTreeMap<usize, String>,
     pub(crate) argument_results: BTreeSet<usize>,
     pub(crate) transfer_stack: BTreeSet<usize>,
     transfer_order: BTreeSet<(usize, usize)>,
@@ -1412,6 +1413,7 @@ impl RowLayout {
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.returned_call_titles.append(&mut other.returned_call_titles);
+        self.call_store_notes.append(&mut other.call_store_notes);
         self.argument_results.append(&mut other.argument_results);
         self.transfer_stack.append(&mut other.transfer_stack);
         self.transfer_order.append(&mut other.transfer_order);

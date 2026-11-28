@@ -5390,14 +5390,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           this.method_receiver_events(expr, name_and_generic_args, rcvr, &fn_name, line_num);
         });
         // `refs.push(&s)`: the receiver now holds s's borrow (#392).
-        if !matches!(rcvr.kind, ExprKind::MethodCall(..)) {
-          let rcvr_rap = expr_to_rap_name(rcvr, &self.tcx)
-            .and_then(|n| self.raps.get(&n))
-            .map(|rd| rd.rap.to_owned());
-          if let Some(rcvr_rap) = rcvr_rap {
-            self.record_receiver_store(expr, &rcvr_rap, line_num);
-          }
-        }
+        self.record_receiver_store(expr, line_num);
         // A method of the user's that never returns (#1553).
         self.note_panic(expr);
       }

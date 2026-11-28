@@ -54,25 +54,6 @@ fn projections_overlap(a: &[PlaceElem<'_>], b: &[PlaceElem<'_>]) -> bool {
     !a.iter().zip(b).any(|(x, y)| matches!((x, y), (ProjectionElem::Field(f, _), ProjectionElem::Field(g, _)) if f != g))
 }
 
-/// A loan a call left in a variable (see `loans_kept_after_call`).
-#[derive(Clone, Debug)]
-pub struct KeptLoan {
-    /// Index of the loan in rustc's borrow set (`MIRBorrowData::borrow_idx`).
-    pub loan: usize,
-    /// RAP name of the variable that holds the loan once the call returns.
-    pub holder: String,
-    /// RAP name of the variable borrowed; with `through_ref`, the
-    /// reference variable whose referent (`*r`) is reborrowed.
-    pub lender: String,
-    pub through_ref: bool,
-    pub is_mut: bool,
-    /// Last line the loan is live on (`MIRBorrowData::region.1`).
-    pub end_line: usize,
-    /// Source span of the borrow that issued the loan (for a closure's
-    /// capture, the closure literal).
-    pub span: Span,
-}
-
 pub struct MIRBorrowData {
     pub borrow_idx: usize,
     pub region: (usize, usize),
@@ -875,114 +856,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
 
 
-    /// The loans a call leaves in a variable that keeps them after it
-    /// returns: the closure `keep` hands back into `g` in `let g =
-    /// keep(|| s.len());` holds its capture's loan of `s` (#686), and
-    /// `refs.extend([&s])` stores `&s` in `refs` (#682), which a
-    /// signature only says through a trait bound (`I: IntoIterator<Item
-    /// = T>`).
-    ///
-    /// Read from rustc's own facts, not the callee's signature: right
-    /// after the call returns, a variable keeps loan L if L is in one
-    /// of the regions of its type there (Polonius' `origin_contains_loan_at`,
-    /// which only holds while that variable is live). A loan counts as
-    /// handed over by the call if it was issued inside the call (`&s` in
-    /// its arguments, a closure argument's capture) or if the variable
-    /// didn't hold it before the call. Only loans of a named variable
-    /// (or of what a reference variable points to, `*r`) are returned.
-    pub fn loans_kept_after_call(&self, call: Span) -> Vec<KeptLoan> {
-        let bwf = self.bwf;
-        let (Some(facts), Some(table)) = (bwf.input_facts.as_ref(), bwf.location_table.as_ref()) else { return Vec::new() };
-        let body = &bwf.body;
-        // The call's terminator, and the first point after it returns.
-        let mut sites: Vec<(Location, Location)> = Vec::new();
-        for (bb, data) in body.basic_blocks.iter_enumerated() {
-            let term = data.terminator();
-            if let TerminatorKind::Call { target: Some(target), fn_span, .. } = &term.kind {
-                if term.source_info.span == call || *fn_span == call {
-                    sites.push((Location { block: bb, statement_index: data.statements.len() },
-                                Location { block: *target, statement_index: 0 }));
-                }
-            }
-        }
-        if sites.is_empty() {
-            return Vec::new();
-        }
-        let names = &self.raps.bindings.locals;
-        // Ordered by local, so the result doesn't depend on hash order.
-        let mut origins: std::collections::BTreeMap<Local, Vec<Origin>> = std::collections::BTreeMap::new();
-        for (local, origin) in facts.use_of_var_derefs_origin.iter().chain(facts.drop_of_var_derefs_origin.iter()) {
-            if names.contains_key(local) {
-                let os = origins.entry(*local).or_default();
-                if !os.contains(origin) {
-                    os.push(*origin);
-                }
-            }
-        }
-        let out = Output::compute(facts, Algorithm::Naive, true);
-        let held_at = |p: Point, os: &[Origin]| -> Vec<Loan> {
-            let mut ls: Vec<Loan> = Vec::new();
-            if let Some(m) = out.origin_contains_loan_at.get(&p) {
-                for o in os {
-                    for l in m.get(o).into_iter().flatten() {
-                        if !ls.contains(l) {
-                            ls.push(*l);
-                        }
-                    }
-                }
-            }
-            ls
-        };
-        let ends: HashMap<usize, usize> = self.gather_borrow_data(bwf).iter().map(|b| (b.borrow_idx, b.region.1)).collect();
-        let mut res: Vec<KeptLoan> = Vec::new();
-        for (term, after) in sites {
-            for (local, os) in origins.iter() {
-                let before = held_at(table.start_index(term), os);
-                for loan in held_at(table.start_index(after), os) {
-                    let Some((issued, data)) = bwf.borrow_set.location_map().get_index(loan.index()) else { continue };
-                    let span = self.location_to_span(*issued, bwf);
-                    if before.contains(&loan) && !call.contains(span) {
-                        continue;
-                    }
-                    let place = data.borrowed_place();
-                    let through_ref = match place.projection.first() {
-                        Some(ProjectionElem::Deref) => {
-                            // `*r` with `r` a reference variable: a reborrow
-                            // of what r points to. Any deeper deref (`**r`, a
-                            // Box) has no column to draw on.
-                            if place.projection.iter().skip(1).any(|p| matches!(p, ProjectionElem::Deref))
-                                || !body.local_decls[place.local].ty.is_ref() {
-                                continue;
-                            }
-                            true
-                        }
-                        _ if place.projection.iter().any(|p| matches!(p, ProjectionElem::Deref)) => continue,
-                        _ => false,
-                    };
-                    let (Some(lender), Some(holder)) = (names.get(&place.local), names.get(local)) else { continue };
-                    if place.local == *local {
-                        continue;
-                    }
-                    if res.iter().any(|k| k.loan == loan.index() && k.holder == *holder) {
-                        continue;
-                    }
-                    res.push(KeptLoan {
-                        loan: loan.index(),
-                        holder: holder.clone(),
-                        lender: lender.clone(),
-                        through_ref,
-                        is_mut: matches!(data.kind(), BorrowKind::Mut { .. }),
-                        end_line: ends.get(&loan.index()).copied().unwrap_or_else(|| self.location_to_line(*issued, bwf)),
-                        span,
-                    });
-                }
-            }
-        }
-        res
-    }
-
     /// rustc's loans issued for the borrow expression at `span` (`&s`):
-    /// indices into its borrow set, as in `KeptLoan::loan`.
+    /// indices into its borrow set.
     pub fn loans_issued_in(&self, span: Span) -> Vec<usize> {
         let bwf = self.bwf;
         bwf.borrow_set.location_map().iter().enumerate()
@@ -1317,44 +1192,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         out
     }
 
-    /// Whether a loan issued inside `within` (a closure literal passed
-    /// to the call at `call`: its captures' borrows) is still in scope
-    /// for rustc's borrow checker right after the call returns, i.e.
-    /// whether anything (the call's result) keeps the closure's borrows.
-    /// `self.items.iter().find(|x| **x as usize == self.n)` returns an
-    /// `Option<&i32>` that holds only the borrow of `self.items`: the
-    /// closure's borrow of `self.n` ends with the call (#1101). Uses the
-    /// `Borrows` dataflow rustc's borrowck runs, like
-    /// `nll_loan_end_lines`. None when the call isn't found in the MIR.
-    pub fn loans_issued_in_kept_after_call(&self, call: Span, within: Span) -> Option<bool> {
-        let bwf = self.bwf;
-        let body = &bwf.body;
-        let mut afters: Vec<Location> = Vec::new();
-        for data in body.basic_blocks.iter() {
-            let term = data.terminator();
-            if let TerminatorKind::Call { target: Some(target), fn_span, .. } = &term.kind {
-                if term.source_info.span == call || *fn_span == call {
-                    afters.push(Location { block: *target, statement_index: 0 });
-                }
-            }
-        }
-        if afters.is_empty() {
-            return None;
-        }
-        let borrows = Borrows::new(self.tcx, body, &bwf.region_inference_context, &bwf.borrow_set);
-        let mut cursor = borrows.iterate_to_fixpoint(self.tcx, body, None).into_results_cursor(body);
-        for after in afters {
-            cursor.seek_before_primary_effect(after);
-            for b in cursor.get().iter() {
-                let Some((issued, _)) = bwf.borrow_set.location_map().get_index(b.index()) else { continue };
-                if within.contains(self.location_to_span(*issued, bwf)) {
-                    return Some(true);
-                }
-            }
-        }
-        Some(false)
-    }
-
     /// The last line in `lines` (first, last) on which the variable
     /// `name` (its RAP column) is live, from
     /// Polonius' liveness: its last use, or the end of a loop it's used
@@ -1371,30 +1208,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         last
     }
 
-    /// The variables whose loans rustc's borrow checker puts in the
-    /// lifetimes of `name`'s type, or of its field `name.f.g` when
-    /// `fields` is `["f", "g"]`: what a reference stored there may
-    /// point into. `if let Some(x) = pick(&a, &b)` with `pick<'a>(&'a
-    /// String, &'a String) -> Option<&'a String>` gives `{a, b}`: the
-    /// signature makes both loans flow into x's lifetime (#681). A
-    /// loan is named by the base variable of the place it borrows
-    /// (`s` for `&s`, `&s.f` and `&*s`), with whether one of its loans
-    /// there is mutable.
-    ///
-    /// `None` when this body has no MIR local named `name` (a binding
-    /// inside a closure), or a field in `fields` isn't found.
-    pub fn loans_held_by(&self, name: &str, fields: &[&str]) -> Option<BTreeMap<String, bool>> {
-        self.loans_held_in(self.raps.local(name), fields, None)
-    }
-
-    /// `loans_held_by`, for only the loans issued inside `within` (a
-    /// reference's initializer): the kind of the loans that this
-    /// assignment puts in `name`'s lifetimes. That kind is not always
-    /// the reference's own: `let r: &String = &mut s;` and `let r =
-    /// downgrade(&mut s);` (`fn(&mut String) -> &str`) keep a mutable
-    /// loan of s in a shared reference, and `let r = &mut &x;` keeps a
-    /// shared loan of x in a mutable one (#1122, #1131).
-    /// (`name.f.g` when `fields` is `["f", "g"]`, as in `loans_held_by`.)
+    /// The loans issued within an initializer that flow into a binding
+    /// or its field, used to annotate direct reference assignments.
     pub fn loans_held_from(&self, name: &str, fields: &[&str], within: Span) -> Option<BTreeMap<String, bool>> {
         self.loans_held_in(self.raps.local(name), fields, Some(within))
     }
@@ -1464,7 +1279,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         Some(held)
     }
 
-    /// `loans_held_by`, split by where in `name`'s type the loans are
+    /// The loans split by where in `name`'s type they occur
     /// (#1399). `own`: the variables (with whether a loan is mutable)
     /// whose loans are in a lifetime of the value itself, and not only
     /// there because they are in a lifetime of something it reaches
@@ -1477,7 +1292,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     /// el: `own` is `{refs: mut}`, `through` is `{a1}`. Likewise for the
     /// `IterMut<'r, &'x String>` that `refs.iter_mut()` returns, whose
     /// `T` the iterator reaches only through its `'r` (see
-    /// `params_behind_borrows`). `None` when `loans_held_by` is.
+    /// `params_behind_borrows`).
     pub fn loans_split_by(&self, name: &str, fields: &[&str]) -> Option<(BTreeMap<String, bool>, BTreeSet<String>)> {
         let bwf = self.bwf;
         let body = &bwf.body;
