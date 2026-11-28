@@ -21886,7 +21886,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from r1 to id",
             "r1's mutable reference is moved (not the resource it points to)",
             "If k1 holds a mutable borrow affecting s, that borrow ends here. It no longer restricts access to s",
-            "s's resource is mutably borrowed by k1; s can't be used until the borrow ends",
+            "s's resource is mutably borrowed; s can't be used until the borrow ends. s stays borrowed while k1 is in use",
             "Move from r2 to k2",
             "r2's mutable reference is moved (not the resource it points to)",
             "the reference r2 held is moved into k2's value, so k2 now holds its borrow",
@@ -21899,7 +21899,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from r6 to k6.0",
             "r6's mutable reference is moved (not the resource it points to)",
             "r7's mutable reference is moved (not the resource it points to)",
-            "s's resource is mutably borrowed by k7; s can't be used until the borrow ends",
+            "s's resource is mutably borrowed; s can't be used until the borrow ends. s stays borrowed while k7 is in use",
             "r8's mutable reference is moved (not the resource it points to)",
         ],
         must_not_contain: &[
@@ -47281,7 +47281,10 @@ fn stacked_fork_write_keeps_the_lender_borrowed_until_the_replacement_1884() {
     let write_x: f64 = dot.attribute("cx").unwrap().parse().unwrap();
     let write_y: f64 = dot.attribute("cy").unwrap().parse().unwrap();
     assert!(owned.3.0 >= write_y, "the owned continuation begins at or below the write");
-    assert!(legs.iter().any(|(id, ..)| id.contains(":revoked_privilege")), "the sibling leg stays borrowed until its end");
+    // The None leg never uses r again, so the loan is dead on it: rustc
+    // accepts a write to p there (checked with rustc), and the leg is owned.
+    assert!(legs.iter().any(|(id, tip, ..)| id.ends_with(":branch_line:full_privilege") && tip.contains("p is the owner of the resource")),
+        "the sibling leg is owned: r is not used on it");
     assert!(segments.iter().any(|(id, _, x, y)| id.contains(":branch_line:revoked_privilege") && !id.contains('/')
         && x.0 <= write_x && x.1 >= write_x && y.0 < write_y && y.1 >= write_y),
         "the Some leg reaches the write while the lender is still borrowed");
@@ -47367,7 +47370,7 @@ fn joined_call_keeps_release_text_on_the_return_edge_1884() {
     // The borrow checker rejects writing a through its owner before the
     // call, which can still reborrow it. The two bypasses occur on other
     // edges and the else arm has a separate, ordinary release.
-    check_review_tip(&svg, "a@L36-37:branch_line:revoked_privilege",
+    check_review_tip(&svg, "a@L36-38:branch_line:revoked_privilege",
         &["a's resource is mutably borrowed", "a can't be used until the borrow ends"],
         &["no longer restricts access", "has already ended"]);
     for (row, required, forbidden) in [

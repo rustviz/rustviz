@@ -10147,13 +10147,18 @@ fn render_branches(
                         (seg.state, seg.title) = reference_segment(&seg.state, rap, visualization_data, cell);
                     }
                 }
-                if !rap.is_ref() && !rap.is_closure() && !state_is_dashed(&seg.state) {
+                // An arm entered by several histories keeps the layout's restriction
+                // up to its qualified end; the end's own cases explain it.
+                let keeps_restriction = qualified_end(visualization_data, &branch.e_data).is_some()
+                    && matches!(seg.state, State::RevokedPrivilege { .. } | State::PartialPrivilege { s: LineState::Full });
+                if !rap.is_ref() && !rap.is_closure() && !state_is_dashed(&seg.state) && !keeps_restriction {
                     if let Some((&function, arm)) = visualization_data.fn_source_lines.get(rap.hash()).zip(branch.source) {
                         let table = &visualization_data.state_table;
                         let cell_for = |column: &str| table.arm_boundary_cell(function, column, arm, joining).cloned();
                         if let Some(cell) = cell_for(rap.name()) {
                             if let Some((state, title)) = owner_segment_of(rap, visualization_data, seg.rows.0, &seg.state,
-                                Some(cell), None, true, &cell_for) {
+                                Some(cell), None, true, &cell_for)
+                            {
                                 (seg.state, seg.title) = (state, title);
                             }
                         }
@@ -10997,6 +11002,14 @@ fn aggregate_move_point(
 }
 
 /// Cut the visible arm column at changes to its state or title.
+/// The row of the reacquire that ends the borrow along several incoming histories.
+fn qualified_end(vd: &VisualizationData, history: &[(usize, Event)]) -> Option<usize> {
+    history.iter()
+        .filter(|(_, e)| matches!(e, Event::MutableReacquire { .. } | Event::StaticReacquire { .. }))
+        .find(|(_, e)| vd.row_layout.fork_end_cases.contains_key(&e.get_id()))
+        .map(|(row, _)| *row)
+}
+
 fn leg_table_pieces(
     rap: &ResourceAccessPoint,
     visualization_data: &VisualizationData,
@@ -11024,6 +11037,7 @@ fn leg_table_pieces(
     if !visualization_data.fn_source_lines.get(rap.hash()).is_some_and(|l| visualization_data.state_table.has_fn(*l)) {
         return Vec::new();
     }
+    let qualified_end = qualified_end(visualization_data, history);
     let rl = &visualization_data.row_lines;
     let mut bounds = vec![top];
     // (A reference column's: after a row's last stacked sub-row of dots,
@@ -11099,9 +11113,32 @@ fn leg_table_pieces(
                 None
             }
         };
-        let cell = cell_for(rap.name());
-        let from_table = cell.is_some();
-        let piece = cell.and_then(|cell| owner_segment_of(rap, visualization_data, row, state, Some(cell), None, true, &cell_for));
+        // An arm entered by several histories keeps the layout's restriction
+        // up to its qualified end; the end's own cases explain it.
+        let keeps_restriction = qualified_end.is_some_and(|end| w[1] <= end)
+            && matches!(state, State::RevokedPrivilege { .. } | State::PartialPrivilege { s: LineState::Full });
+        let cell = if keeps_restriction { None } else { cell_for(rap.name()) };
+        // A field at its arm's first row, before the arm's own code: the
+        // state in which the arm starts, with the loans it still holds.
+        let entry_piece = (!rap.is_ref() && rap.is_member() && !from_arm && row == own.0 && row > split)
+            .then(|| {
+                let cell = table.before_arm_code(function, rap.name(), source?, src?)?;
+                if cell.init != Init::Own || cell.lent.is_empty() { return None; }
+                let (st, borrow, ..) = owner_loan_title(rap, visualization_data, function, cell, state, row, false, true);
+                let value = owner_value_title(rap, visualization_data, function, cell, Some(row));
+                Some((st, format!("{value}. {borrow}")))
+            }).flatten();
+        let from_table = cell.is_some() || entry_piece.is_some();
+        let piece = entry_piece.or_else(|| {
+            let cell = cell?;
+            owner_segment_of(rap, visualization_data, row, state, Some(cell.clone()), None, true, &cell_for).or_else(|| {
+                // A struct whose trunk ends where its fields were moved out.
+                let src = src?;
+                (cell.init == Init::Partly && trunk_ends_at_fields(visualization_data, function, rap.name(), row, src)).then_some(())?;
+                Some((State::FullPrivilege { s: LineState::Uninit },
+                    partly_moved_cell_title(rap, table, function, src, &cell, &cell_for)?))
+            })
+        });
         let (st, title) = match piece {
             Some((st, title)) => (st, Some(title)),
             None => (state.clone(), None),

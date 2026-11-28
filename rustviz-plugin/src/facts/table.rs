@@ -1372,7 +1372,7 @@ mod tests {
                 let source = nested(i);
                 let edge = SwitchEdge { switch: Location::START, successor: BasicBlock::from_usize(i + 1) };
                 (ArmInfo {
-                    runs: true, parent: None, edge, source: Some(source),
+                    runs: true, runs_at_runtime: true, parent: None, edge, source: Some(source),
                     branch: Some(source.branch), has_exit: true, continuing: None,
                 }, moved.clone())
             }).collect(),

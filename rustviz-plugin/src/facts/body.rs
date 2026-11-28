@@ -2800,15 +2800,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         }
         Output::compute(&g, Algorithm::Naive, true)
     });
-    let mut checked: BTreeSet<rustc_middle::mir::BasicBlock> = BTreeSet::new();
-    {
-        let mut work = vec![rustc_middle::mir::START_BLOCK];
-        while let Some(bb) = work.pop() {
-            if !is_unreachable(body, bb) && !body.basic_blocks[bb].is_cleanup && checked.insert(bb) {
-                work.extend(body.basic_blocks[bb].terminator().successors());
-            }
-        }
-    }
     let mut call_relationships = super::call_relationships::collect(tcx, body, &cx.names.bindings, &runs, &checked, &cx.rows.event_row);
     // The Polonius output that tracks a loan.
     let out_for = |loan: BorrowIndex| if loan.index() >= base { spol.as_ref() } else { pol.as_ref() };
@@ -7235,19 +7226,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         Some((branch, state_at(&[first], false, false, None, None, None)))
     }).collect();
     let mut arm_boundaries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, ArmBoundaries>>::default();
-    let fieldless_arms: Vec<_> = evs.values().flatten().filter_map(|e| {
-        let place = e.fieldless_operand.as_ref()?;
-        if !e.end_places.contains(place) { return None; }
-        super::control::entered(&switches, SwitchEdge { switch: e.location, successor: e.occurrence.successor?.block })
-    }).collect();
     let entry_edges = switches.iter().filter_map(|exit| {
         let arm = super::SourceArm { branch: exit.branch?, index: exit.arm? };
         let edge = exit.edge;
         executed_successors(edge.switch).contains(&edge.successor.start_location())
             .then_some((arm, edge.successor))
     });
-    let arm_edges: Vec<_> = entry_edges.clone().filter(|(arm, _)|
-        !drop_holders_at_reassign.is_empty() || fieldless_arms.contains(arm)).collect();
+    let arm_edges: Vec<_> = entry_edges.clone().collect();
     let mut arm_entries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, BTreeSet<_>>>::default();
     for (arm, block) in entry_edges {
         arm_entries.entry(arm.branch).or_default().entry(arm.index).or_default().insert(block.start_location());
@@ -7560,6 +7545,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let (Some(branch), Some(index)) = (switch.branch, switch.arm) else { continue };
             let edge = switch.edge;
             if exclusive_edges.iter().any(|(candidate, _)| *candidate == edge) && runs.contains(&loc.block)
+                && dom.is_reachable(loc.block) && dom.is_reachable(edge.successor)
                 && dom.dominates(edge.successor, loc.block)
                 && !arms.iter().any(|arm| arm.branch == branch)
             {
@@ -9034,6 +9020,7 @@ mod owner_segment_tests {
                 // The pair's a field was moved on one path. The other
                 // path still owns it. Only the merged continuation is mixed.
                 let moved = body("partial_move_edge");
+                for (k, arms) in &moved.arm_boundaries { for (i, a) in arms { eprintln!("DBG {k:?} arm {i}: join {:?}", a.join.as_ref().map(|j| (&j.state, &j.parts))); } }
                 let arm_join = moved.arm_boundaries.values().find(|arms| {
                     arms.get(&0).and_then(|arm| arm.join.as_ref())
                         .is_some_and(|join| join.state.get("pair.a") == Some(&"moved"))
