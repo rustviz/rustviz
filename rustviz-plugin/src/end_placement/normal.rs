@@ -172,7 +172,16 @@ impl ExprVisitor<'_, '_> {
       {
         continue;
       }
-      let (ResourceTy::Value(holder), to) = endpoints(template) else { continue };
+      let (from, to) = endpoints(template);
+      let field_releases = match from {
+        ResourceTy::Index(field, ..) if field.is_member() => self.drawn_references.ends.get(&template.get_id()),
+        _ => None,
+      };
+      let holder = match from {
+        ResourceTy::Value(holder) => holder,
+        ResourceTy::Index(holder, ..) if field_releases.is_some() => holder,
+        _ => continue,
+      };
       if to.extract_rap().is_some_and(|l| l.is_fn()) {
         continue;
       }
@@ -201,6 +210,9 @@ impl ExprVisitor<'_, '_> {
           _ => continue,
         };
         if id != loan || e.drop_route != crate::facts::DropRoute::Normal {
+          continue;
+        }
+        if field_releases.is_some_and(|ends| !ends.iter().any(|end| end.fact.occurrence == e.occurrence)) {
           continue;
         }
         let caller = matches!(to, ResourceTy::Caller) && e.caller_slot.as_ref().is_some_and(&belongs);
@@ -267,7 +279,9 @@ impl ExprVisitor<'_, '_> {
               }
               continue;
             }
-            s.row = if !e.continuing_places.is_empty() { row } else { branch_type.get_start_end(a).0 };
+            if !caller {
+              s.row = if !e.continuing_places.is_empty() { row } else { branch_type.get_start_end(a).0 };
+            }
             s.before = branches[a].e_data.iter().find(|(l, _)| *l >= s.row).map(|(_, e)| e.get_id());
           }
         }
@@ -345,7 +359,39 @@ impl ExprVisitor<'_, '_> {
         .filter(|e| e.drop_route == crate::facts::DropRoute::Normal && matches!(e.fact, Fact::BorrowEnd { loan: l, .. } if l == loan))
         .all(|e| sites.iter().any(|((_, hold), end)| !hold && end.occurrence == e.occurrence)
           || represented.values().any(|end| end.occurrence == e.occurrence));
-      if !cases_complete && sibling_calls.is_none() && !all_read && !write_fork {
+      let covers_releases = || events()
+        .filter(|e| e.drop_route == crate::facts::DropRoute::Normal && matches!(e.fact, Fact::BorrowEnd { loan: l, .. } if l == loan))
+        .all(|e| sites.values().any(|end| end.occurrence == e.occurrence));
+      // A nested fork can end an incoming caller slot after a direct
+      // reborrow for a call. No separate holder for that reborrow has
+      // to be drawn to locate the caller's end.
+      let caller_fork = matches!(to, ResourceTy::Caller) && sites.keys().any(|(site, _)| site.path.len() > 1)
+        && sites.iter().all(|((site, hold), e)| {
+          !hold && !site.path.is_empty() && e.caller_slot.as_ref().is_some_and(&belongs)
+        }) && covers_releases();
+      let field_fork = sites.len() > 1 && sites.keys().any(|(site, _)| !site.path.is_empty())
+        && field_releases.is_some_and(|ends| ends.iter().all(|end|
+          sites.values().any(|edge| edge.occurrence == end.fact.occurrence)));
+      // The loan ends on the edge that makes a subsequent move legal.
+      // A use on a different leg cannot keep this lender borrowed into
+      // the arm that moves it.
+      let body = &self.bwf.body;
+      let issued = self.bwf.borrow_set.location_map().get_index(loan).and_then(|(_, data)| data.borrowed_place().as_local());
+      let before_move = sites.len() > 1 && issued.is_some() && issued == to.extract_rap().and_then(|rap| rap.owner_local())
+        && sites.values().any(|end| {
+          let Some(next) = end.occurrence.successor else { return false };
+          if facts.entered(end.location, Some(next)).is_none() { return false; }
+          let blocks = &body.basic_blocks;
+          let dom = blocks.dominators();
+          // A FalseEdge can target this arm for borrow checking. Only
+          // executable predecessors can reach the move in the drawing.
+          let forced = blocks.predecessors()[next.block].iter().all(|&pred| pred == end.location.block
+            || !crate::facts::real_successor_blocks(body, pred).contains(&next.block)
+            || dom.dominates(next.block, pred));
+          forced && events().any(|event| event.place_local == issued && matches!(event.fact, Fact::Move { .. })
+            && next.dominates(event.location, dom))
+        }) && covers_releases();
+      if !cases_complete && sibling_calls.is_none() && !all_read && !write_fork && !caller_fork && !field_fork && !before_move {
         continue;
       }
       if let Some(sibling_calls) = sibling_calls {
@@ -478,6 +524,13 @@ impl ExprVisitor<'_, '_> {
           }
         }
         self.row_layout.record_arm_point(e.get_id(), edge);
+        if field_fork {
+          if let Some(boundary) = field_releases.and_then(|ends| ends.iter().find(|end| end.fact.occurrence == edge.occurrence)) {
+            if let Some(title) = self.edge_release_title(facts, &e, &[*boundary]) {
+              self.row_layout.joined_end_titles.insert(e.get_id(), title);
+            }
+          }
+        }
         // The write can already occupy stacked rows of its own. The end
         // follows those effects, so it cannot keep the template's earlier
         // arrow reservation on that source line.

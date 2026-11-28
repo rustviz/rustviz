@@ -29254,6 +29254,24 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &["The following applies only if the pattern matches. x2 immutably borrows a resource"],
         must_not_contain: &["=x2 immutably borrows a resource"],
     },
+    TooltipExpect {
+        // The else leg copies an &String from r3 into the aggregate.
+        // It must render the projected return even if the lender does
+        // not otherwise need a dot in that arm.
+        name: "edition2024/progen_1967_6607_let_chain_projected_release",
+        must_contain: &[
+            "Immutable reborrow from m to r3",
+            "Copy from r3 to h.r",
+        ],
+        must_not_contain: &["h.r is the owner of the resource"],
+    },
+    TooltipExpect {
+        // The loop copies the &String installed by the shared reborrow
+        // in this arm. It never copies the earlier downgrade result.
+        name: "edition2024/progen_1968_6607_repointed_copy_hold_end",
+        must_contain: &["Copy from r to r3"],
+        must_not_contain: &["r3's mutable borrow ends"],
+    },
 ];
 
 #[test]

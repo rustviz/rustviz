@@ -6968,15 +6968,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
               }
             }
           }
-          else if let Some(end_line) = self.field_write_loan_end(lhs_expr, &lhs_rap, &ref_data, line_num) {
-            // `hold.r = &t;` where `hold` held `&s`: the field no
-            // longer points to s, but `hold`'s type has one lifetime
-            // for the field's reference, so the borrow checker keeps
-            // s borrowed until the loan's last use (#531). Drawn on
-            // the lender's column only, like #512's stored borrows.
+          else if let Some((loan, ends)) = self.field_write_releases(lhs_expr, expr.span, &lhs_rap, &ref_data) {
+            // The overwritten field can't return its old reference.
+            // Place this lender-side release on each of the loan's MIR
+            // edges once the visitor has built the enclosing branches.
             let place = ResourceTy::Index(lhs_rap.clone(), lhs_rap.name().to_owned(), PlaceWrite::Update);
-            let die = if ref_data.ref_mutability { Evt::MDie } else { Evt::SDie };
-            self.add_ev(end_line, die, to_ro, place, false);
+            let die = if matches!(loan.kind, "mut" | "unique") { Evt::MDie } else { Evt::SDie };
+            let id = *self.unique_id;
+            self.defer_old_ends = true;
+            self.add_ev(ends[0].row, die, to_ro, place, false);
+            self.defer_old_ends = false;
+            self.end_loans.insert(id, vec![loan.loan]);
+            self.drawn_references.ends.insert(id, ends);
           }
           else {
             // `o = &q;` ends the old loan where the borrow checker
