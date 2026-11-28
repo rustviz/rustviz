@@ -3201,6 +3201,12 @@ fn render_dot(
         if let Some(title) = borrower_title {
             data.title = title;
         }
+        if let Event::Move { via_try: Some(_), id, .. } = event {
+            if layout.try_box_drops.contains(id) {
+                data.title.push(' ');
+                data.title.push_str(&hover_messages::event_dot_box_remainder_drop_if_try_returns(rap.name()));
+            }
+        }
         append_dot(data, timeline_data, dots, lend_id, event_kind, *line_number);
         if (stacked || layout.field_generations.contains_key(&event.get_id()))
             && matches!(event, Event::StaticBorrow { .. }) && rap.is_ref() && !rap.is_mutref() {
@@ -7938,7 +7944,12 @@ fn render_function_result_arrow(line_number: &usize, external_event: &ExternalEv
         let last = f.name.rsplit("::").next().unwrap_or(&f.name);
         let named_call = !last.starts_with(|c: char| c.is_uppercase()) && !f.name.ends_with('!');
         let mut title = if let Some(title) = visualization_data.row_layout.returned_call_titles.get(&key.0) {
-            title.clone()
+            if !f.callable_result && matches!(external_event, ExternalEvent::Move { .. }) {
+                let movement = hover_messages::arrow_fn_return_title(false, named_call, &styled_fn);
+                format!("{movement}. {title}")
+            } else {
+                title.clone()
+            }
         } else if f.mir_result && matches!(external_event, ExternalEvent::Copy { .. }) {
             let inside = match external_event {
                 ExternalEvent::Copy { into_ctor: Some(name), .. } => Some(hover_messages::ctor_value_phrase(name)),
@@ -8069,7 +8080,7 @@ fn render_return_to_caller_arrow(line_number: &usize, external_event: &ExternalE
             ExternalEvent::Move { carried_with: Some((parent, _)), .. } =>
                 hover_messages::event_dot_copy_field_returned(rap.name(), parent),
             ExternalEvent::Move { via_try: Some(kind), .. } =>
-                hover_messages::event_dot_move_into_try(rap.name(), Some(&"the caller".into()), *kind, rap.holds_value()),
+                hover_messages::event_dot_move_into_try(rap.name(), Some("the caller"), *kind, rap.holds_value(), false),
             // `&self.s` returned: a reborrow through `self` (#784).
             ExternalEvent::Copy { from: ResourceTy::DerefField(r, place, _, _), .. } if place.starts_with('&') =>
                 hover_messages::event_dot_reborrow_to_caller(r.name(), place),

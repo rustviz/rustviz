@@ -71,3 +71,10 @@ fn main() {
     assert_eq!(poll_place(Poll::Pending), Poll::Ready(Ok(0)));
     assert_eq!(copy_payloads(&Some(1)), Some(41));
 }
+
+fn same_row_tries(first: Result<String, String>, second: Result<String, String>) -> Result<(), String> {
+    let left = Box::new(first);
+    let right = Box::new(second);
+    drop(((*left)?, (*right)?));
+    Ok(())
+}

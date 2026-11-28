@@ -13447,7 +13447,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "ctor_call_result_783",
         must_contain: &[
             "Move from String::from to the caller",
-            "Move from make to the caller",
+            "Move from make to the caller. The caller receives a Some value holding the resource make() returns",
             "Move from Box::new to the caller",
             "Move from make to (temporary)",
             "This temporary takes the value that make returns, which is moved into it. Rust drops the temporary as soon as its statement (or enclosing expression) is done",
@@ -28975,7 +28975,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "The call to c is skipped at runtime",
             "c goes out of scope. Its 1 captured resource is dropped. Rust tracks this with a runtime drop flag.",
             "c is moved into the call (an FnOnce closure can only be called once). s, which c captured, is moved out of the closure as the call's result",
-            "z acquires ownership of a Some value holding the value c() returns, when the block ends with break 'blk Some(c())",
+            "z acquires ownership of a Some value holding the resource c() returns, when the block ends with break 'blk Some(c())",
             "c was consumed on every path that completes the block at runtime. The borrow checker rejects uses of c after the block",
             "c is moved into a temporary before evaluating the call arguments on the branch that exits here",
             "c is moved before the arguments are evaluated. If they finish, c is moved into the call (an FnOnce closure can only be called once). If the call starts, s, which c captured, is moved out of the closure as the call's result",
@@ -28991,14 +28991,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "rv3_closure_call_results",
         // MIR moves the FnOnce receiver and passes a separate result to
         // the aggregate, return place or Try::branch. FnMut takes &mut c.
+        // String needs drop. Plain does not, even though the Result that
+        // holds it can also contain a String in its Err variant.
         must_contain: &[
             "c is moved into the call (an FnOnce closure can only be called once). s, which c captured, is dropped during the call",
             "z.0 acquires ownership of the resource c() returns",
             "z.value acquires ownership of the resource c() returns",
-            "z acquires ownership of an array with the value c() returns at index 0",
-            "z acquires ownership of an Ok value holding the value c() returns",
+            "z acquires ownership of an array with the resource c() returns at index 0",
+            "z acquires ownership of an Ok value holding the resource c() returns",
             "z acquires ownership of the resource c() returns",
-            "The caller receives a tuple whose first element is the value c() returns",
+            "The caller receives a tuple whose first element is the resource c() returns",
+            "The caller receives a Record value with the resource c() returns in field value",
+            "The caller receives an Ok value holding the value c() returns",
             "If c() returns Ok, z acquires ownership of the value inside it. Otherwise the `?` exits early.",
         ],
         must_not_contain: &[
@@ -29007,6 +29011,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from c to z",
             "Move from c to next",
             "z receives the value c() returns",
+            "an array with the value c() returns at index 0",
+            "z acquires ownership of an Ok value holding the value c() returns",
+            "z acquires ownership of a Some value holding the value c() returns",
+            "The caller receives a tuple whose first element is the value c() returns",
+            "The caller receives a Record value with the value c() returns in field value",
+            "The caller receives an Ok value holding the resource c() returns",
         ],
     },
     TooltipExpect {
@@ -29115,16 +29125,44 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         ],
     },
     TooltipExpect {
+        name: "rv3_wrapped_call_resources",
+        // MIR builds each wrapper from the call destination. None has no
+        // payload, a generic result can be u32, and Mutex owns a std
+        // synchronization primitive regardless of the target's drop glue.
+        must_contain: &[
+            "The caller receives a tuple whose first element is the value empty() returns",
+            "The caller receives a tuple whose first element is the value generic() returns",
+            "The caller receives a Some value holding the resource c() returns",
+            "Move from make to the caller. The caller receives a tuple whose first element is the resource make() returns",
+        ],
+        must_not_contain: &[
+            "the resource empty() returns",
+            "the resource generic() returns",
+            "a Some value holding the value c() returns",
+            "the value make() returns",
+        ],
+    },
+    TooltipExpect {
         name: "known_bugs/1699_try_projected_place",
         // MIR moves the Result from the allocation and uses the Ok
         // payload to initialize text. Rust still frees the allocation.
+        // ElaborateDrops and the allocator probe show that the Boxes
+        // still free their allocations on the residual edge. On success
+        // they remain until scope exit, after the payload has moved.
         must_contain: &[
-            "*moved's resource is moved into the `?`. If *moved is `Ok`, text gets the value inside it. Otherwise the `?` returns early.",
+            "*moved's resource is moved into the `?`. If *moved is `Ok`, text gets the value inside it. Otherwise the `?` returns early. If the `?` here returns early, the Box in moved is dropped, freeing its heap allocation if it has one.",
+            "**nested's resource is moved into the `?`. If **nested is `Ok`, text gets the value inside it. Otherwise the `?` returns early. If the `?` here returns early, the Box in nested is dropped, freeing its heap allocation if it has one.",
+            "**maybe_nested's resource is moved into the `?`. If **maybe_nested is `Ok`, `(**maybe_nested)?` gives the value inside it. Otherwise the `?` returns early. If the `?` here returns early, the Box in maybe_nested is dropped, freeing its heap allocation if it has one.",
+            "moved's contents were moved out, so moved can't be used as a whole; the Box itself wasn't moved: its heap allocation, if it has one, is freed when moved is dropped",
+            "nested is partially moved: **nested was moved out, so nested can't be used as a whole",
+            "maybe_nested may be partially moved: **maybe_nested may have been moved out, so maybe_nested can't be used as a whole",
+            "moved goes out of scope. Its contents were moved out earlier, so the Box doesn't drop them; only its heap allocation, if it has one, is freed.",
             "text acquires ownership of the resource the `?` takes out of *moved's `Ok`",
-            "**nested's resource is moved into the `?`. If **nested is `Ok`, text gets the value inside it. Otherwise the `?` returns early.",
         ],
         must_not_contain: &[
             "If moved is `Ok`",
+            "If the `?` here returns early, the Box in p is dropped",
+            "`**maybe_nested?` gives the value inside it",
         ],
     },
     TooltipExpect {
@@ -29149,20 +29187,54 @@ fn closure_break_ends_the_owned_segment_1909() {
 }
 
 #[test]
+fn projected_try_remainder_drop_belongs_to_its_move() {
+    let svg = run_with_local_backend("known_bugs/1699_try_projected_place").timeline_panel_string();
+    // Poll::Ready(Err(_)) takes the residual edge. Pending continues.
+    check_review_tip(&svg, "polled@L19:dot:move",
+        &["*polled's resource is moved into the `?`",
+          "If the `?` here returns early, the Box in polled is dropped, freeing its heap allocation if it has one."],
+        &["runtime drop flag"]);
+    check_review_tip(&svg, "p@L28:dot:move",
+        &["p's resource is moved into the `?`"], &["the Box in p is dropped"]);
+
+    // MIR moves from left before branching; it moves from right only on
+    // left's success edge. Each move's residual edge frees its own Box,
+    // and right's payload is still in the Box if the first `?` exits.
+    check_review_tip(&svg, "left@L78:dot:move",
+        &["`(*left)?` gives the value inside it. Otherwise the `?` returns early. If the `?` here returns early, the Box in left is dropped"],
+        &["`*left?`", "the Box in right is dropped"]);
+    check_review_tip(&svg, "right@L78:dot:owner_drop_if_try_returns+move",
+        &["whatever right still holds (if anything) is dropped here",
+          "`(*right)?` gives the value inside it. Otherwise the `?` returns early. If the `?` here returns early, the Box in right is dropped"],
+        &["`*right?`", "the Box in left is dropped"]);
+
+    for (case, row) in [
+        ("rv3_issues/1639_try_box_deref", 3),
+        ("rv3_issues/1699_try_box_deref_early_drop", 2),
+    ] {
+        let svg = run_with_local_backend(case).timeline_panel_string();
+        check_review_tip(&svg, &format!("b@L{row}:dot:move"),
+            &["`(*b)?` gives the value inside it. Otherwise the `?` returns early.",
+              "If the `?` here returns early, the Box in b is dropped"],
+            &["`*b?`"]);
+    }
+}
+
+#[test]
 fn closure_receiver_and_result_are_separate() {
     let svg = run_with_local_backend("rv3_closure_call_results").timeline_panel_string();
     for (row, receiver, received) in [
         (10, "z.0", "z.0 acquires ownership of the resource c() returns"),
         (19, "z.value", "z.value acquires ownership of the resource c() returns"),
-        (28, "z", "z acquires ownership of an array with the value c() returns at index 0"),
-        (37, "z", "z acquires ownership of an Ok value holding the value c() returns"),
+        (28, "z", "z acquires ownership of an array with the resource c() returns at index 0"),
+        (37, "z", "z acquires ownership of an Ok value holding the resource c() returns"),
         (46, "z", "z acquires ownership of the resource c() returns"),
         (57, "z", "z acquires ownership of the resource c() returns"),
-        (67, "caller", "The caller receives a tuple whose first element is the value c() returns"),
+        (67, "caller", "The caller receives a tuple whose first element is the resource c() returns"),
         (75, "z", "If c() returns Ok, z acquires ownership of the value inside it"),
         (95, "caller", "If c() returns Ok, the caller receives the value inside it"),
         (103, "caller", "If c() returns Ok, the caller receives an Ok value holding the value inside it"),
-        (108, "z", "z acquires ownership of a Some value holding the value c() returns"),
+        (108, "z", "z acquires ownership of a Some value holding the resource c() returns"),
     ] {
         check_review_tip(&svg, &format!("c@L{row}:dot:closure_call"),
             &["c is moved into the call"], &["c's resource is moved to z"]);
@@ -29173,7 +29245,7 @@ fn closure_receiver_and_result_are_separate() {
         }
     }
     for (row, receiver, received) in [
-        (85, "z", "z acquires ownership of an Ok value holding the value c() returns"),
+        (85, "z", "z acquires ownership of an Ok value holding the resource c() returns"),
         (86, "next", "next acquires ownership of the resource c() returns"),
     ] {
         check_review_tip(&svg, &format!("c@L{row}:dot:"),
@@ -29214,7 +29286,7 @@ fn fnonce_result_dot_and_arrow_show_ownership() {
     let svg = run_with_local_backend("issue_1909_review_closure").timeline_panel_string();
     check_review_tip(&svg, "z@L15:dot:acquire", &["z acquires ownership of a resource (from break 'blk Some(c()))"], &[]);
     check_review_tip(&svg, "c>z@L15:arrow:move",
-        &["z acquires ownership of a Some value holding the value c() returns"],
+        &["z acquires ownership of a Some value holding the resource c() returns"],
         &["Move from c to z", "z receives a Some value"]);
 }
 
