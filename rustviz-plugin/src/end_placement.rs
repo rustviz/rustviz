@@ -4,7 +4,7 @@
 use crate::expr_visitor::ExprVisitor;
 use crate::facts::{Ev, Fact, LoanInfo};
 use crate::facts::repoints::Boundary;
-use crate::svg_generator::data::{BranchType, ExternalEvent, ResourceTy, StaticLender};
+use crate::svg_generator::data::{BranchType, ExternalEvent, ResourceAccessPoint, ResourceTy, StaticLender};
 use rustc_middle::mir::{Body, Location};
 use rustc_span::Span;
 use rustc_utils::BodyExt;
@@ -25,6 +25,157 @@ struct RepresentedEnds {
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// Place the iterator's release and the yielded reference's last use
+  /// from their separate borrowck boundaries.
+  pub(super) fn place_iterator_boundaries(
+    &mut self, iter: &crate::facts::IteratorStorage, item: &ResourceAccessPoint,
+    lender: &ResourceTy, loans: &[usize], exhaustion: &BTreeMap<Location, crate::svg_generator::data::IteratorExhaustion>,
+  ) -> Option<BTreeSet<crate::facts::Occurrence>> {
+    use crate::facts::repoints::occurrence_precedes;
+    use crate::facts::DropRoute;
+    use crate::svg_generator::hover_messages::loan_kind_word;
+    use rustc_middle::mir::TerminatorKind;
+
+    let (Some(facts), Some(local), [loan], Some(owner)) =
+      (self.body_facts, item.ref_local(), loans, lender.extract_rap()) else { return None };
+    let info = facts.loans.iter().find(|l| l.loan == *loan && l.source == "borrow")?;
+    let kind = loan_kind_word(info)?;
+    let place = self.fork_lender(info)?;
+    if owner.is_ref() || !(iter.borrows_collection || iter.moves_references) || !iter.loans.contains(loan)
+      || info.lender_local != owner.scope_local() || info.lender_local.is_none() {
+      return None;
+    }
+    let body = &self.bwf.body;
+    let switches = self.branch_switches();
+    let in_slot = |end: Boundary<'_>, slot: rustc_middle::mir::Local| {
+      matches!(end.fact.end_places.as_slice(), [p] if p.local == slot.index() && p.projection.is_empty())
+    };
+    let loop_release = |end: Boundary<'_>| {
+      if !end.release || !in_slot(end, iter.storage) { return None; }
+      let edge = exhaustion.get(&end.fact.occurrence.successor?)?;
+      dominates(body, iter.next, end.fact.occurrence.at).then_some(edge)
+    };
+    let boundaries: Vec<_> = self.reference_effects.ends(*loan)
+      .filter(|end| end.fact.drop_route == DropRoute::Normal
+        && !facts.inline_holder_ends.iter().any(|(_, fact)| std::ptr::eq(fact, end.fact)))
+      .collect();
+    let mut exhaustions = BTreeMap::new();
+    for end in boundaries.iter().copied() {
+      if let Some(edge) = loop_release(end) {
+        let (site, _) = self.normal_fork_site(facts, &switches, edge.closing_row, end.fact, edge.closing_row);
+        exhaustions.insert(end.key(), site);
+      }
+    }
+    if exhaustions.is_empty() { return None; }
+    let branch_exhaustion = exhaustions.values().any(|site| !site.path.is_empty());
+    let iterator_holder = |end: Boundary<'_>| end.fact.end_places.iter().any(|p|
+      p.local == iter.storage.index() && p.projection.is_empty());
+    // A release carried only by hidden storage needs a lender mark on
+    // its actual leg. Where the loop shares the parent column, retain
+    // the existing exit layout for releases with no unique drawn item.
+    let can_place_early_release = |end: Boundary<'_>|
+      in_slot(end, local) || branch_exhaustion && iterator_holder(end);
+    if boundaries.iter().any(|&end| end.release && !exhaustions.contains_key(&end.key()) && !can_place_early_release(end)) {
+      return None;
+    }
+
+    let mut releases = BTreeMap::<(Site, bool, bool), Vec<Boundary<'a>>>::new();
+    let mut stops = BTreeMap::<Site, Vec<Boundary<'a>>>::new();
+    for end in boundaries {
+      let next = match end.fact.fact {
+        Fact::BorrowEnd { to_line, .. } | Fact::HoldEnd { to_line, .. } => to_line,
+        _ => continue,
+      };
+      if let Some(site) = exhaustions.remove(&end.key()) {
+        releases.entry((site, true, false)).or_default().push(end);
+      } else if in_slot(end, local) || end.release && can_place_early_release(end) {
+        let (site, entry) = self.normal_fork_site(facts, &switches, end.row, end.fact, next);
+        if !entry && end.fact.location == body.terminator_loc(end.fact.location.block)
+          && matches!(body[end.fact.location.block].terminator().kind, TerminatorKind::SwitchInt { .. })
+        {
+          // No drawn leg represents this successor.
+          continue;
+        }
+        if end.release {
+          releases.entry((site, false, in_slot(end, local))).or_default().push(end);
+        } else {
+          // A child stored on this path, including in another traversal,
+          // can still return to the item.
+          // A child issued on a sibling leg does not delay this stop.
+          let awaits_child = facts.loans.iter().any(|child| child.lender_local == Some(local)
+            && child.made_through.contains(loan)
+            && (!child.direct_locals.is_empty() || !child.holder_stores.is_empty()
+              || facts.iterators.iter().any(|nested| nested.loans.contains(&child.loan)))
+            && child.issue.is_some_and(|issue| dominates(body, issue, end.fact.occurrence.at))
+            && !self.reference_effects.ends(child.loan).any(|edge| edge.release
+              && occurrence_precedes(body, edge.fact.occurrence, end.fact.occurrence.at)));
+          if !awaits_child {
+            stops.entry(site).or_default().push(end);
+          }
+        }
+      }
+    }
+
+    for ((site, exhausted, from_item), ends) in releases {
+      if exhausted && self.drawn_references.ends.iter().any(|(id, placed)|
+        (self.row_layout.iterator_end_notes.contains_key(id) || self.row_layout.aggregate_titles.contains_key(id))
+          && ends.iter().all(|end| placed.iter().any(|old| old.key() == end.key())))
+      {
+        continue;
+      }
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      let from = if from_item { ResourceTy::Value(item.clone()) } else { ResourceTy::Anonymous };
+      let to = lender.clone();
+      let event = if kind == "mutable" {
+        ExternalEvent::MutableDie { slot: id, from, to, id, static_lender: None, still_borrowed_by: Vec::new(),
+          of_ref_var: false, exhaustion: Vec::new() }
+      } else {
+        ExternalEvent::StaticDie { slot: id, from, to, id, static_lender: None, still_borrowed_by: Vec::new(),
+          of_ref_var: false, exhaustion: Vec::new() }
+      };
+      if exhausted {
+        let title = if iter.moves_references {
+          format!("When the iterator runs out of items, the borrow checker no longer restricts access to {place} through this iterator.")
+        } else {
+          format!("When the iterator runs out of items, its {kind} borrow of {place} ends. This borrow no longer restricts access to {place}")
+        };
+        if ends.iter().all(|end| facts.usable_after_release.contains(&end.key())) {
+          self.row_layout.iterator_end_notes.insert(id, title);
+        } else {
+          self.row_layout.aggregate_titles.insert(id, title);
+        }
+      } else {
+        self.row_layout.aggregate_titles.insert(id,
+          format!("The iterator's {kind} borrow of {place} ends on this path. This borrow no longer restricts access to {place}."));
+      }
+      self.insert_iterator_end(site, event, ends);
+    }
+    let mut stop_edges = BTreeSet::new();
+    for (site, ends) in stops {
+      let id = *self.unique_id;
+      *self.unique_id += 1;
+      let event = ExternalEvent::RefDie { slot: id, from: ResourceTy::Value(item.clone()), to: ResourceTy::Anonymous,
+        num_curr_borrowers: 1, id };
+      if iter.borrows_collection {
+        self.row_layout.iterator_item_stops.insert(id);
+      }
+      stop_edges.extend(ends.iter().map(|end| end.fact.occurrence));
+      self.insert_iterator_end(site, event, ends);
+    }
+    Some(stop_edges)
+  }
+
+  fn insert_iterator_end(&mut self, site: Site, event: ExternalEvent, ends: Vec<Boundary<'a>>) {
+    let id = event.get_id();
+    if ends.iter().all(|end| end.fact.occurrence == ends[0].fact.occurrence) {
+      self.row_layout.record_arm_point(id, ends[0].fact);
+    }
+    self.end_loans.insert(id, ends.iter().map(|end| end.loan).collect::<BTreeSet<_>>().into_iter().collect());
+    self.drawn_references.ends.insert(id, ends);
+    insert(self.preprocessed_events, self.event_line_map, &site.path, site.before, (site.row, event), false);
+  }
+
   /// A projected pattern's reference and the loan of the scrutinee's
   /// owner can end independently. Match each drawn endpoint to its MIR
   /// edge before describing what ends.
@@ -245,6 +396,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let switches = self.branch_switches();
     let mut destinations = BTreeMap::new();
     for (line, e) in self.preprocessed_events.iter() {
+      if self.row_layout.iterator_item_stops.contains(&e.get_id()) { continue; }
       let r = match e {
         ExternalEvent::StaticDie { from, .. } | ExternalEvent::MutableDie { from, .. } | ExternalEvent::RefDie { from, .. } => {
           from.extract_rap()

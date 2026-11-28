@@ -4975,13 +4975,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         _ => None,
       }
     } else { None };
-    let parts_for = |p: &crate::facts::PartialDrop, box_parts, box_payload| {
+    let parts_for = |p: &crate::facts::PartialDrop, empty, box_parts, box_payload| {
       let by_cond = p.conditional.iter().filter_map(|name| self.raps.get(name))
         .any(|r| self.maybe_moved_by_let_now(r.rap.name()) || self.moved_by_chain_condition(&r.rap));
       ReassignParts {
         moved: p.moved.clone(), maybe_moved: p.conditional.clone(), dropped: p.dropped.clone(),
         refilled: p.refilled.clone(),
-        by_cond, flag: p.flag, box_parts, box_payload,
+        by_cond, flag: p.flag, empty, box_parts, box_payload,
         other_drops: p.drops_resource && (p.incomplete || p.moved.is_empty() && p.conditional.is_empty()),
       }
     };
@@ -5020,13 +5020,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     let mut dots = Vec::new();
     let parts = drop.partial.as_ref().filter(|p| p.drops_resource || !p.moved.is_empty())
-      .map(|p| parts_for(p, drop.box_parts, box_payload));
+      .map(|p| parts_for(p, drop.empty, drop.box_parts, box_payload));
     if how != "nothing_to_drop" || parts.is_some() {
       dots.push(dot(rap, conditional, drop.may_have_moved, parts, payload, drop.contents_gone, drop.flag));
     }
     dots.extend(drop.fields.iter().filter_map(|field| {
       let rap = self.write_rap(&field.column)?;
-      let parts = field.partial.as_ref().map(|p| parts_for(p, false, None));
+      let parts = field.partial.as_ref().map(|p| parts_for(p, false, false, None));
       let refilled = drop.partial.as_ref().is_some_and(|parent| parent.refilled.contains(&field.column.name));
       let mut event = dot(rap, field.conditional, field.may_have_moved && !refilled, parts, field.column.payload, field.contents_gone, field.flag);
       if field.conditional {

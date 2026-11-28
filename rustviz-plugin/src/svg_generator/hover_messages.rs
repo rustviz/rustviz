@@ -656,13 +656,16 @@ pub fn event_dot_struct_drop_at_reassign_partial(my_name: &String, parts: &crate
     let (moved_s, moved_plural) = join(&parts.moved);
     let (dropped_s, dropped_plural) = join(&parts.dropped);
     if not_refilled.is_empty() && !parts.other_drops && parts.refilled.is_empty() && !parts.box_parts {
-        let rest = if parts.dropped.is_empty() {
-            String::from("nothing of it is dropped")
+        let moved = if moved_plural { "were" } else { "was" };
+        if parts.empty {
+            out.push_str(&format!(" Its previous {moved_s} {moved} moved out of this slot before the store. The store drops nothing in {}'s old slot.",
+                styled_name_html(my_name)));
+        } else if parts.dropped.is_empty() {
+            out.push_str(&format!(" Its previous {moved_s} {moved} moved out earlier. The previous value needs no further drop at this store."));
         } else {
-            format!("only its previous {} {} dropped", dropped_s, if dropped_plural { "are" } else { "is" })
-        };
-        out.push_str(&format!(" Its previous {} {} moved out earlier, so {}.",
-            moved_s, if moved_plural { "were" } else { "was" }, rest));
+            out.push_str(&format!(" Its previous {moved_s} {moved} moved out earlier, so only its previous {} {} dropped.",
+                dropped_s, if dropped_plural { "are" } else { "is" }));
+        }
         return out;
     }
     if !parts.moved.is_empty() {
@@ -5236,7 +5239,7 @@ pub fn event_dot_branch_merge_box_contents_moved(my_name: &str, mutable: bool) -
     } else {
         String::new()
     };
-    format!("{0}'s contents may have been moved out above, so {0} can't be used from here on{1}.", name, until)
+    format!("{0}'s contents may have been moved out above, so {0} can't be used as a whole from here on{1}.", name, until)
 }
 
 // The first later write may be mandatory, optional, or absent.

@@ -4652,7 +4652,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // some paths or not, adds none (`(bool, String, String)` with both
     // Strings moved, `((String, bool), bool)` after `t.0.0` moved: no drop
     // of `t`).
-    let rest_how = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, top: MovePathIndex| -> &'static str {
+    let remaining = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, top: MovePathIndex, drop_only: bool| -> &'static str {
         let how = drop_how(&rt.state(at, after, top));
         if how != "drops_rest" {
             return how;
@@ -4660,7 +4660,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let mut work = vec![top];
         while let Some(m) = work.pop() {
             let mty = rt.md.move_paths[m].place.ty(&body.local_decls, tcx).ty;
-            if !ty_info(mty).1 {
+            if drop_only && !ty_info(mty).1 {
                 continue;
             }
             let st = rt.state(at, after, m);
@@ -4679,6 +4679,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 _ => None,
             };
             if let Some((def, args)) = enum_ty {
+                // Moving a payload does not empty the enum's tag.
+                if !drop_only { return how; }
                 // Visit every field needing drop. A missing payload path
                 // may still hold a value (e.g. the wildcard in Both(s, _)).
                 let root = rt.md.move_paths[m].place;
@@ -4748,12 +4750,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 match child.get(&i) {
                     Some(ch) => work.push(*ch),
                     // (No move path: it holds a value wherever its parent does.)
-                    None if ty_info(*fty).1 => return how,
+                    None if !drop_only || ty_info(*fty).1 => return how,
                     None => {}
                 }
             }
         }
         "nothing_to_drop"
+    };
+    let rest_how = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, top: MovePathIndex| {
+        remaining(rt, at, after, top, true)
     };
     // Walk backwards to the last effect on each field. A join can
     // hide that the two fields are initialized on complementary paths,
@@ -5646,8 +5651,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let inputs = if how == "drops_if_init" && sites.as_slice() == [at] {
                         replacement_inputs(&mut rt, at, *lhs, rv, &executes)
                     } else { Vec::new() };
+                    let empty = how == "nothing_to_drop" && exact(*lhs).is_some_and(|path|
+                        remaining(&mut rt, &sites, false, path, false) == "nothing_to_drop");
                     Some(ReplacementDrop {
-                        how, flag: flag_for_whole, may_have_moved: may_have_moved(*lhs), may_be_refilled,
+                        how, empty, flag: flag_for_whole, may_have_moved: may_have_moved(*lhs), may_be_refilled,
                         moved_columns, contents_gone, partial, fields, inputs,
                         box_parts: box_parts && !contents_gone, box_payload_maybe_moved,
                     })

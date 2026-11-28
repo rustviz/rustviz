@@ -1135,7 +1135,7 @@ const BOOK: &[Snippet] = &[
             "When the iterator runs out of items, its mutable borrow of v ends. This borrow no longer restricts access to v",
             // x's borrow of v, on the `for` line (#1347).
             "Mutable borrow from v to x",
-            "x's mutable borrow ends",
+            "x has no further use of this reference on this path. The iterator still keeps the collection borrowed.",
             "L5 v's resource is no longer mutably borrowed",
             "v goes out of scope. Its resource is dropped.",
         ],
