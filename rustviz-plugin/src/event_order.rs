@@ -3,7 +3,7 @@
 //! A source span identifies the emitting expression; its byte position is
 //! never an evaluation order.
 use crate::expr_visitor::ExprVisitor;
-use crate::facts::schema::{BodyFacts, DropRoute, Ev, Fact, LoanInfo, Row};
+use crate::facts::schema::{BodyFacts, DropRoute, Ev, Fact, LoanInfo, ReferencePoint, Row};
 use crate::svg_generator::data::{ExternalEvent as E, ResourceAccessPoint, ResourceTy};
 use rustc_middle::mir::{Body, Location, TerminatorKind};
 use rustc_span::Span;
@@ -795,7 +795,7 @@ impl Order<'_, '_> {
                         })
                     };
                     let Some(arm) = source.and_then(|s| branches.iter().position(|b| b.source == Some(s))) else { break };
-                    if dests.insert(arm, (entry, fact_point(edge))).is_some() {
+                    if dests.insert(arm, (entry, *edge)).is_some() {
                         break;
                     }
                 }
@@ -812,14 +812,14 @@ impl Order<'_, '_> {
             for (event, dests) in edits {
                 removed.insert(event.get_id());
                 let listed = map.get(&line).is_some_and(|es| es.iter().any(|e| e.get_id() == event.get_id()));
-                for (arm, (entry, point)) in dests {
+                for (arm, (entry, edge)) in dests {
                     let mut ev = event.clone();
                     let (E::MutableDie { id, .. } | E::StaticDie { id, .. } | E::RefDie { id, .. }) = &mut ev else {
                         unreachable!()
                     };
                     *id = *next;
                     *next += 1;
-                    layout.arm_points.insert(*id, point);
+                    layout.record_arm_point(*id, edge);
                     let arm = &mut branches[arm];
                     if listed {
                         let arrows = arm.line_map.entry(line).or_default();
@@ -1128,6 +1128,40 @@ impl Order<'_, '_> {
             && !ends.is_empty() && ends.is_subset(&restored)
     }
 
+    /// Carry the ordering pass's compiler boundary to the visual mark.
+    /// Distinct successor facts at a common location are ambiguous unless
+    /// the arm end already selects one of them.
+    fn reference_point(&self, event: &E, row: &Row, straight: bool, layout: &RowLayout) -> Option<ReferencePoint> {
+        let (rank, statement_index, phase, _) = layout.arm_points.get(&event.get_id()).copied()
+            .or_else(|| self.point(event, row, straight))?;
+        let block = *self.body.basic_blocks.reverse_postorder().get(rank)?;
+        let at = Location { block, statement_index };
+        if phase == BEFORE_STORE {
+            return Some(ReferencePoint::Before(at));
+        }
+        if let Some(&point) = layout.reference_points.get(&event.get_id()) {
+            return Some(point);
+        }
+        if matches!(event, E::PassByMutableReference { .. } | E::MutableBorrow { via: Some(_), .. }) {
+            let mut calls = normal_facts(row).filter_map(|f| {
+                let Fact::Borrow { loan, .. } = f.fact else { return None };
+                (f.occurrence.at == at && self.matches(event, f)).then(|| self.activations.get(&loan)).flatten()
+            });
+            if let Some(&(block, statement_index, _, _)) = calls.next().filter(|_| calls.next().is_none()) {
+                let block = *self.body.basic_blocks.reverse_postorder().get(block)?;
+                return Some(ReferencePoint::After(Location { block, statement_index }));
+            }
+        }
+        if end(event) {
+            let mut successors = normal_facts(row).filter(|f| f.occurrence.at == at && self.matches(event, f))
+                .filter_map(|f| f.occurrence.successor);
+            if let Some(to) = successors.next() {
+                return successors.all(|s| s == to).then_some(ReferencePoint::Edge { from: at, to });
+            }
+        }
+        Some(ReferencePoint::After(at))
+    }
+
     fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout) {
         let mut lines: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, (line, ev)) in events.iter_mut().enumerate() {
@@ -1139,12 +1173,23 @@ impl Order<'_, '_> {
             lines.entry(*line).or_default().push(i);
         }
         for (line, indices) in lines {
-            if indices.len() < 2 {
-                continue;
-            }
             let Some(row) = self.facts.rows.iter().find(|r| r.line == line) else {
                 continue;
             };
+            let straight_line = !indices.iter().any(|&i| matches!(events[i].1, E::Branch { .. }));
+            if !self.facts.reference_points.is_empty() {
+                for &i in &indices {
+                    let event = &events[i].1;
+                    if let Some(point) = self.reference_point(event, row, straight_line, layout)
+                        .filter(|p| self.facts.reference_points.contains_key(p))
+                    {
+                        layout.reference_points.insert(event.get_id(), point);
+                    }
+                }
+            }
+            if indices.len() < 2 {
+                continue;
+            }
             let has_boundary =
                 indices.iter().any(|&i| end(&events[i].1) || matches!(events[i].1, E::OwnerDropAtReassign { .. })
                     || matches!(&events[i].1, E::GoOutOfScope { ro, .. } if self.facts.bindings.columns.get(ro.name()).is_some_and(|ls| ls.len() > 1)));
@@ -1171,7 +1216,6 @@ impl Order<'_, '_> {
             // Insert each borrow boundary relative to the MIR effects on
             // its columns. An unrelated column or an unlocated event keeps
             // its position unless a proven dependency requires moving it.
-            let straight_line = !indices.iter().any(|&i| matches!(events[i].1, E::Branch { .. }));
             let points: Vec<_> = indices
                 .iter()
                 .map(|&i| {
@@ -1398,6 +1442,7 @@ pub struct RowLayout {
     pub(crate) retained_references: BTreeMap<usize, (String, String)>,
     pub(crate) reassigned_receivers: BTreeSet<usize>,
     arm_points: BTreeMap<usize, Point>,
+    pub(crate) reference_points: BTreeMap<usize, ReferencePoint>,
     pub(crate) closure_receivers: BTreeMap<usize, String>,
     /// Bindings whose callable representation is unknown in this body.
     pub(crate) opaque_callable_columns: BTreeSet<u64>,
@@ -1416,6 +1461,7 @@ pub struct RowLayout {
 impl RowLayout {
     pub fn append(&mut self, other: &mut Self) {
         self.arm_points.append(&mut other.arm_points);
+        self.reference_points.append(&mut other.reference_points);
         self.pattern_payloads.append(&mut other.pattern_payloads);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.returned_call_titles.append(&mut other.returned_call_titles);
@@ -1457,6 +1503,9 @@ impl RowLayout {
 
     pub(crate) fn record_arm_point(&mut self, id: usize, edge: &Ev) {
         self.arm_points.insert(id, fact_point(edge));
+        if let Some(to) = edge.occurrence.successor {
+            self.reference_points.insert(id, ReferencePoint::Edge { from: edge.occurrence.at, to });
+        }
     }
 
     pub(crate) fn has_arm_point(&self, id: usize) -> bool {

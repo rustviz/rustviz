@@ -230,6 +230,8 @@ pub struct BodyFacts {
     pub short_call_borrows: BTreeSet<(rustc_span::Span, usize)>,
     #[serde(skip)]
     pub(crate) value_flow: super::value_flow::ValueFlow,
+    #[serde(skip)]
+    pub(crate) reference_points: BTreeMap<ReferencePoint, State>,
     /// Named holders still carrying each loan when their destructor runs.
     #[serde(skip)]
     pub drop_holders: BTreeMap<usize, BTreeSet<String>>,
@@ -519,6 +521,30 @@ fn optional_local<S: serde::Serializer>(local: &Option<rustc_middle::mir::Local>
     local.map(|l| l.index()).serialize(s)
 }
 
+/// Borrowed place relative to a displayed MIR reference slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReferenceTarget {
+    Binding,
+    Referent,
+    Coerced,
+    Part,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReferenceType {
+    pub mutable: bool,
+    pub referent_needs_drop: bool,
+}
+
+/// The boundary at a displayed MIR effect. An ending edge may select one
+/// successor independently of the other ways out of the instruction.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ReferencePoint {
+    Before(Location),
+    After(Location),
+    Edge { from: Location, to: Location },
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct LoanInfo {
     #[serde(skip)]
@@ -526,6 +552,8 @@ pub struct LoanInfo {
     /// Base local of the actual borrowed place, including projected places.
     #[serde(serialize_with = "optional_local", skip_serializing_if = "Option::is_none")]
     pub lender_local: Option<rustc_middle::mir::Local>,
+    #[serde(skip)]
+    pub(crate) reference_targets: BTreeMap<(rustc_middle::mir::Local, String), ReferenceTarget>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issued_on: Option<SwitchEdge>,
     /// Switch edges required to reach the MIR issuance, including enclosing
@@ -789,6 +817,13 @@ pub struct State {
     /// share their display columns.
     #[serde(skip)]
     pub holder_types: BTreeMap<String, HolderType>,
+    #[serde(skip)]
+    pub(crate) reference_types: BTreeMap<String, ReferenceType>,
+    /// A loan through this slot can outlast the reference value it used.
+    #[serde(skip)]
+    pub(crate) replaced_references: BTreeSet<(String, usize)>,
+    #[serde(skip)]
+    pub(crate) reference_carriers: BTreeMap<usize, BTreeSet<String>>,
     /// Initialized ManuallyDrop wrappers whose contents a resolved unsafe
     /// call took out on at least one real path to this boundary.
     #[serde(skip)]

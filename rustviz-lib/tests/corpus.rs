@@ -17902,7 +17902,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a's resource is mutably borrowed by ra; a can't be used until the borrow ends",
             "the resource ra points to is mutably borrowed by ra2 through ra. Until the borrow ends, the reference in ra can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference if the binding itself is unborrowed",
             // rb2 = &mut rb borrows rb itself, not what rb points to (#914).
-            "rb is mutably borrowed by rb2; rb can't be used until the borrow ends",
+            "rb is mutably borrowed by rb2; rb can't be used while the borrow is live",
         ],
         // A reference owns nothing.
         must_not_contain: &[
@@ -17938,7 +17938,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "advanced_deref",
         // `let z = &mut y;` with y: &i32 borrows the reference y itself;
         // through a `&` nothing can borrow the value y points to mutably.
-        must_contain: &["y is mutably borrowed by z; y can't be used until the borrow ends"],
+        must_contain: &["y is mutably borrowed by z; y can't be used while the borrow is live"],
         must_not_contain: &["the value y points to is mutably borrowed"],
     },
     TooltipExpect {
@@ -20670,9 +20670,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "self holds a mutable reference, but self.items is mutably borrowed by the `for` loop's iterator, so self.items can't be used until the loop ends",
             "self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator until the loop ends",
-            "self holds a mutable reference, but self.items is mutably borrowed by first, so self.items can't be used while the borrow is live",
-            "self holds a mutable reference, but self.items is mutably borrowed by x, so self.items can't be used while the borrow is live",
-            "self holds a mutable reference, but self.items is immutably borrowed by m while the borrow is live",
+            "self holds a mutable reference. The borrow checker treats self.items as exclusively borrowed here. These places stay borrowed while first is in use",
+            "self holds a mutable reference. The borrow checker treats self.items as exclusively borrowed here. These places stay borrowed while x is in use",
+            "self holds a mutable reference. The borrow checker treats self.items as immutably borrowed here. These places stay borrowed while m is in use",
             "r holds a mutable reference, but r.items is mutably borrowed by the `for` loop's iterator, so r.items can't be used until the loop ends",
             "self holds a mutable reference; it can read and write the borrowed resource",
             "r holds a mutable reference; it can read and write the borrowed resource",
@@ -20711,12 +20711,12 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // each). `self.other` in `skip(self.n).take(self.other.len())` is
         // borrowed only for the call, so only `self.items` is named.
         must_contain: &[
-            "self holds a mutable reference, but self.items and self.other are immutably borrowed by it while the borrow is live",
-            "self holds a mutable reference, but self.items is immutably borrowed by it while the borrow is live",
-            "self holds a mutable reference, but self.items and self.other are immutably borrowed by l while the borrow is live",
-            "self holds a mutable reference, but self.items and self.other are mutably borrowed by x, so they can't be used while the borrow is live",
+            "self holds a mutable reference. The borrow checker treats self.items and self.other as immutably borrowed here. These places stay borrowed while it is in use",
+            "self holds a mutable reference. The borrow checker treats self.items as immutably borrowed here",
+            "self holds a mutable reference. The borrow checker treats self.items and self.other as immutably borrowed here. These places stay borrowed while l is in use",
+            "self holds a mutable reference. The borrow checker treats self.items and self.other as exclusively borrowed here. These places stay borrowed while x is in use",
             "self holds a mutable reference, but self.other is mutably borrowed and self.items immutably borrowed by the `for` loop's iterator until the loop ends, so self.other can't be used during that borrow",
-            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by pairs while the borrow is live, so r.other can't be used during that borrow",
+            "r holds a mutable reference. The borrow checker treats r.other as exclusively borrowed here. The borrow checker treats r.items as immutably borrowed here. These places stay borrowed while pairs is in use",
             "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by the `for` loop's iterator until the loop ends, so r.other can't be used during that borrow",
             "it holds a value that immutably borrows self.items (it isn't a reference itself)",
             "it holds a value that immutably borrows self.other (it isn't a reference itself)",
@@ -20761,10 +20761,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // over such a head named only self.items; self.n's capture was not
         // drawn (`self.n += 1` in the body is E0506).
         must_contain: &[
-            "self holds a mutable reference, but self.items and self.n are immutably borrowed by it while the borrow is live",
-            "self holds a mutable reference, but self.n is mutably borrowed and self.items immutably borrowed by it while the borrow is live, so self.n can't be used during that borrow",
+            "self holds a mutable reference. The borrow checker treats self.items and self.n as immutably borrowed here. These places stay borrowed while it is in use",
+            "self holds a mutable reference. The borrow checker treats self.n as exclusively borrowed here. The borrow checker treats self.items as immutably borrowed here",
             "self holds a mutable reference, but self.items and self.n are immutably borrowed by the `for` loop's iterator until the loop ends",
-            "self holds a mutable reference, but self.n is immutably borrowed by it while the borrow is live",
+            "self holds a mutable reference. The borrow checker treats self.n as immutably borrowed here. These places stay borrowed while it is in use",
             "it holds a value that immutably borrows self.items (it isn't a reference itself)",
             "it holds a value that immutably borrows self.n (it isn't a reference itself)",
             "it holds a value that mutably borrows self.n (it isn't a reference itself)",
@@ -20822,7 +20822,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "p.n's value is immutably borrowed by r",
             "p.n's value is no longer immutably borrowed",
             "If r holds a shared borrow affecting p.n, that borrow ends here. It no longer restricts access to p.n",
-            "self holds a mutable reference, but self.items is immutably borrowed by f while the borrow is live",
+            "self holds a mutable reference. The borrow checker treats self.items as immutably borrowed here. These places stay borrowed while f is in use",
             "self.items's resource is immutably borrowed by f; self.items is read-only while the borrow is live",
             "f holds a value that can immutably borrow self.items (f isn't a reference itself)",
             "Immutable borrow from self.items to f: find's signature gives the value it returns the same lifetime as the references stored in the value it was called on; f's value can hold a reference (f isn't a reference itself)",
@@ -20868,7 +20868,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // compiles. Where the borrows end is pinned by
         // `a_boxed_closure_keeps_its_borrows_until_dropped`.
         must_contain: &[
-            "self holds a mutable reference, but self.n is immutably borrowed by g while the borrow is live",
+            "self holds a mutable reference. The borrow checker treats self.n as immutably borrowed here. These places stay borrowed while g is in use",
             "self.n's value is immutably borrowed by g; self.n is read-only while the borrow is live",
             "g holds a value that immutably borrows self.n (g isn't a reference itself)",
             "Immutable borrow from self.n to g: boxed's signature gives the value it returns the same lifetime as its argument; g isn't a reference, but its value holds one",
@@ -22776,7 +22776,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "reborrow_through_local_mut_ref_1152",
         must_contain: &[
             "Mutable reborrow from r1 to it: iter_mut's signature gives the value it returns the same lifetime as the value it was called on; it isn't a reference, but its value holds one",
-            "the resource r1 points to is mutably borrowed by it through r1. Until the borrow ends, the reference in r1 can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference if the binding itself is unborrowed",
+            "the resource r1 points to is mutably borrowed through r1. Until the borrow ends, the reference in r1 can't be read, moved, or used to access the resource. A mutable binding can still be assigned a new reference if the binding itself is unborrowed. The borrow checker tracks this borrow through it",
             "it's mutable borrow ends",
             "_x's mutable borrow ends",
             "Mutable reborrow from r2 to x: first_mut's signature gives the value it returns the same lifetime as the value it was called on; unwrap passes the borrow on",
@@ -28255,7 +28255,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "borrow_stored_through_local_ref",
         // `let rh = &mut hold;` borrows the struct, which restricts its field
         // hold.r (a whole-struct loan; not a direct borrow of the field).
-        must_contain: &["hold.r is mutably borrowed by rh; hold.r can't be used until the borrow ends"],
+        must_contain: &["hold.r is mutably borrowed by rh; hold.r can't be used while the borrow is live"],
         must_not_contain: &[],
     },
     TooltipExpect {
@@ -30048,14 +30048,14 @@ fn initialized_reference_can_stop_holding_a_loan_1862() {
     let svg = rv.timeline_panel_string();
     // r10 is still initialized after the copy, but the rustc loan is
     // live through o10's later use. o10 may contain the other arm's reference.
-    for (row, holder) in [(107, "r10"), (108, "o10")] {
-        let (_, tips) = column_line_at(&svg, "p10", row);
-        assert!(tips[0].contains(&format!("The borrow checker tracks this borrow through {holder}")), "{row}: {tips:?}");
-        assert!(!tips[0].contains("mutably borrowed by"), "{row}: {tips:?}");
-        if row == 107 {
-            assert!(tips[0].contains("holds a shared reference"), "{tips:?}");
-        }
-    }
+    let (_, after_call) = column_line_at(&svg, "p10", 107);
+    assert!(after_call[0].contains("tracks this borrow through r10, which holds a shared reference"), "{after_call:?}");
+    assert!(!after_call[0].contains("reserved"), "{after_call:?}");
+    let (_, joined) = column_line_at(&svg, "p10", 108);
+    assert!(joined[0].contains("tracks this borrow through o10"), "{joined:?}");
+    assert!(!joined[0].contains("mutably borrowed by"), "{joined:?}");
+    check_review_tip(&svg, "p10@L108:branch_line:revoked_privilege",
+        &["tracks this borrow through r10, which holds a shared reference"], &["mutably borrowed by r10"]);
 }
 
 #[test]
@@ -39267,6 +39267,20 @@ fn let_reference_assigned_in_arms_gives_back_every_lender() {
     }
 }
 
+/// Find a title on the column as it reaches the use, independently of
+/// any cuts for effects stacked above the store.
+fn reference_title_reaches(svg: &str, x: f64, from: f64, to: f64, text: &str) -> bool {
+    let doc = roxmltree::Document::parse(svg).expect("well-formed timeline");
+    doc.descendants().any(|node| {
+        node.attribute("data-rv-kind") == Some("line")
+            && timeline_tooltips(&svg[node.range()]).iter().any(|tip| tip.starts_with(text))
+            && node.descendants().filter(|n| n.has_tag_name("line")).any(|line| {
+                let num = |attr| line.attribute(attr).and_then(|v| v.parse::<f64>().ok()).unwrap_or(f64::NAN);
+                (num("x1") - x).abs() <= 2.0 && num("y1") < to && num("y2") >= to && num("y2") > from
+            })
+    })
+}
+
 /// #1073 (`field_borrow_through_ref_1073`): while only a field of what a
 /// `&mut` reference points to is borrowed, the reference's own line is
 /// drawn, in the style it has before the borrow, with a text naming the
@@ -39308,11 +39322,11 @@ fn a_field_borrow_through_a_reference_keeps_its_line() {
         (selfs[1], code_row_y(&code, "for x in self.items.iter() {"), closes[3],
             "self holds a mutable reference, but self.items is immutably borrowed by the `for` loop's iterator until the loop ends"),
         (selfs[2], code_row_y(&code, "let first = self.items.first_mut().unwrap();"), code_row_y(&code, "*first += 1;"),
-            "self holds a mutable reference, but self.items is mutably borrowed by first, so self.items can't be used while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.items as exclusively borrowed here. These places stay borrowed while first is in use"),
         (selfs[3], code_row_y(&code, "if let Some(x) = self.items.last_mut() {"), code_row_y(&code, "*x += 1;"),
-            "self holds a mutable reference, but self.items is mutably borrowed by x, so self.items can't be used while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.items as exclusively borrowed here. These places stay borrowed while x is in use"),
         (selfs[4], code_row_y(&code, "let m = self.items.iter().max().unwrap();"), code_row_y(&code, "*m"),
-            "self holds a mutable reference, but self.items is immutably borrowed by m while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.items as immutably borrowed here. These places stay borrowed while m is in use"),
         (label_x(&tl, "r"), code_row_y(&code, "for e in r.items.iter_mut() {"), closes[10],
             "r holds a mutable reference, but r.items is mutably borrowed by the `for` loop's iterator, so r.items can't be used until the loop ends"),
     ];
@@ -39331,8 +39345,7 @@ fn a_field_borrow_through_a_reference_keeps_its_line() {
             }
         }
         assert!(reached >= to, "column x={} isn't drawn from y={} to y={} (reaches {}): {:?}", x, from, to, reached, lines);
-        let texts = state_lines_with_tooltip(&tl, text);
-        assert!(texts.iter().any(|&(a, b)| a <= from && b >= to), "no line {:?} from y={} to y={}: {:?}", text, from, to, texts);
+        assert!(reference_title_reaches(&tl, x, from, to, text), "no line on x={x} at y={to} with {text:?}");
     }
     // The call that lends the field to `first` / `x` / `m` doesn't give it
     // back (main said it did).
@@ -39403,19 +39416,19 @@ fn a_borrow_of_several_fields_through_a_reference_keeps_its_line() {
     let pairs = "let pairs = r.other.iter_mut().zip(r.items.iter());";
     let spans = [
         (selfs[0], row(both), counts[0],
-            "self holds a mutable reference, but self.items and self.other are immutably borrowed by it while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.items and self.other as immutably borrowed here. These places stay borrowed while it is in use"),
         (selfs[1], row("let it = self.items.iter();"), counts[1],
-            "self holds a mutable reference, but self.items is immutably borrowed by it while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.items as immutably borrowed here"),
         (selfs[2], row(longer), row("l.len()"),
-            "self holds a mutable reference, but self.items and self.other are immutably borrowed by l while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.items and self.other as immutably borrowed here. These places stay borrowed while l is in use"),
         (selfs[3], row(skip), row("it.sum()"),
-            "self holds a mutable reference, but self.items is immutably borrowed by it while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.items as immutably borrowed here"),
         (selfs[4], row(looped), close_after(row("*b += *a;")),
             "self holds a mutable reference, but self.other is mutably borrowed and self.items immutably borrowed by the `for` loop's iterator until the loop ends, so self.other can't be used during that borrow"),
         (selfs[5], row(peek), row("*x += 1;"),
-            "self holds a mutable reference, but self.items and self.other are mutably borrowed by x, so they can't be used while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.items and self.other as exclusively borrowed here. These places stay borrowed while x is in use"),
         (r, row(pairs), row("for (o, i) in pairs {"),
-            "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by pairs while the borrow is live, so r.other can't be used during that borrow"),
+            "r holds a mutable reference. The borrow checker treats r.other as exclusively borrowed here. The borrow checker treats r.items as immutably borrowed here. These places stay borrowed while pairs is in use"),
         (r, row("for (o, i) in pairs {"), close_after(row("*o += *i;")),
             "r holds a mutable reference, but r.other is mutably borrowed and r.items immutably borrowed by the `for` loop's iterator until the loop ends, so r.other can't be used during that borrow"),
     ];
@@ -39433,8 +39446,7 @@ fn a_borrow_of_several_fields_through_a_reference_keeps_its_line() {
             }
         }
         assert!(reached >= to, "column x={} isn't drawn from y={} to y={} (reaches {}): {:?}", x, from, to, reached, lines);
-        let texts = state_lines_with_tooltip(&tl, text);
-        assert!(texts.iter().any(|&(a, b)| a <= from && b >= to), "no line {:?} from y={} to y={}: {:?}", text, from, to, texts);
+        assert!(reference_title_reaches(&tl, x, from, to, text), "no line on x={x} at y={to} with {text:?}");
     }
     // The line that makes the borrow doesn't give the fields back (main
     // said it did, though the result keeps them). A line's events can
@@ -39507,13 +39519,13 @@ fn a_closure_capturing_a_field_through_a_reference_keeps_its_line() {
     let loop_end = close_after(row("self.other.push(x as i32);"));
     let spans = [
         (selfs[0], row(read), counts[0],
-            "self holds a mutable reference, but self.items and self.n are immutably borrowed by it while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.items and self.n as immutably borrowed here. These places stay borrowed while it is in use"),
         (selfs[1], row(bump), counts[1],
-            "self holds a mutable reference, but self.n is mutably borrowed and self.items immutably borrowed by it while the borrow is live, so self.n can't be used during that borrow"),
+            "self holds a mutable reference. The borrow checker treats self.n as exclusively borrowed here. The borrow checker treats self.items as immutably borrowed here"),
         (selfs[2], row(looped), loop_end,
             "self holds a mutable reference, but self.items and self.n are immutably borrowed by the `for` loop's iterator until the loop ends"),
         (selfs[3], row(count), row("it.sum()"),
-            "self holds a mutable reference, but self.n is immutably borrowed by it while the borrow is live"),
+            "self holds a mutable reference. The borrow checker treats self.n as immutably borrowed here. These places stay borrowed while it is in use"),
     ];
     for (x, from, to, text) in spans {
         let lines = column(x);
@@ -39529,8 +39541,7 @@ fn a_closure_capturing_a_field_through_a_reference_keeps_its_line() {
             }
         }
         assert!(reached >= to, "column x={} isn't drawn from y={} to y={} (reaches {}): {:?}", x, from, to, reached, lines);
-        let texts = state_lines_with_tooltip(&tl, text);
-        assert!(texts.iter().any(|&(a, b)| a <= from && b >= to), "no line {:?} from y={} to y={}: {:?}", text, from, to, texts);
+        assert!(reference_title_reaches(&tl, x, from, to, text), "no line on x={x} at y={to} with {text:?}");
     }
     // A dot on column x in rows at..to with a bullet `want` accepts.
     let given_back = |x: f64, at: f64, to: f64, want: &dyn Fn(&str) -> bool| -> bool {
@@ -39584,7 +39595,7 @@ fn a_closure_find_does_not_keep_borrows_only_the_receiver_field() {
     let lets = [code_row_y(&code, "let f = self.items.iter().find(|x| **x as usize == self.n);"), code_row_y(&code, "let f = self.items.iter().find(|x| {")];
     let ends = code_rows_y(&code, "*f.unwrap_or(&0)");
     assert_eq!(ends.len(), 2, "rows: {:?}", ends);
-    let text = "self holds a mutable reference, but self.items is immutably borrowed by f while the borrow is live";
+    let text = "self holds a mutable reference. The borrow checker treats self.items as immutably borrowed here. These places stay borrowed while f is in use";
     for (x, from, to) in [(selfs[2], lets[0], ends[0]), (selfs[3], lets[1], ends[1])] {
         let lines = column(x);
         let before = lines.iter().find(|(a, b, _)| *a < from && *b >= from)
@@ -39592,8 +39603,7 @@ fn a_closure_find_does_not_keep_borrows_only_the_receiver_field() {
         for (a, _, class) in lines.iter().filter(|(a, b, _)| *b > from && *a < to) {
             assert_eq!(*class, before, "column x={} changes style from {:?} to {:?} at y={} while only self.items is borrowed", x, before, class, a);
         }
-        let texts = state_lines_with_tooltip(&tl, text);
-        assert!(texts.iter().any(|&(a, b)| a <= from && b >= to), "no line {:?} from y={} to y={}: {:?}", text, from, to, texts);
+        assert!(reference_title_reaches(&tl, x, from, to, text), "no line on x={x} at y={to} with {text:?}");
     }
 }
 
@@ -42476,7 +42486,10 @@ fn review_scrutinee_places_and_escaped_loan() {
         ("shared@L12:dot:duplicate", "**shared's value is copied"),
         ("arm@L14:dot:mutable_borrow", "arm is bound to a mutable reference to r"),
         ("r@L11-12:line:", "r holds a mutable reference"),
-        ("r@L11-12:line:", "r is immutably borrowed by shared"),
+        // MIR borrows _2 into the scrutinee before copying it into
+        // the arm binding shared.
+        ("r@L11-12:line:", "r is immutably borrowed"),
+        ("r@L11-12:line:", "This borrow supplies the reference for shared"),
     ] {
         assert!(tooltip_of_id(&svg, id).unwrap().contains(wanted), "{id}: {wanted}");
     }
@@ -42702,8 +42715,11 @@ fn mir_review_call_keeps_its_shared_input_shared() {
         ("known_bugs/1823_shared_ref_of_mut_hedge", "q24", "69", "66")] {
         let svg = run_with_local_backend(case).timeline_panel_string();
         assert!(drawn_clauses(&svg, name, line).iter().all(|(_, _, t)| !t.contains("no longer mutably borrowed")));
-        assert!(tooltip_of_id(&svg, &format!("{name}@L{start}-{line}:line:partial_privilege"))
-            .is_some_and(|t| t.contains("holds an immutable reference")));
+        for row in start.parse::<usize>().unwrap()..line.parse::<usize>().unwrap() {
+            let (state, titles) = column_line_at(&svg, name, row);
+            assert_eq!(state, "partial_privilege");
+            assert!(titles.iter().any(|t| t.contains("holds an immutable reference")), "{titles:?}");
+        }
     }
 }
 
@@ -44335,6 +44351,66 @@ fn sibling_scope_drops_in_one_line_blocks() {
     let boxes = run_with_local_backend("rv3_issues/1813_same_name_blocks_boxes").timeline_panel_string();
     check_review_tip(&boxes, "b@L2:dot:", &["Its contents were moved out earlier", "heap allocation"], &["No resource is dropped"]);
     check_review_tip(&boxes, "b@L3:dot:", &["including the String it holds"], &["contents were moved out"]);
+}
+
+#[test]
+fn p4_reference_segments_use_mir_places_and_arm_boundaries() {
+    let rv = run_with_local_backend("p4_reference_segments");
+    let svg = rv.timeline_panel_string();
+    let code = rv.code_panel_string();
+
+    // The MIR borrow of r.left leaves r.right writable. &mut r
+    // separately borrows the binding itself.
+    check_review_tip(&svg, "r@L6-8:line:full_privilege",
+        &["r.left is mutably borrowed by part"], &["r can't be used", "the resource"]);
+    check_review_tip(&svg, "r@L13-14:line:revoked_privilege",
+        &["r is mutably borrowed by held"], &["what r points to", "through r"]);
+
+    // RHS borrows the incoming next and stores it into r on the same
+    // source row as the borrow through r. old is still used afterwards.
+    for row in [20, 21] {
+        let (style, title) = if row == 20 {
+            ("full_privilege".to_owned(), vec![tooltip_of_id(&svg, "r@L20:line:full_privilege").unwrap()])
+        } else {
+            column_line_at(&svg, "r", row)
+        };
+        assert_eq!(style, "full_privilege");
+        assert!(title[0].contains("can read and write the borrowed value"), "{title:?}");
+        assert!(!title[0].contains("borrowed by old"), "{title:?}");
+    }
+
+    // Each branch has a different MIR successor and restriction. The
+    // field borrow leaves the original column width and endpoints intact.
+    check_review_tip(&svg, "r@L28-30:branch_line:full_privilege",
+        &["r.left is mutably borrowed by field"], &["currently shared", "r can't be used"]);
+    check_review_tip(&svg, "r@L33-35:branch_line:partial_privilege",
+        &["the value it points to is currently shared through it"], &["mutably borrowed", "r.left"]);
+    // At the join, either referent can be restricted. dst can point to
+    // only one of them on an execution, and its use keeps both possible.
+    for name in ["r", "other"] {
+        check_review_tip(&svg, &format!("{name}@L52-53:line:revoked_privilege"),
+            &["A mutable reborrow may still be live", "tracks this borrow through dst"], &["mutably borrowed by dst"]);
+    }
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let mark = |id| doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id)).unwrap();
+    assert!(mark("r@L28-30:branch_line:full_privilege").attribute("data-underline-y").is_some());
+    assert_eq!(code_row_y(&code, "*field += 2;") - code_row_y(&code, "let field = &mut r.left;"), 60.0);
+    let d = mark("r@L21-23:bracket:full_privilege").attribute("d").unwrap();
+    assert!(d.ends_with("l 15 12 v 36 l -15 12"), "{d}");
+}
+
+#[test]
+fn p4_same_row_reference_stores_stop_old_segment_titles() {
+    let svg = run_with_local_backend("p4_reference_segments").timeline_panel_string();
+    // The two reborrows are still independently usable. Borrowck allows
+    // writing r.left after r takes the third reference on L44.
+    check_review_tip(&svg, "r@L43-44:line:revoked_privilege",
+        &["mutably borrowed by before through r"], &["middle"]);
+    check_review_tip(&svg, "r@L44:line:full_privilege",
+        &["r holds a mutable reference"], &["borrowed by middle", "borrowed by before"]);
+    let (state, after) = column_line_at(&svg, "r", 45);
+    assert_eq!(state, "full_privilege");
+    assert!(after[0].contains("can read and write the borrowed value"), "{after:?}");
 }
 
 #[test]

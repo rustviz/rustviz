@@ -1977,6 +1977,13 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     }).collect();
     let mut slice_items = BTreeSet::new();
     let mut binding_loans = BTreeMap::new();
+    let reference_slots: Vec<_> = columns.iter().chain(&synth).filter_map(|(_, slot, name)| {
+        let TyKind::Ref(_, referent, mutability) = *slot.ty(body, tcx).ty.kind() else { return None };
+        Some((*slot, name, ReferenceType {
+            mutable: mutability.is_mut(),
+            referent_needs_drop: referent.needs_drop(tcx, typing_env),
+        }))
+    }).collect();
     let mut evs: BTreeMap<usize, Vec<Ev>> = BTreeMap::new();
     let push = |evs: &mut BTreeMap<usize, Vec<Ev>>, (row, ev): (usize, Ev)| evs.entry(row).or_default().push(ev);
     // Where each two-phase loan is activated.
@@ -2093,11 +2100,38 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         if runs.contains(&loc.block) {
             push(&mut evs, cx.ev(*loc, Fact::Borrow { loan: idx, lender: lender.clone(), kind, holder }));
         }
+        let assigned = bd.assigned_place();
+        let coerced = body[loc.block].statements.get(loc.statement_index + 1).is_some_and(|st| {
+            matches!(&st.kind, StatementKind::Assign(pair) if matches!(pair.1,
+                Rvalue::Ref(_, _, p) if p.local == assigned.local
+                    && assigned.projection.is_empty() && !body.local_decls[assigned.local].is_user_variable()
+                    && p.projection.as_slice() == [ProjectionElem::Deref, ProjectionElem::Deref]))
+        });
         loans.push(LoanInfo {
             issue: Some(*loc),
             issued_on: cx.rows.edge_at(*loc),
             issuance_path: issuance_path(*loc),
             lender_local: Some(bp.local),
+            reference_targets: reference_slots.iter().filter_map(|(slot, name, _)| {
+                let target = if place_under(*slot, bp) {
+                    if coerced && place_under(bp, *slot) { ReferenceTarget::Coerced }
+                    else { ReferenceTarget::Binding }
+                } else if place_under(bp, *slot) {
+                    match &bp.projection[slot.projection.len()..] {
+                        [ProjectionElem::Deref, rest @ ..] if rest.iter().all(|step| *step == ProjectionElem::Deref) =>
+                            ReferenceTarget::Referent,
+                        [ProjectionElem::Deref, ProjectionElem::Downcast(_, variant), ProjectionElem::Field(..)]
+                            if slot.ty(body, tcx).ty.builtin_deref(true).and_then(|ty| ty.ty_adt_def())
+                                .is_some_and(|adt| adt.variant(*variant).fields.len() == 1) =>
+                            ReferenceTarget::Referent,
+                        [ProjectionElem::Deref, ..] => ReferenceTarget::Part,
+                        _ => return None,
+                    }
+                } else {
+                    return None;
+                };
+                Some(((slot.local, (*name).clone()), target))
+            }).collect(),
             loan: idx,
             line: cx.row_of(*loc),
             col: cx.rows.col.get(loc).copied().unwrap_or(0),
@@ -2173,6 +2207,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             issued_on: u.at.and_then(|at| cx.rows.edge_at(at)),
             issuance_path: u.at.map(issuance_path).unwrap_or_default(),
             lender_local: u.place.map(|p| p.local).or(u.param),
+            reference_targets: BTreeMap::new(),
             loan: id,
             line,
             col,
@@ -4656,6 +4691,44 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let drop_holders_at_reassign: Vec<_> = reassign_drop_holders.iter().filter_map(|(local, loans)|
         Some((*local, cx.names.locals.get(local)?, drop_origins.get(local)?, loans))
     ).collect();
+    // A reborrow does not prevent writing a new reference into an
+    // unborrowed slot. Stop the backward slice at the actual MIR writes
+    // or at the issue of this loan, keeping the two generations distinct.
+    let reference_writes: Vec<_> = body.basic_blocks.iter_enumerated()
+        .filter(|(bb, _)| runs.contains(bb)).flat_map(|(bb, block)| {
+            let normal_result = match block.terminator().kind {
+                TerminatorKind::Call { destination, target: Some(target), .. } =>
+                    Some((body.terminator_loc(bb), Some(target), destination)),
+                _ => None,
+            };
+            block.statements.iter().enumerate().filter_map(move |(statement_index, st)| {
+                let StatementKind::Assign(pair) = &st.kind else { return None };
+                Some((Location { block: bb, statement_index }, None, pair.0))
+            }).chain(normal_result)
+        }).filter(|&(_, _, dest)| reference_slots.iter().any(|(slot, _, _)| place_under(*slot, dest)))
+        .collect();
+    let replaced_since = |slot, issue, exits: &[Location], after, imaginary| {
+        let writes: Vec<_> = reference_writes.iter().filter(|&&(at, _, dest)|
+            at != issue && ldom(issue, at) && place_under(slot, dest)).collect();
+        if writes.is_empty() { return false; }
+        let mut seen = BTreeSet::new();
+        let mut work: Vec<_> = exits.iter().map(|&at| (at, after, None)).collect();
+        let mut crossed_write = false;
+        while let Some((at, inclusive, target)) = work.pop() {
+            if !seen.insert((at, inclusive, target)) || !can_walk_back(at, imaginary) { continue; }
+            if at == issue && inclusive { return false; }
+            if inclusive && writes.iter().any(|&&(write, on_return, _)| write == at && on_return == target) {
+                crossed_write = true;
+                continue;
+            }
+            if at.statement_index != 0 {
+                work.push((Location { statement_index: at.statement_index - 1, ..at }, true, None));
+            } else {
+                work.extend(predecessors(at).iter().map(|&bb| (body.terminator_loc(bb), true, Some(at.block))));
+            }
+        }
+        crossed_write
+    };
     let mut state_at = |exits: &[Location], after: bool, imaginary: bool, runtime: Option<&[Location]>| -> State {
         let mut st = State::default();
         let mut active = BTreeMap::new();
@@ -4966,6 +5039,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         st.locals = column_locals;
         st.state.retain(|name, _| st.locals.get(name) != Some(&None));
         st.holder_types = holder_types.into_iter().filter_map(|(name, ty)| Some((name, ty?))).collect();
+        st.reference_types = reference_slots.iter().filter_map(|(slot, name, kind)|
+            (st.locals.get(*name) == Some(&Some(slot.local))).then_some(((*name).clone(), *kind))).collect();
         // Loans in scope where the next row starts on the same path: in
         // scope after the exit and still at the successor (a loan whose last
         // use is on this row is out of scope there; another path's loan
@@ -5082,6 +5157,17 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 // Only columns that hold a value can be lent.
                 if matches!(st.state.get(c), Some(&"own" | &"partly" | &"maybe")) {
                     st.lent.entry(c.clone()).or_default().push(Lent { loan: l.loan, kind, holder: holder.clone(), iterator, current: current.clone(), drop_holder: None });
+                    if let Some(issue) = l.issue {
+                        for (slot, name, _) in &reference_slots {
+                            if *name == c && st.locals.get(c) == Some(&Some(slot.local))
+                                && matches!(l.reference_targets.get(&(slot.local, c.clone())),
+                                    Some(ReferenceTarget::Referent | ReferenceTarget::Part))
+                                && replaced_since(*slot, issue, exits, after, imaginary)
+                            {
+                                st.replaced_references.insert((c.clone(), l.loan));
+                            }
+                        }
+                    }
                 }
             }
             // A lender that is no column (`*r` reborrowed through `r`,
@@ -5284,6 +5370,34 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 loan.drop_holder = explanations.get(&loan.loan).cloned();
             }
         }
+        // Use the same point's live holder origins. In particular, an
+        // initialized local with a dead origin can remain in Lent::current.
+        for (name, restrictions) in &st.lent {
+            if !st.reference_types.contains_key(name) { continue; }
+            for loan in restrictions {
+                st.reference_carriers.entry(loan.loan).or_insert_with(|| {
+                    let mut carriers: BTreeSet<String> = st.holds.iter().filter(|(_, ls)|
+                        ls.contains(&loan.loan)).map(|(h, _)| h.clone()).collect();
+                    // For shared direct references, the origin at this
+                    // boundary can be live through a later use of an inner
+                    // projection. Keep that direct carrier if no other
+                    // origin supplies it. A mutable origin can outlive the
+                    // reference that first carried it.
+                    if carriers.is_empty() && loan.kind == "shared" && loan.current.len() == 1 {
+                        carriers.extend(loan.current.iter().cloned());
+                    }
+                    // A live projection is a more precise carrier than the
+                    // corresponding aggregate local.
+                    for field in &loan.current {
+                        if let Some(column) = column_info.iter().find(|col| col.name == *field && col.parent.is_some()) {
+                            carriers.remove(&column.root);
+                            carriers.insert(field.clone());
+                        }
+                    }
+                    carriers
+                });
+            }
+        }
         for take in &manually_taken {
             if st.state.get(&take.column) != Some(&"own") { continue; }
             let mut paths = ExtractionPaths::default();
@@ -5328,7 +5442,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let arm_edges: Vec<_> = switches.iter().filter_map(|exit| {
         let arm = super::SourceArm { branch: exit.branch?, index: exit.arm? };
         let edge = exit.edge;
-        (!drop_holders_at_reassign.is_empty() && runs.contains(&edge.switch.block) && runs.contains(&edge.successor))
+        ((!reference_slots.is_empty() || !drop_holders_at_reassign.is_empty())
+            && runs.contains(&edge.switch.block) && runs.contains(&edge.successor))
             .then_some((arm, edge.successor))
     }).collect();
     let mut arm_entries = rustc_data_structures::fx::FxIndexMap::<_, BTreeMap<_, BTreeSet<_>>>::default();
@@ -5878,6 +5993,65 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let dead_implicit_else = implicit_else.peek().is_some() && implicit_else.all(|&p| !edge_runs(p));
         joins.insert(id, Join { at, state, incoming: edge_states, changes, assignments, dead_implicit_else });
     }
+    // Only source rows with multiple effects need interior snapshots.
+    // Store full compiler coordinates, including the successor on an end.
+    let mut reference_points = BTreeMap::new();
+    if !reference_slots.is_empty() {
+        let mut points = BTreeSet::new();
+        for row in &out_rows {
+            let effects: Vec<_> = row.facts.iter().filter(|e| e.drop_route == DropRoute::Normal).collect();
+            if !effects.iter().any(|e| match &e.fact {
+                Fact::Borrow { loan, .. } | Fact::BorrowEnd { loan, .. } =>
+                    loans.iter().any(|l| l.loan == *loan && !l.reference_targets.is_empty()),
+                Fact::Repoint { .. } => true,
+                Fact::Init { reassign: true, .. } => reference_writes.iter().any(|w| w.0 == e.location),
+                _ => false,
+            }) || !effects.first().is_some_and(|first| effects.iter().any(|e| e.location != first.location)) {
+                continue;
+            }
+            for event in effects {
+                let at = event.occurrence.at;
+                points.extend([ReferencePoint::Before(at), ReferencePoint::After(at)]);
+                if let Some(to) = event.occurrence.successor {
+                    points.insert(ReferencePoint::Edge { from: at, to });
+                }
+                if let Fact::Borrow { loan, .. } = event.fact {
+                    if let Some(&activation) = activation.get(&loan) {
+                        points.insert(ReferencePoint::After(activation));
+                    }
+                }
+            }
+        }
+        for point in points {
+            let mut snapshot = match point {
+                ReferencePoint::Before(at) => state_at(&[at], false, false, None),
+                ReferencePoint::After(at) => {
+                    let call_result = (at == body.terminator_loc(at.block)).then(|| body[at.block].terminator())
+                        .and_then(|term| match term.kind {
+                            TerminatorKind::Call { target: Some(target), .. }
+                                if body.basic_blocks.predecessors()[target].as_slice() == [at.block] => Some(target.start_location()),
+                            _ => None,
+                        });
+                    if let Some(target) = call_result {
+                        state_at(&[target], false, false, None)
+                    } else {
+                        state_at(&[at], true, false, None)
+                    }
+                }
+                ReferencePoint::Edge { from, to } => {
+                    let edge = state_at(&[from], true, false, None);
+                    let mut dest = state_at(&[to], false, false, None);
+                    for (column, loans) in &mut dest.lent {
+                        loans.retain(|loan| edge.lent.get(column).is_some_and(|ls|
+                            ls.iter().any(|l| l.loan == loan.loan)));
+                    }
+                    dest
+                }
+            };
+            snapshot.state.retain(|name, _| snapshot.reference_types.contains_key(name));
+            reference_points.insert(point, snapshot);
+        }
+    }
     // NLL may have already released the old value at a later reassignment.
     // Find the stores that actually reach the write, stopping on each path
     // at its first definition. Record the loans at that definition, when
@@ -6008,6 +6182,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     BodyFacts {
         call_relationships,
         value_flow,
+        reference_points,
         residual_drops,
         short_call_borrows,
         drop_holders,

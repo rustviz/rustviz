@@ -11,7 +11,7 @@
 use super::{SourceArm, SwitchEdge};
 use rustc_hir::def_id::DefId;
 use rustc_data_structures::fx::FxIndexMap;
-use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, JoinChange, Lent, PartialDrop, Parts, State};
+use super::schema::{ReferencePoint, ReferenceType, ReferenceTarget, ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, JoinChange, Lent, PartialDrop, Parts, State};
 pub use super::schema::MixedInit;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -73,10 +73,13 @@ pub enum Why {
 /// One column on one row (or one arm of a row).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
-    local: Option<rustc_middle::mir::Local>,
+    pub(crate) local: Option<rustc_middle::mir::Local>,
     pub init: Init,
     /// The loans in scope that restrict it here.
     pub lent: Vec<Lent>,
+    pub(crate) reference_type: Option<ReferenceType>,
+    pub(crate) replaced_references: BTreeSet<usize>,
+    pub(crate) reference_carriers: BTreeMap<usize, BTreeSet<String>>,
     /// Which fields are moved out, for `Partly` (and an `Own` struct some
     /// of whose fields may have been moved).
     pub parts: Option<Parts>,
@@ -203,6 +206,7 @@ struct BodyTable {
     function_body_start: Option<(usize, usize)>,
     rows: BTreeMap<usize, RowCells>,
     successor_counts: BTreeMap<rustc_middle::mir::Location, usize>,
+    reference_points: BTreeMap<ReferencePoint, Cells>,
     branch_entries: FxIndexMap<rustc_hir::HirId, Cells>,
     arm_boundaries: FxIndexMap<rustc_hir::HirId, BTreeMap<usize, ArmBoundaryCells>>,
     /// Column names, in the facts' order.
@@ -412,6 +416,14 @@ impl StateTable {
         Some(cell)
     }
 
+    pub(crate) fn reference_point_cell(&self, function: FunctionStart, column: &str, point: ReferencePoint) -> Option<&Cell> {
+        self.bodies.get(&function.body)?.reference_points.get(&point)?.get(column)
+    }
+
+    pub(crate) fn reference_target(&self, function: FunctionStart, column: &str, cell: &Cell, loan: usize) -> Option<ReferenceTarget> {
+        self.loan(function, loan)?.reference_targets.get(&(cell.local?, column.to_owned())).copied()
+    }
+
     /// The state between source rows. Read the incoming edges of the
     /// next MIR row, including all predecessors at a join. Empty source
     /// rows between those edges carry the same state.
@@ -465,6 +477,8 @@ impl StateTable {
             // loans aren't on this path. (Init still comes from the edges
             // into the next row: a block-local's scope end is there.)
             cell.lent = here.lent;
+            cell.replaced_references = here.replaced_references;
+            cell.reference_carriers = here.reference_carriers;
             cell.may_lend = here.may_lend;
             cell.borrowed_from = here.borrowed_from;
             cell.holder_sources = here.holder_sources;
@@ -878,7 +892,12 @@ fn cells_of(st: &State) -> Cells {
             Cell {
                 local: st.locals.get(col).copied().flatten(),
                 init,
+                replaced_references: lent.iter().filter(|loan|
+                    st.replaced_references.contains(&(col.clone(), loan.loan))).map(|l| l.loan).collect(),
                 lent,
+                reference_type: st.reference_types.get(col).copied(),
+                reference_carriers: st.lent.get(col).into_iter().flatten().filter_map(|l|
+                    Some((l.loan, st.reference_carriers.get(&l.loan)?.clone()))).collect(),
                 parts,
                 cause: st.cause.get(col).copied(),
                 mixed_init: st.mixed_init.get(col).copied(),
@@ -977,7 +996,8 @@ fn body_table(b: &BodyFacts) -> BodyTable {
             join: bounds.join.as_ref().map(cells_of),
         })).collect())
     }).collect();
-    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    let reference_points = b.reference_points.iter().map(|(&point, state)| (point, cells_of(state))).collect();
+    BodyTable { successor_counts, reference_points, drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 fn body_joins(b: &BodyFacts) -> BodyJoins {
@@ -1027,6 +1047,7 @@ mod tests {
         BodyFacts {
             call_relationships: Default::default(),
             value_flow: Default::default(),
+            reference_points: Default::default(),
             residual_drops: Vec::new(),
             short_call_borrows: Default::default(),
             drop_holders: Default::default(),
@@ -1061,6 +1082,7 @@ mod tests {
                 projected: None,
                 issue: None,
                 lender_local: None,
+                reference_targets: Default::default(),
                 issued_on: None,
                 issuance_path: vec![],
                 loan: 0,
