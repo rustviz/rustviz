@@ -142,6 +142,9 @@ pub struct BodyFacts {
     pub(crate) scope_ends: ScopeEnds,
     #[serde(skip)]
     pub(crate) value_flow: super::value_flow::ValueFlow,
+    /// Number of owned resource fields in the binding's closure type.
+    #[serde(skip)]
+    pub closure_captures: BTreeMap<String, usize>,
     /// Places a callee can write through a mutable operand, paired with
     /// the loans carried by the source operand at that exact MIR call.
     #[serde(skip)]
@@ -380,8 +383,18 @@ pub struct Join {
     /// (`Always`), or runs no write at all (`Skipped`).
     #[serde(skip)]
     pub assignments: BTreeMap<String, JoinAssignment>,
+    /// Shared reference bindings that keep their existing value.
+    #[serde(skip)]
+    pub unchanged_shared_refs: BTreeMap<rustc_middle::mir::Local, SharedReferenceJoin>,
     #[serde(skip)]
     pub dead_implicit_else: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharedReferenceJoin {
+    Unchanged,
+    /// The binding no longer keeps at least one of its incoming loans live.
+    LoanEnded,
 }
 
 #[derive(Serialize)]
@@ -909,6 +922,9 @@ pub struct Row {
     pub completed_bindings: Vec<State>,
     #[serde(skip)]
     pub block_end: bool,
+    /// Snapshot at the MIR read of a completed statement binding.
+    #[serde(skip)]
+    pub completed_let: bool,
     /// The row's code that runs leaves it only by jumps past the next row
     /// the paths come into (`break k;`, `return i;`).
     #[serde(skip)]

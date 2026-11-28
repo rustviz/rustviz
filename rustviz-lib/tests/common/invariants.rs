@@ -81,11 +81,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1823_shared_ref_of_mut_kinds", "invalid-state", 1823),
     ("known_bugs/1823_shared_ref_of_mut_siblings", "invalid-state", 1823),
     // Ownership failures that predate the geometry fixes in #1907.
-    ("geometry_1907/rv3_1907_1127_22_arrow_along_leg", "event-on-dead-column", 1907),
-    ("geometry_1907/rv3_1907_1127_55_outside_figure", "event-on-dead-column", 1907),
-    ("geometry_1907/rv3_1907_2711_04_arrow_along_leg", "event-on-dead-column", 1907),
-    ("geometry_1907/rv3_1907_2711_26_arrow_along_leg", "event-on-dead-column", 1907),
-    ("geometry_1907/rv3_1907_2711_36_arrow_along_leg", "event-on-dead-column", 1907),
 ];
 
 /// The invariants, by the name the failure list and messages use.

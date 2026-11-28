@@ -8,7 +8,7 @@
 //! by the first row of the leg it draws, since rows above a leg's start
 //! may belong to another arm.
 
-use super::{SourceArm, SwitchEdge};
+use super::{SharedReferenceJoin, SourceArm, SwitchEdge};
 use rustc_hir::def_id::DefId;
 use rustc_data_structures::fx::FxIndexMap;
 use super::schema::{ProjectedPlace, DropRoute, LoanInfo, BodyFacts, CrateFacts, Extraction, Fact, HolderType, JoinChange, Lent, PartialDrop, Parts, State};
@@ -64,7 +64,7 @@ pub enum Why {
     Lent { loan: usize },
     /// Given a value (again: `reassign`; perhaps with none before:
     /// `maybe_had`).
-    Assigned { reassign: bool, maybe_had: bool },
+    Assigned { reassign: bool, maybe_had: bool, none: bool },
     /// Its old value dropped ("drops", "drops_if_init", "drops_rest",
     /// "nothing_to_drop"), on this row's path or an early exit's.
     Dropped { local: Option<rustc_middle::mir::Local>, how: &'static str, early_exit: Option<usize>, at_reassign: bool, route: DropRoute, flag: bool, whole_flag: bool },
@@ -133,6 +133,8 @@ pub struct JoinCell {
     pub cell: Cell,
     pub change: JoinChange,
     pub maybe_empty_box: bool,
+    /// The same shared reference value is present at entry and at the join.
+    pub shared_ref_unchanged: Option<SharedReferenceJoin>,
 }
 
 type Cells = BTreeMap<String, Cell>;
@@ -168,6 +170,7 @@ struct RowCells {
     runtime_entry: Option<bool>,
     completed_bindings: Cells,
     block_end: bool,
+    completed_let: bool,
     jumps: bool,
     /// The row's events by column, each with the arm it happens in.
     why: BTreeMap<String, Vec<(Option<usize>, Why)>>,
@@ -204,6 +207,7 @@ impl RowCells {
 
 #[derive(Debug)]
 struct BodyTable {
+    closure_captures: BTreeMap<String, usize>,
     first_line: usize,
     last_line: usize,
     function_body_start: Option<(usize, usize)>,
@@ -353,6 +357,10 @@ impl StateTable {
         self.bodies.get(&function.body)?.rows.get(&row)?.continues_to
     }
 
+    pub fn completed_let(&self, function: FunctionStart, row: usize) -> bool {
+        self.bodies.get(&function.body).and_then(|b| b.rows.get(&row)).is_some_and(|r| r.completed_let)
+    }
+
     /// A loan boundary on the drawn path. Carry across an empty row only
     /// along the MIR edge that actually connects the surrounding rows.
     pub fn loan_cell(&self, function: FunctionStart, column: &str, row: usize, floor: usize) -> Option<Cell> {
@@ -430,6 +438,7 @@ impl StateTable {
             if let Some(cell) = rc.completed_bindings.get(column) {
                 return Some(Cell { from_row: row, ..cell.clone() });
             }
+            if rc.completed_let { return self.cell(function, column, row, row); }
             if rc.snapshot && !rc.block_end && !rc.jumps {
                 let mut own = self.cell(function, column, row, row)?;
                 // The row's state joins all its exits; the line below it is
@@ -489,6 +498,10 @@ impl StateTable {
         Some(cell)
     }
 
+    pub fn closure_captures(&self, function: FunctionStart, column: &str) -> Option<usize> {
+        self.bodies.get(&function.body)?.closure_captures.get(column).copied()
+    }
+
     pub(crate) fn join_cell(
         &self, body: DefId, id: rustc_hir::HirId,
         column: &crate::svg_generator::data::ResourceAccessPoint,
@@ -513,6 +526,14 @@ impl StateTable {
         let bounds = self.bodies.get(&function.body)?.arm_boundaries.get(&arm.branch)?.get(&arm.index)?;
         let cells = if joining { &bounds.join } else { &bounds.entry };
         cells.as_ref()?.get(column)
+    }
+
+    /// A write that may be skipped and whose drop is conditional.
+    /// All stores to this column on the row install the empty Option.
+    pub fn assigned_none(&self, function: FunctionStart, column: &str, row: usize) -> bool {
+        let Some(why) = self.bodies.get(&function.body).and_then(|body| body.rows.get(&row)).and_then(|r| r.why.get(column)) else { return false };
+        let mut writes = why.iter().filter_map(|(_, w)| match w { Why::Assigned { none, .. } => Some(*none), _ => None });
+        writes.next() == Some(true) && writes.all(|none| none)
     }
 
     /// A write that may be skipped and whose drop is conditional.
@@ -962,7 +983,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let mut moved_places = BTreeMap::<_, BTreeSet<_>>::new();
     let mut rows = BTreeMap::new();
     for r in &b.rows {
-        let mut rc = RowCells { snapshot: !r.after.state.is_empty() || !r.after.locals.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), runtime_entry: r.runtime_entry, completed_bindings: r.completed_bindings.iter().flat_map(cells_of).collect(), block_end: r.block_end, jumps: r.jumps, ..Default::default() };
+        let mut rc = RowCells { snapshot: !r.after.state.is_empty() || !r.after.locals.is_empty(), continues_to: r.continues_to, cells: cells_of(&r.after), before: r.before.as_ref().map(cells_of), runtime_entry: r.runtime_entry, completed_bindings: r.completed_bindings.iter().flat_map(cells_of).collect(), block_end: r.block_end, completed_let: r.completed_let, jumps: r.jumps, ..Default::default() };
         for a in &r.arms {
             let exit = b.switches.binary_search_by_key(&a.edge, |e| e.edge).ok().map(|i| &b.switches[i]);
             let branch = exit.and_then(|e| e.branch);
@@ -982,7 +1003,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
                         add(&c, Why::FieldMoved { field: path.clone(), to: to.clone() });
                     }
                 }
-                Fact::Init { path, reassign, maybe_had, .. } => add(path, Why::Assigned { reassign: *reassign, maybe_had: *maybe_had }),
+                Fact::Init { path, reassign, maybe_had, from } => add(path, Why::Assigned { reassign: *reassign, maybe_had: *maybe_had, none: from == "Option::None" }),
                 Fact::Drop { path, how, early_exit, at_reassign, .. } if ev.drop_route != DropRoute::Unwind => add(path, Why::Dropped {
                     local: ev.place_local, how, early_exit: *early_exit, at_reassign: *at_reassign, route: ev.drop_route, flag: b.drop_flags.contains(&ev.location) || b.drop_part_flags.contains(&(ev.location, path.clone())),
                     whole_flag: b.drop_flags.contains(&ev.location),
@@ -1019,7 +1040,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
             join: bounds.join.as_ref().map(cells_of),
         })).collect())
     }).collect();
-    BodyTable { successor_counts, drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
+    BodyTable { successor_counts, closure_captures: b.closure_captures.clone(), drop_holders: b.drop_holders.clone(), branch_entries, arm_boundaries, first_line: b.first_line, last_line: b.last_line, function_body_start: b.function_body_start, rows, columns, parents, moved_places, array_lengths, boxes, uniform_option_refs: b.uniform_option_refs.clone(), loans, part_lenders, hidden_fields, dead_lines: b.dead_lines.clone() }
 }
 
 fn body_joins(b: &BodyFacts) -> BodyJoins {
@@ -1027,7 +1048,8 @@ fn body_joins(b: &BodyFacts) -> BodyJoins {
         let places = cells_of(&join.state).into_iter().map(|(name, cell)| {
             let change = join.changes.get(&name).copied().unwrap_or_default();
             let maybe_empty_box = join.state.maybe_empty_box.contains(&name);
-            (name, JoinCell { cell, change, maybe_empty_box })
+            let shared_ref_unchanged = cell.local.and_then(|local| join.unchanged_shared_refs.get(&local).copied());
+            (name, JoinCell { cell, change, maybe_empty_box, shared_ref_unchanged })
         }).collect();
         (id, places)
     }).collect();
@@ -1107,6 +1129,7 @@ mod tests {
             columns: cols.iter().map(|c| col(c)).collect(),
             uniform_option_refs: Default::default(),
             slice_items: BTreeSet::new(),
+            closure_captures: Default::default(),
             binding_loans: BTreeMap::new(),
             loans: vec![LoanInfo {
                 temp_fields: None, temp_borrow: None,

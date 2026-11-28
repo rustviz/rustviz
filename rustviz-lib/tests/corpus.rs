@@ -7297,8 +7297,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). \
              s, which f captured, is dropped during the call",
-            "f goes out of scope. Its captured resource is dropped here only if no branch above \
-             called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here if f still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
         ],
         must_not_contain: &[
             "f goes out of scope. Its 1 captured resource is dropped.",
@@ -9273,7 +9272,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_closure_move",
         must_contain: &[
             "f may have been moved: when the condition moves f to run and then turns out false, the else branch runs after that move, so f can't be used here",
-            "f goes out of scope. Its captured resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here if f still holds the closure (Rust tracks this with a runtime drop flag). A move takes the closure out of the binding.",
         ],
         must_not_contain: &["only if no branch above called it"],
     },
@@ -10585,7 +10584,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "edition2024/if_let_chain_fnonce_call",
         must_contain: &[
             "f may have been moved: when the condition calls f (it can only be called once, so the call moves it) and then turns out false, the else branch runs after that call, so f can't be used here",
-            "f goes out of scope. Its captured resource is dropped here only if nothing above called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here if f still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
         ],
         must_not_contain: &[
             // The call may have dropped them already.
@@ -19839,7 +19838,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f may have been moved: when the guard on line 6 calls f (it can only be called once, so the call moves it) and then turns out false, matching goes on with the next pattern after that call, so f can't be used here (the borrow checker counts every later arm as one that may run after a failed guard)",
             "f may have been moved above, so it can't be used after the match. If execution reaches the end of f's scope while it still holds its resource, it is dropped there.",
-            "f goes out of scope. Its captured resource is dropped here only if nothing above called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here if f still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
         ],
         must_not_contain: &[
             "can't be used after the if",
@@ -21273,7 +21272,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_contain: &[
             "f is moved into the call (an FnOnce closure can only be called once). s, which f captured, is dropped during the call",
             "If the `?` here returns early, k's resource is dropped. If the `?` succeeds, nothing happens to k here.",
-            "h goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+            "h goes out of scope. Its captured resource is dropped here if h still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
             // m, called in an `if` above the `?`, may still hold w: the
             // drop flag decides (#1194).
             "If the `?` here returns early, m's resource is dropped if m still holds it (Rust tracks this with a runtime drop flag). If the `?` succeeds, nothing happens to m here.",
@@ -22934,10 +22933,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // branch above called it", and "resources" for one. #1232: v's
         // scope end named rustc's internal closure type.
         must_contain: &[
-            "f goes out of scope. Its captured resource is dropped here only if no branch above \
-             moved it (Rust tracks this with a runtime drop flag).",
-            "g goes out of scope. Its captured resource is dropped here only if no branch above \
-             called it (Rust tracks this with a runtime drop flag).",
+            "f goes out of scope. Its captured resource is dropped here if f still holds the closure (Rust tracks this with a runtime drop flag). A move takes the closure out of the binding.",
+            "g goes out of scope. Its captured resource is dropped here if g still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
             "v goes out of scope. Its resource is dropped (including every closure it holds).",
         ],
         must_not_contain: &[
@@ -27603,11 +27600,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // the receiver where the block ends.
         must_contain: &[
             "c may have been moved: the block can end through a break that comes before c is moved, or by reaching its end after c is moved, so c can't be used after the block",
-            "c goes out of scope. Its captured resource is dropped here only if nothing above moved it (Rust tracks this with a runtime drop flag).",
+            "c goes out of scope. Its captured resource is dropped here if c still holds the closure (Rust tracks this with a runtime drop flag). A move takes the closure out of the binding.",
             "c2 was moved in at least one branch above, so it can't be used after the branches. If the branch that ran didn't move it, and execution reaches the end of c2's scope with the resource still held, it is dropped there.",
-            "c2 goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
-            "c3 goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
-            "c4 goes out of scope. Its captured resource is dropped here only if no branch above called it (Rust tracks this with a runtime drop flag).",
+            "c2 goes out of scope. Its captured resource is dropped here if c2 still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
+            "c3 goes out of scope. Its captured resource is dropped here if c3 still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
+            "c4 goes out of scope. Its captured resource is dropped here if c4 still holds the closure (Rust tracks this with a runtime drop flag). A consuming call takes the closure out of the binding.",
             "c5 may have been moved: the loop can end through a break that comes after c5 is moved, so c5 can't be used after the loop",
             "s4 acquires ownership of the resource c() returns, if the block ended with its last expression, c()",
             "t acquires ownership of the resource c2() returns",
@@ -34595,6 +34592,151 @@ fn tooltip_of_id(timeline_svg: &str, id: &str) -> Option<String> {
     tooltip_lines(&timeline_svg[lo..=hi]).into_iter().next().map(|l| l.join(" "))
 }
 
+/// The corpus oracles and geometry checks exercise every minimized #1906
+/// program. Also pin the positive claims: removing a line (or a drop
+/// explanation) must not make a contradiction disappear.
+#[test]
+fn progen_1906_statement_boundaries() {
+    // rustc accepts a borrow of the completed binding in its arm, rejects
+    // borrowing the destructured parent as a whole (E0382), and rejects
+    // access conflicting with a live field borrow (E0499 / E0502).
+    for (case, var, row, state, clause) in [
+        ("1127_02_oracle_moved", "s3", 12, "full_privilege", "owner of the resource"),
+        ("1127_03_drop_without_value", "s3", 12, "full_privilege", "owner of the resource"),
+        ("2711_02_oracle_moved", "s5", 7, "full_privilege", "owner of the resource"),
+        ("2711_03_drop_without_value", "s5", 7, "full_privilege", "owner of the resource"),
+        ("1127_08_oracle_usable", "p", 18, "full_privilege_uninit", "p.a and p.b were moved out"),
+        ("1127_17_oracle_moved", "p", 20, "full_privilege", "owner of the resource"),
+        ("1127_50_oracle_moved", "s2", 15, "full_privilege", "owner of the resource"),
+        ("1127_50_oracle_moved", "s4", 15, "full_privilege", "owner of the resource"),
+        ("1127_51_oracle_moved", "tp", 14, "full_privilege", "owner of the resource"),
+        ("1127_52_oracle_usable", "p", 19, "revoked_privilege", "p.b is mutably borrowed"),
+        ("2711_12_oracle_usable", "c", 20, "full_privilege_uninit", "may have been moved"),
+        ("2711_42_oracle_borrowed", "o2", 28, "full_privilege", "owner of the resource"),
+        ("2711_43_oracle_borrowed", "s4", 10, "full_privilege", "owner of the resource"),
+        ("2711_44_oracle_usable", "p", 20, "full_privilege", "p.a was moved out"),
+        ("2711_45_oracle_usable", "p", 21, "partial_privilege", "p.b is immutably borrowed"),
+        ("2711_45_oracle_usable", "n2", 22, "full_privilege", "holds a copyable value"),
+    ] {
+        let name = format!("edition2024/progen_1906_{case}");
+        let svg = run_with_local_backend(&name).timeline_panel_string();
+        let elements = common::svg::rv_elements(&svg);
+        assert!(elements.iter().any(|e| matches!(e.kind.as_str(), "line" | "branch_line")
+            && e.var.as_deref() == Some(var) && e.state.as_deref() == Some(state)
+            && e.line.as_ref().and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| n <= row)
+            && e.line_end.as_ref().and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| n > row)
+            && tooltip_of_id(&svg, &e.id).is_some_and(|tip| tip.contains(clause))),
+            "{name}: expected {var} after line {row} to say {clause}");
+    }
+    // Drop-elaborated MIR drops both replacement fields. Calling the
+    // FnOnce consumes its captures only on the break edge. Indexing a
+    // Vec by the full range calls Index::index with a shared receiver.
+    // When a reborrow is the caller loan's last use, both end together.
+    for (case, id, clause) in [
+        ("1127_43_drop_without_value", "p2.a@L22:dot:owner_go_out_of_scope", "Its resource is dropped"),
+        ("1127_43_drop_without_value", "p2.b@L22:dot:owner_go_out_of_scope", "Its resource is dropped"),
+        ("1127_06_borrow_kind_mismatch", "v@L4:dot:static_lend+branch", "v is read-only while the borrow is live"),
+        ("2711_09_borrow_kind_mismatch", "v@L3:dot:static_lend+branch", "v is read-only while the borrow is live"),
+        ("1127_45_event_on_dead_column", "v@L8:dot:mutable_reacquire", "no longer mutably borrowed"),
+        ("1127_47_invalid_state", "v@L8:dot:mutable_reacquire", "no longer mutably borrowed"),
+        ("1127_46_invalid_state", "m@L17:dot:mutable_die", "m's mutable borrow ends"),
+        ("2711_37_caller_return", "m@L10:dot:static_reacquire+mutable_die", "r no longer borrows the resource m points to"),
+    ] {
+        let svg = run_with_local_backend(&format!("edition2024/progen_1906_{case}")).timeline_panel_string();
+        assert!(tooltip_of_id(&svg, id).is_some_and(|tip| tip.contains(clause)), "{case}: {id} lacks {clause}");
+    }
+}
+
+/// The visible circle of an ordinary or combined drop dot.
+fn dot_xy(doc: &roxmltree::Document, id: &str) -> Option<(f64, f64)> {
+    let n = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))?;
+    let c = if n.has_tag_name("circle") { n } else { n.descendants().find(|d| d.has_tag_name("circle"))? };
+    Some((c.attribute("cx")?.parse().ok()?, c.attribute("cy")?.parse().ok()?))
+}
+
+#[test]
+fn progen_1906_owner_legs_meet_the_value_on_their_path() {
+    // MIR drops the intact tuple on the returning leg. The replacement
+    // Option is initialized on the other fixture's assignment edge.
+    for (case, var, dot, starts_at_dot) in [
+        ("1127_51_oracle_moved", "tp", "tp@L13:dot:owner_go_out_of_scope", false),
+        ("1127_49_oracle_moved", "o", "o@L7:dot:branch_join+owner_drop_at_reassign+acquire", true),
+    ] {
+        let svg = run_with_local_backend(&format!("edition2024/progen_1906_{case}")).timeline_panel_string();
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        let (x, y) = dot_xy(&doc, dot).unwrap();
+        assert!(branch_leg_centrelines(&svg).iter().any(|(_, id, [x1, y1, x2, y2])| {
+            let (at_x, at_y) = if starts_at_dot { (x1, y1) } else { (x2, y2) };
+            id.starts_with(&format!("{var}@")) && id.contains(":branch_line:full_privilege/")
+                && y2 > y1 && (at_x - x).abs() < 0.01 && (at_y - y).abs() < 0.01
+                && tooltip_of_id(&svg, id.split('/').next().unwrap()).is_some_and(|t| t.contains("is the owner"))
+        }), "{case}: missing initialized {var} leg at {dot}");
+    }
+}
+
+#[test]
+fn progen_1906_cleanup_and_hoisted_reads() {
+    let fixture = "edition2024/progen_1906_completed_cleanup";
+    // The destructor takes its last mutable access before this boundary.
+    // The closure's later ForLet(Some(..)) cannot move the intervening drop.
+    for (var, forbidden) in [("s", "mutably borrowed"), ("t", "may have been moved")] {
+        assert_owner_title(fixture, var, 14, 15, Some("full_privilege"), "is the owner", forbidden);
+    }
+}
+
+#[test]
+fn progen_1906_reassignment_and_capture_titles() {
+    let svg = |case| run_with_local_backend(&format!("edition2024/progen_1906_{case}")).timeline_panel_string();
+    check_review_tip(&svg("1127_49_oracle_moved"), "o@L7:dot:branch_join", &[
+        "is assigned None, which holds no payload", "previous value (including the String it holds, if any) is dropped",
+        "runtime drop flag", "until it's assigned again",
+    ], &["acquires ownership of a new resource", "acquires ownership of a resource"]);
+    // The successful edge stores x2, and a read of x there still compiles.
+    // MIR only initializes x in the enclosing let-chain.
+    check_review_tip(&svg("2711_01_event_on_dead_column"), "x@L5:dot:branch_join",
+        &["None of the branches above assigned x", "still holds its shared reference"],
+        &["still has no value", "The conditional above ends here", "x is assigned a new reference"]);
+    let original = svg("2711_12_oracle_usable");
+    check_review_tip(&original, "c@L20-21:line:", &["may have been moved out", "can't be used here",
+        "On a path where it still holds", "owns 1 resource via capture"], &["not assigned yet"]);
+    let restored = svg("restored_closure");
+    for id in ["saved@L4-5:line:", "c@L6-7:line:"] {
+        check_review_tip(&restored, id, &["owns 1 resource via capture"], &["resources via capture"]);
+    }
+    for (tl, id) in [(&original, "c@L21:dot:"), (&restored, "c@L10:dot:"), (&restored, "c@L17:dot:")] {
+        check_review_tip(tl, id, &["Its captured resource is dropped here if c still holds the closure", "runtime drop flag"],
+            &["only if no branch", "only if nothing above", "captured resources are dropped"]);
+    }
+}
+
+#[test]
+fn progen_1906_no_parent_segment_over_closure_arms() {
+    let svg = run_with_local_backend("edition2024/progen_1906_closure_branch").timeline_panel_string();
+    let elements = common::svg::rv_elements(&svg);
+    assert!(elements.iter().any(|e| e.var.as_deref() == Some("c") && e.kind == "branch_line"));
+    assert!(!elements.iter().any(|e| e.var.as_deref() == Some("c") && e.kind == "line"
+        && e.line.as_ref().and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| n >= 3 && n < 9)),
+        "the branch legs already represent c inside this conditional");
+}
+
+#[test]
+fn progen_1906_index_receivers_precede_the_pattern() {
+    let svg = run_with_local_backend("edition2024/progen_1906_index_receivers").timeline_panel_string();
+    // All three calls to Index::index take the shared receiver before
+    // inspecting slice length, including when no pattern binds a reference.
+    for (id, place) in [("v@L4:dot:static_lend", "v"), ("p.items@L5:dot:static_lend", "p.items"), ("v@L9:dot:static_lend", "v")] {
+        check_review_tip(&svg, id, &[&format!("{place} is read-only while the borrow is live")], &["is mutably borrowed"]);
+    }
+}
+
+#[test]
+fn progen_1906_failed_pattern_returns_only_the_lender() {
+    let svg = run_with_local_backend("edition2024/progen_1906_edge_holders").timeline_panel_string();
+    check_review_tip(&svg, "o@L17:dot:", &["no longer mutably borrowed", "read-only while the borrow is live"], &["by first"]);
+    assert!(!svg.contains("first>o@L17:arrow:mutable_die") && !svg.contains("first@L17:dot:mutable_die"));
+    check_review_tip(&svg, "first@L21:dot:", &["first's mutable borrow ends"], &[]);
+}
+
 /// Adjacent rows with the same facts share one SVG segment. A title pin
 /// checks every source interval it covers, irrespective of coalescing.
 fn assert_owner_title(snippet: &str, var: &str, from: usize, until: usize, state: Option<&str>, want: &str, forbidden: &str) {
@@ -41358,6 +41500,12 @@ fn a_one_line_else_if_leg_ends_at_the_inner_fork() {
 fn a_reference_declared_in_a_one_line_arm_ends_its_borrow_there() {
     let rv = run_with_local_backend("one_line_arm_ref_end_1277");
     let tl = rv.timeline_panel_string();
+    // These arms copy the shared reference, and rustc accepts using the
+    // original after the conditional. Its slot is initialized only above it.
+    check_review_tip(&tl, "ra@L13:dot:branch_join", &[
+        "ra isn't moved in any of the branches above",
+        "None of the branches above assigned ra", "still holds its shared reference",
+    ], &["still has no value", "The conditional above ends here", "ra is assigned a new reference"]);
     // Each moved end draws its arrow back to the lender stacked with the
     // arm's other arrows on that line (a row below them), not along them.
     assert_eq!(arrow_row_problems(&tl), Vec::<String>::new());
@@ -41570,11 +41718,7 @@ fn reborrowed_array_elements_stay_borrowed_with_the_array() {
 ///   below the outer one and the outer leg ends at it.
 #[test]
 fn one_line_diamonds_end_brackets_at_forks_and_return_outward() {
-    fn dot_xy(doc: &roxmltree::Document, id: &str) -> Option<(f64, f64)> {
-        let n = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))?;
-        let c = if n.has_tag_name("circle") { n } else { n.descendants().find(|d| d.has_tag_name("circle"))? };
-        Some((c.attribute("cx")?.parse().ok()?, c.attribute("cy")?.parse().ok()?))
-    }
+
     let fixture = "one_line_diamond_1306_1308_1309";
     let mut bad = Vec::new();
     // #1308: brackets end on a dot.
@@ -43037,7 +43181,7 @@ fn arm_reads_then_returns_its_borrow_1669() {
 #[test]
 fn while_chain_ends_the_test_borrow_before_the_overwrite_1714() {
     assert_drawn_sequence("rv3_issues/1714_while_chain_overwrite_order", "o", "3",
-        &["immutably borrowed by x", "no longer immutably borrowed", "acquires ownership of a new resource"]);
+        &["immutably borrowed by x", "no longer immutably borrowed", "is assigned None, which holds no payload"]);
 }
 
 #[test]
