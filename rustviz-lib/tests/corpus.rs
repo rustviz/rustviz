@@ -5732,16 +5732,19 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "fn_ret_ref_longest",
         // Book ch. 10.3: one lifetime `'a` on both parameters and the
-        // result, so `result` borrows from both arguments.
+        // result. The checker keeps both inputs borrowed while result
+        // is in use. The function returns just one of them.
         must_contain: &[
             "Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments. The code in longest has return paths from both tied inputs. At the caller, both stay borrowed while result is in use",
             "Immutable borrow from string2 to result: longest's signature gives the reference it returns the same lifetime as both arguments. The code in longest has return paths from both tied inputs. At the caller, both stay borrowed while result is in use",
-            "string1's resource is immutably borrowed by result; string1 is read-only while the borrow is live",
-            "string2's resource is immutably borrowed by result; string2 is read-only while the borrow is live",
+            "The borrow checker keeps string1 borrowed while result is in use because result could refer to either input. string1 is read-only while the borrow is live",
+            "The borrow checker keeps string2 borrowed while result is in use because result could refer to either input. string2 is read-only while the borrow is live",
             "If result holds a shared borrow affecting string1, that borrow ends here. It no longer restricts access to string1",
             "If result holds a shared borrow affecting string2, that borrow ends here. It no longer restricts access to string2",
         ],
         must_not_contain: &[
+            "string1's resource is immutably borrowed by result",
+            "string2's resource is immutably borrowed by result",
             ", through the reference longest returned",
             "Copy from longest to result",
             "result is initialized by copy from longest",
@@ -17907,10 +17910,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "deref_write_ends_borrow",
         must_contain: &[
-            "v's resource is mutably borrowed by x; v can't be used until the borrow ends",
-            "v's resource is mutably borrowed by it; v can't be used until the borrow ends",
-            // While `it` and the `y` taken out of it both hold it.
-            "v's resource is mutably borrowed; v can't be used until the borrow ends",
+            "v's resource is mutably borrowed; v can't be used until the borrow ends. v stays borrowed while x is in use",
+            "v's resource is mutably borrowed; v can't be used until the borrow ends. v stays borrowed while it is in use",
         ],
         must_not_contain: &[
             // iter_mut has returned; its borrow lives on in `it`.
@@ -22022,22 +22023,22 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // a struct, a copy of r, and `v.last_mut().unwrap()` coerced.
         must_contain: &[
             "Mutable borrow from a to ra: downgrade's signature gives the reference it returns the same lifetime as its argument",
-            "a's resource is mutably borrowed by ra; a can't be used while the borrow is live",
-            "a's resource is mutably borrowed by ra; a can't be used until the borrow ends",
+            "The borrow checker keeps the mutable borrow of a live while ra, a shared reference, is in use. a can't be used while the borrow is live",
+            "a's resource is mutably borrowed; a can't be used until the borrow ends. a stays borrowed while ra is in use",
             "If ra holds a mutable borrow affecting a, that borrow ends here. It no longer restricts access to a",
             "ra is a shared reference made from a mutable borrow of a resource: ra only gives shared access to it, but the borrow stays mutable while ra is live",
             "ra holds an immutable reference; it can read the borrowed value",
-            "b's resource is mutably borrowed by rb; b can't be used until the borrow ends",
+            "b's resource is mutably borrowed; b can't be used until the borrow ends. b stays borrowed while rb is in use",
             "If rb holds a mutable borrow affecting b, that borrow ends here. It no longer restricts access to b",
             "b's resource is no longer mutably borrowed",
             "rb holds an immutable reference; it can read the borrowed resource",
             "Mutable borrow from c to rc: bump's signature gives the reference it returns the same lifetime as the reference passed as its receiver",
-            "c's value is mutably borrowed by rc; c can't be used until the borrow ends",
+            "c's value is mutably borrowed; c can't be used until the borrow ends. c stays borrowed while rc is in use",
             "If rc holds a mutable borrow affecting c, that borrow ends here. It no longer restricts access to c",
             "Mutable borrow from d to rd: downgrade's signature gives the reference it returns the same lifetime as its argument",
             "If rd holds a mutable borrow affecting d, that borrow ends here. It no longer restricts access to d",
             "Mutable borrow from v to x: x is a reference copied out of the value first returned",
-            "v's resource is mutably borrowed by x; v can't be used while the borrow is live",
+            "The borrow checker keeps the mutable borrow of v live while x, a shared reference, is in use. v can't be used while the borrow is live",
             "If x holds a mutable borrow affecting v, that borrow ends here. It no longer restricts access to v",
             "x holds an immutable reference; it can read the borrowed value",
             "Mutable borrow from e to he.r: downgrade's signature gives the reference it returns the same lifetime as its argument",
@@ -22049,6 +22050,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "If xw holds a mutable borrow affecting w, that borrow ends here. It no longer restricts access to w",
         ],
         must_not_contain: &[
+            "a's resource is mutably borrowed by ra",
             "is immutably borrowed by ra",
             "Immutable borrow from a to ra",
             "ra's shared borrow of a ends",
@@ -24416,7 +24418,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from q.items to s",
             "If s holds a shared borrow affecting q.items, that borrow ends here. It no longer restricts access to q.items",
             "Mutable borrow from v to z",
-            "v's resource is mutably borrowed by the `for` loop's iterator; v can't be used until the borrow ends",
+            "v's resource is mutably borrowed by the `for` loop's iterator. While the iterator or a reference it yielded keeps the borrow live, v can't be used",
         ],
         must_not_contain: &[
             "x is bound to a mutable reference",
@@ -25371,10 +25373,10 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // #1380: the `else if` arm's leg beside `} else if look(r) {` is
         // the arm's own (geometry in `else_if_arm_starts_on_its_condition_row`).
         // main dashed it as code "not part of that branch": it's the
-        // arm's condition.
+        // arm's condition. r keeps e shared on the edge into look(r).
         must_contain: &[
             "r holds an immutable reference; it can read the borrowed value",
-            "e's value is being shared by one or more variables",
+            "e's value is being shared by one or more variables. r holds a shared borrow",
             "the value r points to is immutably borrowed by look",
         ],
         must_not_contain: &["This segment is for the else branch. The underlined code is not part of that branch."],
@@ -27339,7 +27341,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "g stops holding its reference to the element. The `for` loop's iterator still holds the mutable borrow of the collection.",
             "h stops holding the yielded reference. The borrow checker still restricts access to a for the iterator's next call.",
             "h stops holding the yielded reference. The borrow checker still restricts access to b for the iterator's next call.",
-            "v's resource is mutably borrowed by the `for` loop's iterator; v can't be used until the loop ends",
+            "v's resource is mutably borrowed by the `for` loop's iterator. While the iterator or a reference it yielded keeps the borrow live, v can't be used",
+            "a's resource is mutably borrowed by the `for` loop's iterator. While the iterator or a reference it yielded keeps the borrow live, a can't be used",
             "The borrow checker keeps a exclusively borrowed during iteration. a can't be used until the borrow ends.",
         ],
         must_not_contain: &[
@@ -27348,6 +27351,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "a's resource is mutably borrowed by the `for` loop's iterator; a can't be used until the loop ends",
             "Each pass yields one reference. The borrow checker tracks borrowed data from a and b through h",
             "h stops holding its reference to the element. The `for` loop's iterator still holds the mutable borrow",
+            "v's resource is mutably borrowed by the `for` loop's iterator; v can't be used until the loop ends",
             "=v's resource is mutably borrowed by e; v can't be used until the loop ends",
             "=w's resource is mutably borrowed by f; w can't be used until the borrow ends",
             "=u's resource is mutably borrowed by g; u can't be used until the borrow ends",
@@ -28421,11 +28425,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         must_not_contain: &["t.0, t.1 are borrowed"],
     },
     // `longest(string1, string2)` returns one of them: result isn't said
-    // to hold a borrow of each (2.x's title stands).
+    // to hold a borrow of each. It keeps both inputs borrowed while it is live.
     TooltipExpect {
         name: "book/c10_07_longest_inner_scope",
-        must_contain: &["string2's resource is being shared by one or more variables"],
-        must_not_contain: &["^result holds a shared borrow"],
+        must_contain: &["string2 is the owner of the resource. The borrow checker keeps string2 borrowed while result is in use because result could refer to more than one place"],
+        must_not_contain: &["^result holds a shared borrow", "string2's resource is being shared by one or more variables", "string2's resource is immutably borrowed by result"],
     },
     // e is one element; the loop's iterator holds the loan of s.items.
     TooltipExpect {
@@ -30370,11 +30374,8 @@ fn one_line_arms_review_1871() {
     assert!(value.iter().any(|(_, t, _, _)| t.contains("this else branch never runs")
         && t.contains("value has no value yet")), "got {value:?}");
 
-    // One-line arms keep 2.x's leg title where the arm's own cell lends the
-    // column the same way: the cell is read where the arm's value isn't in
-    // its variable yet, so it can't name the holder unless the facts prove
-    // it (the first pin below), and a title read for the row is the join's
-    // hedge.
+    // Each leg describes its arm's boundary. The joined row can also
+    // include the sibling's lender, so it needs a hedge.
     let tip_of = |fixture: &str, id: &str| -> String {
         let tl = run_with_local_backend(fixture).timeline_panel_string();
         rv_elements(&tl, id).into_iter().find(|e| e.0 == id).unwrap_or_else(|| panic!("{fixture}: no {id}")).1
@@ -30387,9 +30388,21 @@ fn one_line_arms_review_1871() {
     // the `_` arm compiles (f isn't borrowed on that path). So the title
     // names r.
     assert_eq!(tip_of("one_line_arm_overlap_1264", "f@L34:branch_line:partial_privilege"), "f's resource is being shared by one or more variables. r holds a shared borrow");
-    assert_eq!(tip_of("arm_ref_binding_value_1327", "o2@L19:branch_line:partial_privilege"), "o2's resource is being shared by one or more variables");
-    assert_eq!(tip_of("rv3_owner_lines_1852", "x@L44:branch_line:revoked_privilege"), "x's resource is mutably borrowed by r; x can't be used until the borrow ends");
-    assert_eq!(tip_of("rv3_owner_lines_1852", "y@L44:branch_line:revoked_privilege"), "y's resource is mutably borrowed by s; y can't be used until the borrow ends");
+    // The Some arm's MIR takes the reference to o2's payload and assigns
+    // it to r2. The None arm assigns the separate borrow of t2.
+    assert_eq!(tip_of("arm_ref_binding_value_1327", "o2@L19:branch_line:partial_privilege"), "o2's resource is being shared by one or more variables. r2 holds a shared borrow");
+    // The references first live in the tuple built by the selected arm.
+    // The lend dots identify the later destinations. Before the tuple
+    // is unpacked, the segment describes the live restriction.
+    for (lender, holder) in [("x", "r"), ("y", "s")] {
+        let fixture = "rv3_owner_lines_1852";
+        assert_review_title(&tip_of(fixture, &format!("{lender}@L44:branch_line:revoked_privilege")),
+            &[&format!("{lender}'s resource is mutably borrowed; {lender} can't be used until the borrow ends")],
+            &["mutably borrowed by"]);
+        assert_review_title(&tip_of(fixture, &format!("{lender}@L44:dot:mutable_lend")),
+            &[&format!("This borrow will be moved into {holder}"), "can't be used while the borrow is live"],
+            &["mutably borrowed by"]);
+    }
     // `let it = if c { v1.iter() } else { v2.iter() };`: v1 still owns
     // its vector while the iterator borrows it.
     assert_eq!(tip_of("branch_holder_lenders_1404", "v1@L40:branch_line:partial_privilege"), "v1 is the owner of the resource. v1 stays borrowed while it is in use");
@@ -33730,21 +33743,35 @@ fn one_line_arm_join_leg_starts_at_a_dot() {
         .filter(|t| attr(t, "data-rv-var").is_some_and(|v| v == "s"))
         .map(|t| (num_attr(t, "cx"), num_attr(t, "cy")))
         .collect();
-    let legs: Vec<&str> = start_tags(&timeline, "line")
-        .into_iter()
-        .filter(|t| attr(t, "data-rv-var").is_some_and(|v| v == "s")
-            && attr(t, "data-rv-kind").is_some_and(|k| k == "branch_line")
-            && attr(t, "data-rv-state").is_some_and(|k| k == "full_privilege"))
+    let strokes: Vec<_> = start_tags(&timeline, "line").into_iter()
+        .filter(|t| attr(t, "data-rv-var") == Some("s") && attr(t, "data-rv-kind") == Some("branch_line"))
+        .map(|t| {
+            let a = (num_attr(t, "x1"), num_attr(t, "y1"));
+            let b = (num_attr(t, "x2"), num_attr(t, "y2"));
+            if a.1 <= b.1 { (a, b, t) } else { (b, a, t) }
+        })
         .collect();
-    assert!(!legs.is_empty(), "no arm leg of s drawn");
-    for leg in legs {
-        let (a, b) = ((num_attr(leg, "x1"), num_attr(leg, "y1")), (num_attr(leg, "x2"), num_attr(leg, "y2")));
-        let top = if a.1 <= b.1 { a } else { b };
-        assert!(
-            dots.iter().any(|d| (d.0 - top.0).abs() < 1.0 && (d.1 - top.1).abs() < 1.0),
-            "s's leg {:?} -> {:?} starts where s has no dot", a, b
-        );
+    let join_dots: Vec<_> = start_tags(&timeline, "circle").into_iter()
+        .filter(|t| attr(t, "data-rv-var") == Some("s") && attr(t, "data-rv-event") == Some("branch_join"))
+        .map(|t| (num_attr(t, "cx"), num_attr(t, "cy")))
+        .collect();
+    let touches = |p: (f64, f64), points: &[(f64, f64)]|
+        points.iter().any(|d| (p.0 - d.0).abs() < 1.0 && (p.1 - d.1).abs() < 1.0);
+    let mut joins = 0;
+    for &(top, bottom, leg) in &strokes {
+        if attr(leg, "data-rv-state") != Some("full_privilege") { continue; }
+        if top.0 != bottom.0 && touches(bottom, &join_dots) {
+            // A join diagonal still starts at the give-back mark.
+            joins += 1;
+            assert!(touches(top, &dots), "s's diagonal {top:?} -> {bottom:?} misses its dot");
+        } else {
+            // A solid stretch can continue an edge that releases the
+            // borrow as soon as the pattern test takes that successor.
+            assert!(touches(top, &dots) || strokes.iter().any(|&(_, end, _)| end == top),
+                "s's leg {top:?} -> {bottom:?} has no incoming stroke or mark");
+        }
     }
+    assert!(joins > 0, "no arm diagonals checked");
 }
 
 /// The programs the property checks run on: every fixture (minus
@@ -37991,13 +38018,11 @@ fn a_column_lent_out_mutably_is_dotted_until_the_borrow_ends() {
             ("t's resource is captured (mutably borrowed) by closure h", "let mut h = || t.push('x');", 0),
             ("t's resource is no longer mutably borrowed", "h();", 0),
         ][..]),
-        // In a conditional: each arm's dotted line ends where the borrow
-        // ends on that arm's path (at r's last use in the `if`, as the
-        // `else` starts on the other).
+        // Only the if edge keeps this loan after the test. The else
+        // edge can mutate s before its first statement.
         ("outer_mut_ref_end_in_if_arm", &[
             ("s's resource is mutably borrowed by r; s can't be used while the borrow is live", "let r = &mut s;", 0),
             ("s's resource is no longer mutably borrowed", "r.push('x');", 0),
-            ("s's resource is no longer mutably borrowed", "} else {", 0),
         ][..]),
         // A `&mut` parameter reborrowed by a `match` arm's binding.
         ("match_mut_ref_param_reborrow", &[
@@ -43983,7 +44008,8 @@ fn imaginary_unassigned_join_explains_the_runtime_drop() {
 #[test]
 fn shadowed_match_arm_keeps_its_drawn_move_1804() {
     // Borrowck MIR moves s into drop on the wildcard's imaginary
-    // successor. The executable successor still drops s at scope exit.
+    // successor. The segment into the move still owns s, and the
+    // executable successor drops s at scope exit.
     let name = "rv3_issues/1804_arm_shadowed_by_wildcard";
     let rv = run_with_local_backend(name);
     let svg = rv.timeline_panel_string();
@@ -43991,7 +44017,7 @@ fn shadowed_match_arm_keeps_its_drawn_move_1804() {
     let segment = tooltip_of_id(&svg, "s@L5-6:branch_line:full_privilege");
     let checked = "This path never runs. Rust's borrow checker still checks it. The following describes the checked path only. ";
     assert_eq!(arrow, Some(format!("{checked}Move from s to drop")));
-    assert_eq!(segment, Some(format!("{checked}s's resource was moved out, so it can't be used here")));
+    assert_eq!(segment, Some(format!("{checked}s is the owner of the resource")));
     check_review_tip(&svg, "s@L10:dot:owner_go_out_of_scope",
         &["s goes out of scope. Its resource is dropped."], &["runtime drop flag"]);
     let (violations, _, _) = common::oracle::check(&read_corpus(name), &svg, &rv.code_panel_string());
@@ -49342,5 +49368,128 @@ fn p4_closure_review_string_provenance_at_join() {
             {"kind": "input", "index": 1, "projection": [], "string_contents": true},
             {"kind": "input", "index": 2, "projection": []}
         ]), "{name}");
+    }
+}
+
+#[test]
+fn p4_owner_segment_between_stacked_loans_reads_the_mir_point() {
+    let svg = run_with_local_backend("p4_owner_segments").timeline_panel_string();
+    // The shared loan is live through inspect(shared). A mutable borrow
+    // of pair.a before that call is E0502. The one in the fixture is legal
+    // and lasts through edit.push, after which inspect(&pair) is legal.
+    let shared = tooltip_of_id(&svg, "pair@L8:line:partial_privilege").unwrap();
+    assert_review_title(&shared, &["pair is the owner of the resource", "shared holds a shared borrow"],
+        &["pair.a is mutably borrowed", "borrowed by edit"]);
+    let exclusive = tooltip_of_id(&svg, "pair@L8-9:line:revoked_privilege").unwrap();
+    assert_review_title(&exclusive, &["pair.a is mutably borrowed by edit", "can't use pair as a whole"],
+        &["shared holds a shared borrow"]);
+}
+
+
+#[test]
+fn p4_owner_split_uses_each_successors_loan_state() {
+    let svg = run_with_local_backend("p4_owner_segments").timeline_panel_string();
+    let legs = rv_elements(&svg, "owned@L29:branch_line:");
+    // Copying or reading owned as the if arm starts is E0502. A write
+    // as the else arm starts compiles: the edge bypasses writer's use.
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    for (body_rows, required, forbidden) in [
+        ("33 35", "mutably borrowed by writer", "owned is the owner of the resource"),
+        ("35 36", "owned is the owner of the resource", "mutably borrowed"),
+    ] {
+        let connectors: Vec<_> = legs.iter().filter(|(id, _, (left, right), _)| {
+            !id.contains('/') && right - left > 5.0
+                && doc.descendants().find(|node| node.attribute("data-rv-id") == Some(id))
+                    .and_then(|node| node.ancestors().find_map(|parent| parent.attribute("data-arm-rows")))
+                    == Some(body_rows)
+        }).collect();
+        assert_eq!(connectors.len(), 1, "arm {body_rows}: {legs:?}");
+        assert_review_title(&connectors[0].1, &[required], &[forbidden]);
+    }
+}
+
+#[test]
+fn p4_owner_review_copy_and_ownership_survive_a_shared_borrow() {
+    // MIR borrows the Copy scrutinee for the guard, and borrows opt
+    // without moving its String payload.
+    for (fixture, id, teaching, sharing) in [
+        ("c6_10_match_guard", "n@L3:branch_line:partial_privilege",
+            "n holds a copyable value", "n's value is being shared by one or more variables"),
+        ("c6_05_match_on_ref", "opt@L4:branch_line:partial_privilege",
+            "opt is the owner of the resource", "opt's resource is being shared by one or more variables"),
+    ] {
+        let svg = run_with_local_backend(&format!("book/{fixture}")).timeline_panel_string();
+        let title = tooltip_of_id(&svg, id).unwrap();
+        assert_review_title(&title, &[teaching, sharing], &["moved out"]);
+        assert_ne!(title, sharing);
+    }
+}
+
+#[test]
+fn p4_owner_review_projected_loans_after_join_are_alternatives() {
+    // Both writes are rejected before out's last use. One reference is
+    // moved into the tuple in each arm and push stores that tuple.
+    let svg = run_with_local_backend("known_bugs/projected_receiver_loans_1898").timeline_panel_string();
+    for place in ["a", "b"] {
+        let title = tooltip_of_id(&svg, &format!("{place}@L38-39:line:partial_privilege")).unwrap();
+        assert_review_title(&title, &[
+            &format!("an element of {place} may be immutably borrowed"),
+            "an element of a and an element of b through out",
+        ], &[&format!("an element of {place} is immutably borrowed")]);
+    }
+}
+
+#[test]
+fn p4_owner_review_iterator_restriction_follows_the_live_borrow() {
+    let svg = run_with_local_backend("p4_owner_segments_review").timeline_panel_string();
+    let continuing = tooltip_of_id(&svg, "v@L7-8:line:revoked_privilege").unwrap();
+    assert_review_title(&continuing, &[
+        "mutably borrowed by the `for` loop's iterator",
+        "While the iterator or a reference it yielded keeps the borrow live, v can't be used",
+    ], &["until the loop ends"]);
+    // An iteration that breaks can write v after the last use of x.
+    let early_end = tooltip_of_id(&svg, "v@L9-10:branch_line:full_privilege").unwrap();
+    assert_eq!(early_end, "v is the owner of the resource");
+    // A yielded item moved into saved can keep the loan after the loop.
+    let after_loop = tooltip_of_id(&svg, "items@L20-23:line:revoked_privilege").unwrap();
+    assert_review_title(&after_loop, &["items stays borrowed while saved is in use"], &["until the loop ends"]);
+}
+
+#[test]
+fn p4_owner_review_aggregate_field_move_stays_on_its_arm() {
+    let svg = run_with_local_backend("p4_owner_segments_review").timeline_panel_string();
+    assert!(tooltip_of_id(&svg, "base.b@L46:dot:move").is_some());
+    // MIR moves base.b into replacement and a shared read of base.a
+    // still compiles. Inspecting the whole value compiles in the sibling.
+    let inside = tooltip_of_id(&svg, "base@L46-50:branch_line:full_privilege").unwrap();
+    assert_review_title(&inside, &["base.b was moved out", "its other fields still can"],
+        &["may be partially moved"]);
+    let sibling = rv_elements(&svg, "base@L50-51:branch_line:")
+        .into_iter().find(|(id, ..)| id == "base@L50-51:branch_line:full_privilege").unwrap();
+    assert_eq!(sibling.1, "base is the owner of the resource");
+}
+
+#[test]
+fn p4_owner_review_ambiguous_field_carrier_keeps_only_the_restriction() {
+    let svg = run_with_local_backend("rv3_issues/1747_holder_overwritten_if").timeline_panel_string();
+    // The then arm overwrites hold with a reference to b. At the join,
+    // rustc still rejects a write to a while hold.r is in use, but the
+    // field only points to a on the path skipping that store.
+    let after_join = tooltip_of_id(&svg, "a@L8-9:line:partial_privilege").unwrap();
+    assert_review_title(&after_join, &["a stays borrowed while hold.r is in use"], &["hold.r holds a shared borrow"]);
+    let copied = run_with_local_backend("rv3_issues/1772_copied_out_of_old_holder").timeline_panel_string();
+    let after_store = tooltip_of_id(&copied, "a@L7-8:line:partial_privilege").unwrap();
+    assert_review_title(&after_store, &["x holds a shared borrow"], &["h.r holds a shared borrow"]);
+}
+
+#[test]
+fn p4_owner_review_interval_with_iterator_and_item_has_its_own_title() {
+    let svg = run_with_local_backend("deref_write_ends_borrow").timeline_panel_string();
+    // next() yields a reference that keeps the mutable borrow live, and
+    // the backedge may use it to call next() again. This interval isn't
+    // either of the earlier intervals that name just one holder.
+    for id in ["v@L7-8:line:revoked_privilege", "v@L8-9:line:revoked_privilege"] {
+        assert_eq!(tooltip_of_id(&svg, id).as_deref(),
+            Some("v's resource is mutably borrowed; v can't be used until the borrow ends"));
     }
 }

@@ -12609,7 +12609,11 @@ pub fn match_rhs_struct(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, _qpat
       match src {
         Some(src_rap) => {
           let e = if field_is_copy { Evt::Copy } else { Evt::Move };
+          // The compiler attaches the field transfer to the whole
+          // aggregate expression; the drawing anchors it on the base.
+          let id = *self.unique_id;
           self.add_ev(base_line, e, dest, ResourceTy::Value(src_rap), false);
+          self.event_spans.insert(id, rhs.span);
         }
         // `..make_p()` whose temporary keeps fields that need
         // dropping: the field is moved out of its column (#605).

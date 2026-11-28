@@ -106,6 +106,65 @@ fn operand_assignment<'a, 'tcx>(
     None
 }
 
+/// Follow a field back through direct stores and aggregate operands.
+/// A control-flow join or an indirect write leaves the source unproved.
+pub(super) fn projected_operand_borrow<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    mut loc: Location,
+    mut place: Place<'tcx>,
+    address_taken: &[Place<'tcx>],
+) -> Option<Location> {
+    use rustc_middle::mir::AggregateKind;
+
+    let mut seen = BTreeSet::new();
+    while seen.insert(loc.block) {
+        let block = &body[loc.block];
+        for (index, stmt) in block.statements[..loc.statement_index].iter().enumerate().rev() {
+            match &stmt.kind {
+                StatementKind::Assign(assign) if assign.0.is_indirect() => return None,
+                StatementKind::Assign(assign) if assign.0.local == place.local
+                    && place.projection.starts_with(assign.0.projection) =>
+                {
+                    let suffix = &place.projection[assign.0.projection.len()..];
+                    let (source, rest) = match &assign.1 {
+                        Rvalue::Ref(..) if suffix.is_empty() =>
+                            return Some(Location { block: loc.block, statement_index: index }),
+                        Rvalue::Use(Operand::Copy(source) | Operand::Move(source)) => (*source, suffix),
+                        Rvalue::Aggregate(kind, operands) => {
+                            let [ProjectionElem::Field(field, _), rest @ ..] = suffix else { return None };
+                            match &**kind {
+                                AggregateKind::Tuple => {}
+                                AggregateKind::Adt(def, _, _, _, None) if tcx.adt_def(*def).is_struct() => {}
+                                _ => return None,
+                            }
+                            (operands.get(*field)?.place()?, rest)
+                        }
+                        _ => return None,
+                    };
+                    if source.is_indirect() { return None; }
+                    place = source.project_deeper(rest, tcx);
+                    if address_taken.iter().any(|&address| super::places::place_under(place, address)) {
+                        return None;
+                    }
+                }
+                StatementKind::StorageLive(local) | StatementKind::StorageDead(local) if *local == place.local =>
+                    return None,
+                _ => {}
+            }
+        }
+        let preds = super::rows::real_predecessors(body, loc.block);
+        let pred = *preds.first().filter(|_| preds.len() == 1)?;
+        match body[pred].terminator().kind {
+            TerminatorKind::Call { destination, .. } if destination.local == place.local => return None,
+            TerminatorKind::InlineAsm { .. } => return None,
+            _ => {}
+        }
+        loc = body.terminator_loc(pred);
+    }
+    None
+}
+
 pub(crate) fn binding_place<'tcx>(
     body: &Body<'tcx>,
     bindings: &BodyBindings,
