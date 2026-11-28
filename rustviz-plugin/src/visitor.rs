@@ -2730,7 +2730,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // transfer is drawn later by the call visitor.
       let staged_operand = self.body_facts.zip(rap.owner_local()).is_some_and(|(facts, local)| {
         facts.residual_drops.iter().any(|drop| drop.site == span && drop.local == local
-          && drop.path.as_ref() == Some(rap.name()) && drop.staged == Some(crate::facts::ResidualStaging::Operand))
+          && drop.path.as_ref() == Some(rap.name()) && matches!(drop.staged, Some((crate::facts::ResidualStaging::Operand, _))))
       });
       if staged_operand {
         self.note_try_drop(line, rap.clone(), span, true);
@@ -2744,7 +2744,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // or that binding can now hold a different value.
     if let Some(facts) = self.body_facts {
       for drop in facts.residual_drops.iter().filter(|drop|
-        drop.staged == Some(crate::facts::ResidualStaging::Constructed) && drop.site == span)
+        matches!(drop.staged, Some((crate::facts::ResidualStaging::Constructed, _))) && drop.site == span)
       {
         let Some(rd) = drop.path.as_ref().and_then(|path| self.raps.place(drop.local, path)) else { continue };
         let ro = rd.rap.clone();

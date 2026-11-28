@@ -6076,8 +6076,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       self.approx_notes.push(ApproxNote::UnreachedTransfer { id: *self.unique_id, scope_ends, unwind_drop });
     }
     let staged = dest == "<temp>";
-    let drops_on_exit = staged && self.body_facts.is_some_and(|b|
-      crate::facts::dropped_on_residual(self.tcx, self.mir_body, b, location));
+    let residual_drop = self.body_facts.filter(|_| staged).and_then(|b|
+      crate::facts::staged_residual_drop(self.tcx, self.mir_body, b, location));
     let mut expansions = self.tcx.hir_parent_iter(elem.hir_id).filter_map(|(_, n)| match n {
       rustc_hir::Node::Expr(e) => Some(e),
       _ => None,
@@ -6085,7 +6085,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let first = expansions.next();
     let repeat = first.is_some_and(|e| matches!(e.kind, ExprKind::Call(_, args) if args.first().is_some_and(|a| a.hir_id == elem.hir_id)));
     let nested = first.is_some_and(|inner| expansions.any(|outer| inner.span.ctxt() != outer.span.ctxt()));
-    self.approx_notes.push(ApproxNote::VecElement { id: *self.unique_id, staged, drops_on_exit, repeat, nested });
+    self.approx_notes.push(ApproxNote::VecElement { id: *self.unique_id, staged, residual_drop, repeat, nested });
     self.add_ev(row, kind, to.clone(), src, false);
     if moved_whole {
       self.move_struct_fields_away(row, path, path);

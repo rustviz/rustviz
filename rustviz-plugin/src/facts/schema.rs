@@ -913,13 +913,20 @@ pub struct ResidualDrop {
     pub only_assigned: bool,
     pub flag: bool,
     /// A temporary contains a value previously moved from this place.
-    pub staged: Option<ResidualStaging>,
+    pub staged: Option<(ResidualStaging, StagedDrop)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResidualStaging {
     Operand,
     Constructed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StagedDrop {
+    Resource,
+    Value,
+    VariantPayload { variant: String, payload: String },
 }
 
 /// What happens to the named fields of a partially moved aggregate at a

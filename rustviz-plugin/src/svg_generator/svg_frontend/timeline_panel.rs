@@ -2629,7 +2629,10 @@ fn render_dot(
                     if try_drop.as_ref().is_some_and(|drop| drop.how == "nothing_to_drop") {
                         continue;
                     }
-                    let staged_drop = matches!(event, Event::OwnerDropIfTryReturns { staged: true, .. });
+                    let staged_drop_site = match event {
+                        Event::OwnerDropIfTryReturns { local, span, staged: true, .. } => Some((*local, *span)),
+                        _ => None,
+                    };
                     let has_staged_drop = matches!(event, Event::OwnerDropIfTryReturns { span, staged: false, .. }
                         if history.iter().any(|(_, other)| matches!(other,
                             Event::OwnerDropIfTryReturns { span: site, staged: true, .. } if span == site)));
@@ -2662,8 +2665,10 @@ fn render_dot(
                     let conditional_drop = matches!(event, Event::OwnerDropAtReassign { .. }).then(||
                         visualization_data.fn_source_lines.get(hash).zip(rv_attrs::line_of(*line_number, &visualization_data.row_lines))
                             .and_then(|(&f, src)| visualization_data.state_table.conditional_reassignment_drop(f, &name, src))).flatten();
-                    let mut title = if staged_drop {
-                        hover_messages::event_dot_staged_drop_if_try_returns(&name, &note)
+                    let mut title = if let Some((local, span)) = staged_drop_site {
+                        let drop = visualization_data.fn_source_lines.get(hash).zip(local).and_then(|(&function, local)|
+                            visualization_data.state_table.staged_try_drop(function, &name, local, span));
+                        hover_messages::event_dot_staged_drop_if_try_returns(&name, &note, drop.unwrap_or(&crate::facts::StagedDrop::Value))
                     } else if matches!(event, Event::OwnerDropAtReassign { payload: true, parts: None, maybe_moved: false, maybe_init: None, contents_gone: false, .. }) {
                         hover_messages::event_dot_replace_at_place(&name)
                     } else if box_paths {
@@ -2862,11 +2867,11 @@ fn render_dot(
                     // so, no drop triangle (#1138).
                     let drops_nothing = matches!(event, Event::OwnerDropAtReassign { parts: Some(p), .. }
                         if p.dropped.is_empty() && p.maybe_moved.is_empty());
-                    if staged_drop || has_staged_drop {
+                    if staged_drop_site.is_some() || has_staged_drop {
                         // The source column explains the staged drop. A
                         // triangle there belongs to the binding's own drop.
                         let dot = dots.entry(*hash as u64, cx, cy, *line_number, timeline_data);
-                        if staged_drop {
+                        if staged_drop_site.is_some() {
                             dot.staged_drop_lines.push((None, title));
                         } else {
                             dot.replacement_drop_lines.push((None, title));
@@ -3212,12 +3217,12 @@ fn render_dot(
         }
         for note in &visualization_data.approx_notes {
             match note {
-                ApproxNote::VecElement { id, staged, drops_on_exit, repeat, .. } if event.get_id() == *id => {
+                ApproxNote::VecElement { id, staged, residual_drop, repeat, .. } if event.get_id() == *id => {
                     if let Event::Move { is, .. } = event {
                         if *staged {
                             data.title.push_str(". The value is held temporarily while the vector is being built");
-                            if *drops_on_exit {
-                                data.title.push_str(". If the `?` returns early, it drops the staged value");
+                            if let Some(drop) = residual_drop {
+                                data.title.push_str(&hover_messages::vec_staged_drop_if_try_returns(drop));
                                 if !repeat { data.title.push_str(". If construction finishes, the value becomes a vector element"); }
                             }
                             if *repeat { data.title.push_str(". A zero count drops the element and leaves the vector empty"); }

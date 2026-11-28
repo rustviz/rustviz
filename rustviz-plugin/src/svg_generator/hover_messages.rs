@@ -1312,13 +1312,32 @@ pub fn event_dot_owner_drop_if_try_returns_maybe(my_name: &String, note: &str, o
     )
 }
 
-pub fn event_dot_staged_drop_if_try_returns(my_name: &String, note: &str) -> String {
+fn staged_drop_payload(drop: &crate::facts::StagedDrop) -> String {
+    match drop {
+        crate::facts::StagedDrop::VariantPayload { variant, payload } => format!(
+            ", including its {} field if the staged value was {}",
+            styled_name_html(payload), styled_name_html(variant)
+        ),
+        _ => String::new(),
+    }
+}
+
+pub fn event_dot_staged_drop_if_try_returns(my_name: &String, note: &str, drop: &crate::facts::StagedDrop) -> String {
     let name = styled_name_html(my_name);
+    let noun = held(*drop != crate::facts::StagedDrop::Resource);
     let (holds, rest) = split_drop_note(note);
+    let payload = staged_drop_payload(drop);
+    let holds = if payload.is_empty() { holds } else { "" };
     format!(
-        "If the `?` here returns early, it drops the value{holds} moved from {name} into the temporary{rest}. \
-         If the `?` succeeds, that value isn't dropped by the `?`."
+        "If the `?` here returns early, it drops the {noun}{holds} moved from {name} into the temporary{rest}{payload}. \
+         If the `?` succeeds, that {noun} isn't dropped by the `?`."
     )
+}
+
+pub fn vec_staged_drop_if_try_returns(drop: &crate::facts::StagedDrop) -> String {
+    let noun = held(*drop != crate::facts::StagedDrop::Resource);
+    let payload = staged_drop_payload(drop);
+    format!(". If the `?` returns early, it drops the staged {noun}{payload}")
 }
 
 // The same for a struct some fields of which were moved out before the
@@ -2771,8 +2790,20 @@ pub fn event_dot_copyable_assign_copy_inside(my_name: &String, from_name: &Strin
 // `Shape::Circle`).
 pub fn ctor_value_phrase(ctor: &str) -> String {
     let last = ctor.rsplit("::").next().unwrap_or(ctor);
-    let article = if last.starts_with(|c: char| "AEIOU".contains(c)) { "an" } else { "a" };
-    format!("{} {} value", article, last)
+    // Use the first word of a compound identifier. "OneMore" begins with
+    // "one" (/w/), while "Onerous" begins with a vowel sound.
+    let word_end = last.char_indices().skip(1).find(|&(_, c)| c.is_uppercase() || !c.is_alphabetic())
+        .map_or(last.len(), |(i, _)| i);
+    let word = last[..word_end].to_ascii_lowercase();
+    let vowel_sound = match word.as_str() {
+        "one" | "once" | "ewe" | "europe" | "european" | "union" | "unique" | "unit" | "united"
+        | "uniform" | "unicorn" | "universal" | "universe" | "university" | "use" | "user"
+        | "useful" | "usual" | "utility" => false,
+        "heir" | "heirloom" | "honest" | "honor" | "honour" | "hour" => true,
+        _ => word.starts_with(['a', 'e', 'i', 'o', 'u']),
+    };
+    let article = if vowel_sound { "an" } else { "a" };
+    format!("{article} {last} value")
 }
 
 pub(crate) fn function_result_value(f: &Function) -> String {
@@ -2813,18 +2844,14 @@ pub fn event_dot_init_from_call(my_name: &String, callee: &String, cast_to: Opti
         // A constructor written in the pattern's scrutinee (`Some(5)`)
         // isn't a call that "returns" (#758).
         Some(_) if constructor => {
-            let last = callee.rsplit("::").next().unwrap_or(callee);
-            let article = if last.starts_with(|c: char| "AEIOU".contains(c)) { "an" } else { "a" };
-            return format!("{0} is initialized with the value inside {2} {1} value", my_name, last, article);
+            return format!("{my_name} is initialized with the value inside {}", ctor_value_phrase(callee));
         }
         Some(w @ ("Ok" | "Some")) => return format!("{0} is initialized with the value inside the {2} that {1}() returns", my_name, callee, w),
         Some(w) => return format!("{0} is initialized with the value inside the {2} {1}() returns", my_name, callee, w),
         None => {}
     }
-    let last = callee.rsplit("::").next().unwrap_or(callee);
     if constructor {
-        let article = if last.starts_with(|c: char| "AEIOU".contains(c)) { "an" } else { "a" };
-        return format!("{0} is initialized with {2} {1} value", my_name, last, article);
+        return format!("{my_name} is initialized with {}", ctor_value_phrase(callee));
     }
     match cast_to {
         Some(ty) => format!("{0} is initialized with the value {1}() returns, converted to {2}", my_name, callee, ty),
