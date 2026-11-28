@@ -3293,7 +3293,7 @@ fn signature_tie(func_fmt: &str, what: &str, to_name: &String, names: &[String],
     // that argument, not the argument itself (#1084).
     let first_arg = usize::from(tie.receiver);
     let n_args = tie.total.saturating_sub(first_arg);
-    let positions = |set: &[usize]| -> Option<String> {
+    let positions = |set: &[usize], receiver: &str| -> Option<String> {
         let recv_tied = tie.receiver && set.contains(&0);
         let args: Vec<usize> = set.iter().filter(|&&i| i >= first_arg).map(|i| i - first_arg).collect();
         let arg_part = if args.is_empty() {
@@ -3312,8 +3312,8 @@ fn signature_tie(func_fmt: &str, what: &str, to_name: &String, names: &[String],
             Some(format!("its {} arguments", join(&ords)))
         };
         match (recv_tied, arg_part) {
-            (true, Some(a)) => Some(format!("the value it was called on and {}", a)),
-            (true, None) => Some("the value it was called on".to_owned()),
+            (true, Some(a)) => Some(format!("{receiver} and {a}")),
+            (true, None) => Some(receiver.to_owned()),
             (false, a) => a,
         }
     };
@@ -3321,14 +3321,15 @@ fn signature_tie(func_fmt: &str, what: &str, to_name: &String, names: &[String],
     // `the references stored in rows` (`&rows`; `... in a and b` for
     // several), `t` (`&t` with `t` a reference), or the argument's
     // position when it isn't a variable.
-    let mut parts: Vec<String> = positions(&direct).into_iter().collect();
+    let receiver = if tie.receiver_is_ref { "the reference passed as its receiver" } else { "the references carried by its receiver" };
+    let mut parts: Vec<String> = positions(&direct, receiver).into_iter().collect();
     let holders: Vec<String> = tie.stored_in.iter()
         .filter(|st| !st.referent_is_ref)
         .filter_map(|st| st.name.as_deref().map(styled_name_html))
         .collect();
     let mut holders_said = false;
     for st in &tie.stored_in {
-        let pos = || positions(&[st.index]).unwrap_or_else(|| "its argument".to_owned());
+        let pos = || positions(&[st.index], "the value it was called on").unwrap_or_else(|| "its argument".to_owned());
         parts.push(match (&st.name, st.referent_is_ref) {
             (Some(n), true) => styled_name_html(n),
             (Some(_), false) if holders_said => continue,

@@ -1615,9 +1615,10 @@ pub struct TiedInputs {
 /// method call as position 0; it only shapes the tooltip wording.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ArgTie {
-    /// The call is a method call (`s.as_str()`): position 0 is the
-    /// receiver, "the value it was called on".
+    /// The call is a method call (`s.as_str()`): position 0 is the receiver.
     pub receiver: bool,
+    /// The receiver parameter itself has reference type.
+    pub receiver_is_ref: bool,
     /// Number of arguments, counting the receiver.
     pub total: usize,
     /// Tied positions, in order.
@@ -2755,14 +2756,14 @@ impl ExternalEvent {
     /// The column events of an `OrAltBorrow` (#565): the place's, and
     /// the reference's when the event carries it (`first`).
     pub fn or_alt_borrow_events(&self) -> (Event, Option<Event>) {
-        let ExternalEvent::OrAltBorrow { ro, into, from, mutable, end, first, chain, .. } = self else {
+        let ExternalEvent::OrAltBorrow { ro, into, from, mutable, end, first, chain, id } = self else {
             panic!("internal state: or_alt_borrow_events of another event");
         };
         let lend = Event::OrAltLend {
             into: into.clone(), is: ResourceTy::Value(ro.clone()), sources: from.clone(), mutable: *mutable, end: *end, chain: chain.clone(),
         };
         let borrow = first.then(|| Event::OrAltBorrow {
-            is: ResourceTy::Value(into.clone()), sources: from.clone(), mutable: *mutable, end: *end, chain: chain.clone(),
+            is: ResourceTy::Value(into.clone()), sources: from.clone(), mutable: *mutable, end: *end, chain: chain.clone(), id: *id,
         });
         (lend, borrow)
     }
@@ -3114,7 +3115,7 @@ pub enum Event {
     // The reference's side of an ExternalEvent::OrAltBorrow: its borrow
     // of one of `sources` starts or ends. Changes its state like a
     // StaticBorrow / MutableBorrow and StaticDie / MutableDie would.
-    OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool, chain: Option<ChainRef> },
+    OrAltBorrow { is: ResourceTy, sources: Vec<String>, mutable: bool, end: bool, chain: Option<ChainRef>, id: usize },
     // See ExternalEvent::ChainFailAssign. `rc`: the variable's
     // `rc_drop()`, for what dropping the old value does.
     ChainFailAssign { place: Option<String>, drops_old: bool, rc: Option<RcDrop>, path: FailPath },

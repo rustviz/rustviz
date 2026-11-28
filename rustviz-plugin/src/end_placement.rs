@@ -622,6 +622,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let mut candidates = Vec::new();
       let mut handoffs = BTreeMap::new();
       let mut skipped_let_else = false;
+      let let_else_local = r.ref_local().filter(|&local|
+        self.row_layout.let_else_bindings.contains_key(&(r.get_owner(), local)));
+      let mut bound_ends = Vec::new();
       let mut sibling_returns = BTreeSet::new();
       for (row, e) in facts
         .rows
@@ -636,6 +639,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         };
         if !loans.contains(loan) {
           continue;
+        }
+        if let_else_local.is_some_and(|local| e.end_places.iter().any(|place|
+          place.local == local.index() && place.projection.is_empty()))
+        {
+          bound_ends.push(Boundary { loan: *loan, fact: e, release: !own, row });
         }
         let mut site = Site { path: Vec::new(), row, before: None };
         self.locate(&arm.e_data, &switches, e.display_location, e, next, &mut site);
@@ -695,22 +703,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
           sibling_returns.insert((*loan, site.path[0].0, e.location));
         }
         let Some(&(nested, _)) = site.path.first() else { continue };
-        // A let-else binding receives its value after its own fork. Its
-        // column cannot give the loan back on the scrutinee's failed edge.
-        if site.path.iter().any(|(branch, _)| self.let_else_branches.contains(branch)
-          && branch_at(self.preprocessed_events, *branch, &mut Vec::new()).and_then(|(_, event)| match event {
-            ExternalEvent::Branch { branches, .. } => branches.first()?.source,
-            _ => None,
-          }).and_then(|source| match self.tcx.hir_node(source.branch) {
-            rustc_hir::Node::LetStmt(stmt) => Some(stmt.pat.hir_id),
-            _ => None,
-          }).is_some_and(|pat|
-            self.raps.bindings.columns.get(r.name()).into_iter().flatten().any(|&local| {
-              let decl = &self.bwf.body.local_decls[local];
-              decl.source_info.scope.lint_root(&self.bwf.body.source_scopes).is_some_and(|id|
-                (id == pat || self.tcx.hir_parent_id_iter(id).any(|p| p == pat))
-                  && self.raps.binding(id).is_some_and(|rd| rd.rap == *r))
-            }))) {
+        // The binding is drawn after this fork. The scrutinee's end on
+        // failure cannot be used to move or discard the binding's own end.
+        if let_else_local.is_some_and(|local| site.path.iter().any(|(branch, _)| {
+          self.let_else_branches.contains(branch) && self.arm_bindings.get(branch)
+            .is_some_and(|bindings| bindings.iter().any(|&(_, binding)| binding == local))
+        })) {
           skipped_let_else = true;
           continue;
         }
@@ -755,10 +753,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
       if dests.is_empty() {
-        // The binding has no column on the failed edge, and the let-else
-        // pass draws that edge's return from the lender. Leaving this
-        // end in place would name the binding where it has no value.
-        if skipped_let_else { remove.insert(ev.get_id()); }
+        if skipped_let_else {
+          if bound_ends.is_empty() {
+            remove.insert(ev.get_id());
+          } else {
+            self.drawn_references.ends.insert(ev.get_id(), bound_ends);
+          }
+        }
         continue;
       }
       let listed = arm.line_map.get(&line).is_some_and(|g| g.iter().any(|x| x.get_id() == ev.get_id()));
@@ -1085,6 +1086,22 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     for (p, b, e) in put {
       insert(self.preprocessed_events, self.event_line_map, &p, b, e, false);
     }
+  }
+
+  /// A named reference already carries this loan when the pattern is
+  /// tested, and the failure path contains its last use.
+  pub(crate) fn let_else_has_outer_end(&self, arm: crate::facts::SourceArm) -> bool {
+    let Some(facts) = self.body_facts else { return false };
+    let body = &self.bwf.body;
+    let tests = facts.tests_of(arm.branch);
+    if tests.is_empty() { return false; }
+    facts.rows.iter().flat_map(|row| &row.facts).any(|end| {
+      let Fact::BorrowEnd { loan, .. } = end.fact else { return false };
+      !end.end_places.is_empty()
+        && facts.loans.iter().find(|info| info.loan == loan).and_then(|info| info.issue)
+          .is_some_and(|issue| tests.iter().all(|&test| dominates(body, issue, test)))
+        && crate::facts::location_arms(self.tcx, body, facts, end.location).contains(&arm)
+    })
   }
 
   /// On a let-else's failed edge, the pattern's bindings haven't received
