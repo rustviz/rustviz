@@ -37,9 +37,33 @@ pub(crate) fn call_operand<'tcx>(
 /// result of a call back into its arguments.
 pub(crate) fn operand_borrow<'tcx>(
     body: &Body<'tcx>,
-    mut loc: Location,
+    loc: Location,
     arg: Place<'tcx>,
 ) -> Option<(Location, Place<'tcx>)> {
+    let (at, Rvalue::Ref(_, _, place)) = operand_assignment(body, loc, arg, false)? else {
+        return None;
+    };
+    Some((at, *place))
+}
+
+/// Follow copies and raw-pointer casts to the reaching pointer creation.
+pub(crate) fn raw_pointer_origin<'tcx>(
+    body: &Body<'tcx>,
+    loc: Location,
+    arg: Place<'tcx>,
+) -> Option<(Location, Place<'tcx>)> {
+    let (at, Rvalue::RawPtr(_, place)) = operand_assignment(body, loc, arg, true)? else {
+        return None;
+    };
+    Some((at, *place))
+}
+
+fn operand_assignment<'a, 'tcx>(
+    body: &'a Body<'tcx>,
+    mut loc: Location,
+    arg: Place<'tcx>,
+    follow_pointer_casts: bool,
+) -> Option<(Location, &'a Rvalue<'tcx>)> {
     let mut local = arg.as_local()?;
     let mut seen = BTreeSet::new();
     while seen.insert(loc.block) {
@@ -54,17 +78,10 @@ pub(crate) fn operand_borrow<'tcx>(
                 StatementKind::Assign(a) if a.0.local == local => {
                     a.0.as_local()?;
                     match a.1 {
-                        Rvalue::Ref(_, _, p) => {
-                            return Some((
-                                Location {
-                                    block: loc.block,
-                                    statement_index: i,
-                                },
-                                p,
-                            ))
-                        }
                         Rvalue::Use(Operand::Move(p) | Operand::Copy(p)) => local = p.as_local()?,
-                        _ => return None,
+                        Rvalue::Cast(rustc_middle::mir::CastKind::PtrToPtr, Operand::Move(p) | Operand::Copy(p), _)
+                            if follow_pointer_casts => local = p.as_local()?,
+                        _ => return Some((Location { block: loc.block, statement_index: i }, &a.1)),
                     }
                 }
                 StatementKind::StorageLive(l) | StatementKind::StorageDead(l) if *l == local => {

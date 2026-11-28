@@ -7849,7 +7849,7 @@ pub fn approx_note_branch_extended_temp(name: &str, code: Option<&str>, line: us
         None => format!("the borrow of a temporary on line {}", line),
     };
     format!(
-        "(If {} ran, the temporary it borrows is dropped here: Rust keeps it alive until the end of this block because {} holds a reference to it. RustViz doesn't draw a column for this temporary.)",
+        "(If {} ran, the temporary it borrows is dropped here: The original binding of {} extended the temporary’s lifetime to the end of this block. RustViz doesn't draw a column for this temporary.)",
         what,
         styled_name_html(name)
     )
@@ -7884,7 +7884,7 @@ pub fn approx_note_closure(name: &str) -> String {
 // On the first dot of a variable holding an async block (#135).
 pub fn approx_note_async_block(name: &str) -> String {
     format!(
-        "(RustViz doesn't draw the async block's body, which runs when {} is awaited.)",
+        "(RustViz doesn't draw the async block's body, which runs when {} is polled.)",
         styled_name_html(name)
     )
 }
@@ -7893,7 +7893,7 @@ pub fn approx_note_async_block(name: &str) -> String {
 // returns (#135).
 pub fn approx_note_async_call(name: &str, fn_name: &str) -> String {
     format!(
-        "({1} is an async fn; RustViz doesn't draw its body, which runs when {0} is awaited.)",
+        "({1} is an async fn; RustViz doesn't draw its body, which runs when {0} is polled.)",
         styled_name_html(name), styled_name_html(fn_name)
     )
 }
@@ -7901,7 +7901,7 @@ pub fn approx_note_async_call(name: &str, fn_name: &str) -> String {
 // On the first dot of each parameter of an async fn (#135).
 pub fn approx_note_async_fn(fn_name: &str) -> String {
     format!(
-        "({} is an async fn; RustViz doesn't draw its body, which runs when the future it returns is awaited.)",
+        "({} is an async fn; RustViz doesn't draw its body, which runs when the future it returns is polled.)",
         styled_name_html(fn_name)
     )
 }

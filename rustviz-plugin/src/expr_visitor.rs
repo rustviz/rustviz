@@ -1484,6 +1484,15 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     self.body_facts?.value_flow.call(expr.span, self.mir_callee(expr))
   }
 
+  /// The iterator constructor in rustc's `for` desugaring. Retain its
+  /// expansion context, since separate loops can share a source row.
+  pub(crate) fn iterator_storage(&self, constructor: &Expr<'_>) -> Option<&'a crate::facts::IteratorStorage> {
+    let span = constructor.span.with_parent(None);
+    let mut sites = self.body_facts?.iterators.iter().filter(|it| it.site.with_parent(None) == span);
+    let site = sites.next()?;
+    sites.next().is_none().then_some(site)
+  }
+
   pub(crate) fn mir_constructor(&self, expr: &Expr<'_>) -> bool {
     self.body_facts.is_some_and(|b| b.value_flow.constructor(expr.span))
   }
@@ -10723,11 +10732,11 @@ pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &R
   if lender != from {
     // The tuple has no column, so no arrow shows the borrow: the
     // binding's first dot says what it borrows (#1363).
-    if let Some(x) = from.extract_rap() {
+    if let (Some(x), Some(local)) = (from.extract_rap(), binding.ref_local()) {
       let tuple = self.tuple_scrutinee_text(scrutinee);
       let text = crate::svg_generator::hover_messages::approx_note_tuple_elem_borrow(binding.name(), x.name(), &tuple, matches!(evt, Evt::MBorrow));
-      let lines = (span_to_line(&scrutinee.span, &self.tcx), self.tuple_scrutinee_user_end(scrutinee));
-      self.approx_notes.push(ApproxNote::At { hash: *binding.hash(), lines, text });
+      let line = span_to_line(&self.mir_body.local_decls[local].source_info.span, &self.tcx);
+      self.approx_notes.push(ApproxNote::SourceRow { hash: *binding.hash(), line, event: crate::svg_generator::data::NoteEvent::Borrow, text });
     }
     self.tuple_temp_refs.insert(binding.name().to_string());
     if let Some(rd) = self.borrow_map.get_mut(binding.name()) {
@@ -10746,16 +10755,6 @@ pub fn retarget_tuple_borrow(&mut self, scrutinee: &'tcx Expr<'tcx>, binding: &R
     }
   }
   lender
-}
-
-/// The last line of the `match` / `if let` / `while let` whose
-/// scrutinee is `scrutinee` (its line, for anything else).
-fn tuple_scrutinee_user_end(&self, scrutinee: &'tcx Expr<'tcx>) -> usize {
-  let user = self.tcx.hir_parent_iter(scrutinee.hir_id).find_map(|(_, n)| match n {
-    rustc_hir::Node::Expr(e) if matches!(e.kind, ExprKind::Match(..) | ExprKind::If(..) | ExprKind::Loop(..)) => Some(e.span),
-    _ => None,
-  });
-  span_end_line(&user.unwrap_or(scrutinee.span), &self.tcx)
 }
 
 /// Where a tuple-literal scrutinee's variables go: the move into the

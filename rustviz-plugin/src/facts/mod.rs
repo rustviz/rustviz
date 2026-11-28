@@ -25,6 +25,7 @@
 //! write them to as well.
 
 mod body;
+mod borrow_spelling;
 mod control;
 pub use control::SourceArm;
 pub(crate) use control::{enclosing_arms, location_arms};

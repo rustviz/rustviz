@@ -2,7 +2,7 @@ extern crate handlebars;
 use crate::facts::table::{FunctionStart, Init, JoinCell};
 use crate::facts::SharedReferenceJoin;
 use crate::svg_generator::data::{state_after_loop_exits, AltRuntime};
-use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
+use crate::svg_generator::data::{AltEnd, FieldLenders, ApproxNote, NoteEvent, place_elem_names, breaks_out_only, is_param_value_line, FIRST_ROW_Y, EarlyReturns, returned_closure, branch_column_rows, branch_is_collapsed, branch_state_converter, convert_back, init_join, InitBy, InitJoin, BranchData, BreakAlt, BranchExit, CopyOf, BranchType, ChainFailHow, ChainRef, Event, ExternalEvent, LineState, LoopHead, MaybeMovedAt, PlaceWrite, ResourceAccessPoint, ResourceAccessPoint_extract, ResourceTy, State, Struct, StructsInfo, Timeline, Visualizable, VisualizationData, LINE_SPACE, StaticLender, ViaCarrier, leaves_maybe_held};
 use crate::svg_generator::hover_messages::{self, styled_name_html};
 use crate::svg_generator::svg_frontend::line_styles::OwnerLine;
 use crate::svg_generator::svg_frontend::rv_attrs::{self, Rv};
@@ -48,6 +48,8 @@ struct PendingDot {
     var: String,
     row: usize,
     events: Vec<&'static str>,
+    operation_ids: Vec<usize>,
+    projected_access: bool,
     /// Approximation notes (`ApproxNote`), after the events' text.
     notes: Vec<DotNote>,
 }
@@ -143,7 +145,7 @@ impl DotLayer {
                 hash, x, y, owner_key, is_member,
                 lines: Vec::new(), staged_drop_lines: Vec::new(), replacement_drop_lines: Vec::new(),
                 drop: false, event: false, call: false, never_initialized: false,
-                var: column.name.clone(), row, events: Vec::new(), notes: Vec::new(),
+                var: column.name.clone(), row, events: Vec::new(), operation_ids: Vec::new(), projected_access: false, notes: Vec::new(),
             });
             dots.len() - 1
         });
@@ -200,6 +202,7 @@ impl DotLayer {
                 title: String, id: usize, ev: &'static str, row: usize) {
         let dot = self.entry(hash, x, y, row, column);
         dot.call = true;
+        dot.operation_ids.push(id);
         dot.events.push(ev);
         let at = dot.lines.iter()
             .position(|(lend, _)| *lend == Some(id))
@@ -260,6 +263,16 @@ impl DotLayer {
             }
         }
         for note in notes {
+            if let ApproxNote::Operation { hash, id, text } = note {
+                for dot in &mut self.dots {
+                    if dot.hash == *hash && dot.operation_ids.contains(id) {
+                        let note = DotNote::Other(text.clone());
+                        if !dot.notes.contains(&note) {
+                            dot.notes.push(note);
+                        }
+                    }
+                }
+            }
             if let ApproxNote::UnreachedValue { hash } = note {
                 for dot in &mut self.dots {
                     if dot.hash == *hash { dot.never_initialized = true; }
@@ -272,9 +285,22 @@ impl DotLayer {
                     }
                 }
             }
-            if let ApproxNote::At { hash, lines: (lo, hi), text } = note {
-                if let Some(col) = by_col.get(hash) {
-                    add(&mut self.dots, first_in(col, *lo, *hi), DotNote::Other(text.clone()));
+            if let ApproxNote::SourceRow { hash, line, event, text } = note {
+                let mut anchors = by_col.get(hash).into_iter().flatten().filter(|(row, i)| {
+                    row == line && self.dots[*i].events.iter().any(|drawn| match event {
+                        NoteEvent::Access => matches!(*drawn, "duplicate" | "move" | "static_lend" | "mutable_lend")
+                            || self.dots[*i].projected_access,
+                        NoteEvent::Parameter => matches!(*drawn, "init_ref_param" | "acquire"),
+                        NoteEvent::Initialize => matches!(*drawn, "acquire" | "static_borrow" | "mutable_borrow"),
+                        NoteEvent::Acquire => *drawn == "acquire",
+                        NoteEvent::Borrow => matches!(*drawn, "static_borrow" | "mutable_borrow"),
+                        NoteEvent::ScopeEnd => matches!(*drawn, "ref_go_out_of_scope" | "owner_go_out_of_scope"),
+                    })
+                });
+                if let Some(&(_, i)) = anchors.next() {
+                    if anchors.next().is_none() {
+                        add(&mut self.dots, vec![i], DotNote::Other(text.clone()));
+                    }
                 }
             }
         }
@@ -3336,6 +3362,15 @@ fn render_dot(
             }
         }
         data.title = qualify(data.title);
+        if event_kind == "static_lend" {
+            dots.entry(data.hash, data.dot_x, data.dot_y, *line_number, timeline_data)
+                .operation_ids.push(event.get_id());
+        }
+        if matches!(event, Event::Acquire { is, .. } | Event::Copy { is, .. }
+            | Event::StaticBorrow { is, .. } | Event::MutableBorrow { is, .. }
+            if matches!(is, ResourceTy::Deref(..) | ResourceTy::DerefField(..) | ResourceTy::Index(..))) {
+            dots.entry(data.hash, data.dot_x, data.dot_y, *line_number, timeline_data).projected_access = true;
+        }
         append_dot(data, timeline_data, dots, lend_id, event_kind, *line_number);
         if (stacked || layout.field_generations.contains_key(&event.get_id()))
             && matches!(event, Event::StaticBorrow { .. }) && rap.is_ref() && !rap.is_mutref() {

@@ -5038,9 +5038,11 @@ fn call_lend_line(last_lend: &Option<(usize, usize)>, e: &Event, line: usize) ->
 /// go gets none.
 #[derive(Debug, Clone)]
 pub enum ApproxNote {
-    /// `text` on the first event dot of column `hash` on a source line
-    /// in `lines` (inclusive).
-    At { hash: u64, lines: (usize, usize), text: String },
+    /// A compiler-derived display row for an operation or binding that
+    /// has a single pictured dot in this column.
+    SourceRow { hash: u64, line: usize, event: NoteEvent, text: String },
+    /// A compiler-backed operation matched to the event that pictures it.
+    Operation { hash: u64, id: usize, text: String },
     /// rustc checks this transfer after a closure call whose body cannot return.
     UnreachedTransfer { id: usize, scope_ends: Vec<(u64, usize)>, unwind_drop: Option<&'static str> },
     UnreachedValue { hash: u64 },
@@ -5066,16 +5068,27 @@ pub enum ApproxNote {
     },
 }
 
+/// The pictured operation a source anchor can describe.
+#[derive(Debug, Clone, Copy)]
+pub enum NoteEvent {
+    Access,
+    Parameter,
+    Initialize,
+    Acquire,
+    Borrow,
+    ScopeEnd,
+}
+
 impl ApproxNote {
     /// The note with its source lines mapped by `f` (lines hidden from
     /// the figure removed before it).
     pub fn map_lines(&mut self, f: impl Fn(usize) -> usize) {
         match self {
-            ApproxNote::PatternReference { .. } | ApproxNote::VecElement { .. } | ApproxNote::IteratorElement { .. } | ApproxNote::UnreachedValue { .. } => {}
+            ApproxNote::Operation { .. } | ApproxNote::PatternReference { .. } | ApproxNote::VecElement { .. } | ApproxNote::IteratorElement { .. } | ApproxNote::UnreachedValue { .. } => {}
             ApproxNote::UnreachedTransfer { scope_ends, .. } => {
                 for (_, end) in scope_ends { *end = f(*end); }
             }
-            ApproxNote::At { lines, .. } => *lines = (f(lines.0), f(lines.1)),
+            ApproxNote::SourceRow { line, .. } => *line = f(*line),
             ApproxNote::Loop { head, pass, nested, .. } => {
                 *head = f(*head);
                 *pass = (f(pass.0), f(pass.1));
