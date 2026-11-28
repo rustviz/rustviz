@@ -555,6 +555,7 @@ pub(crate) struct WriteColumn {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReplacementDrop {
     pub how: &'static str,
+    pub empty: bool,
     pub flag: bool,
     pub may_have_moved: bool,
     pub may_be_refilled: bool,

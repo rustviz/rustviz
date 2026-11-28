@@ -2059,6 +2059,7 @@ pub struct RowLayout {
     pub(crate) iterator_next_ends: BTreeSet<usize>,
     pub(crate) indexed_copy_holders: BTreeMap<u64, BTreeSet<usize>>,
     pub(crate) iterator_end_notes: BTreeMap<usize, String>,
+    pub(crate) iterator_item_stops: BTreeSet<usize>,
     pub(crate) shadowed_borrow_lenders: BTreeMap<usize, String>,
     pub(crate) returned_call_titles: BTreeMap<usize, String>,
     /// Projected moves into `?` whose residual edge drops the remaining Box.
@@ -2202,6 +2203,7 @@ impl RowLayout {
         self.iterator_next_ends.append(&mut other.iterator_next_ends);
         self.indexed_copy_holders.append(&mut other.indexed_copy_holders);
         self.iterator_end_notes.append(&mut other.iterator_end_notes);
+        self.iterator_item_stops.append(&mut other.iterator_item_stops);
         self.shadowed_borrow_lenders.append(&mut other.shadowed_borrow_lenders);
         self.returned_call_titles.append(&mut other.returned_call_titles);
         self.try_box_drops.append(&mut other.try_box_drops);

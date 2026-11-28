@@ -136,6 +136,7 @@ impl Cell {
 /// executable incoming paths did inside the conditional.
 #[derive(Clone, Debug)]
 pub struct JoinCell {
+    branch: rustc_hir::HirId,
     pub cell: Cell,
     pub change: JoinChange,
     pub maybe_empty_box: bool,
@@ -613,6 +614,11 @@ impl StateTable {
             body.unique_places.get(column.name()).copied().flatten()
         })?;
         (place.cell.local == Some(local)).then_some(place)
+    }
+
+    pub(crate) fn join_field_cell(&self, function: FunctionStart, join: &JoinCell, column: &str) -> Option<Cell> {
+        let field = self.joins.get(&function.body)?.joins.get(&join.branch)?.get(column)?;
+        (field.cell.local == join.cell.local).then(|| field.cell.clone())
     }
 
     pub fn incoming_cell(&self, function: FunctionStart, column: &str, row: usize) -> Option<&Cell> {
@@ -1189,7 +1195,7 @@ fn body_joins(b: &BodyFacts) -> BodyJoins {
             let shared_ref_unchanged = cell.local.and_then(|local| join.unchanged_shared_refs.get(&local).copied());
             let empty_at_runtime = join.empty_at_runtime.contains(&name);
             let checked_path_owns = join.incoming.iter().any(|edge| !edge.runs && edge.state.get(&name) == Some(&"own"));
-            (name, JoinCell { cell, change, maybe_empty_box, shared_ref_unchanged, checked_only: join.checked_only, empty_at_runtime, checked_path_owns })
+            (name, JoinCell { branch: id, cell, change, maybe_empty_box, shared_ref_unchanged, checked_only: join.checked_only, empty_at_runtime, checked_path_owns })
         }).collect();
         (id, places)
     }).collect();

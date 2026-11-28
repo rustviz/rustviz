@@ -801,6 +801,10 @@ fn append_decl_ref_die(vd: &VisualizationData, e: &ExternalEvent, line: usize, v
 
 fn append_arm_ref_die(vd: &VisualizationData, ev: &ExternalEvent, line: usize, var: &ResourceAccessPoint,
     draw: bool, hold: Option<&SkippedHold>, history: &mut Vec<(usize, Event)>) {
+    if vd.row_layout.iterator_item_stops.contains(&ev.get_id())
+        && history.iter().any(|(_, event)| event.get_id() == ev.get_id()) {
+        return;
+    }
     if let Some(hold) = hold.filter(|h| h.event == Some(ev.get_id())) {
         let title = hover_messages::event_dot_skipped_field_use(var.name(),
             hold.loans.values().next().filter(|_| hold.loans.len() == 1).and_then(Option::as_ref));
@@ -1752,6 +1756,7 @@ pub enum TupleDropAt {
 /// scope end of such a struct (`event_dot_struct_partial_go_out_of_scope`).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ReassignParts {
+    pub(crate) empty: bool,
     /// Some dropped components have no column.
     pub other_drops: bool,
     pub flag: bool,
@@ -1768,6 +1773,13 @@ pub struct ReassignParts {
     /// Some of `maybe_moved` were moved by a `let` or-pattern (#597) or
     /// a let-chain's condition (#281), not a branch: "nothing above".
     pub by_cond: bool,
+}
+
+impl ReassignParts {
+    pub(crate) fn drops_nothing(&self) -> bool {
+        !self.box_parts && !self.other_drops && self.dropped.is_empty()
+            && self.maybe_moved.is_empty() && self.refilled.is_empty()
+    }
 }
 
 /// A variable whose value, or part of it (`rest`: the pattern moved

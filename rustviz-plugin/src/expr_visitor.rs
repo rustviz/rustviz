@@ -13548,7 +13548,42 @@ pub fn print_out_of_scope(&mut self){
         ));
         self.add_own_end(row, &from_ro, ResourceTy::Anonymous, k, &[]);
       }
+      let item_storage = |loans: &[usize]| facts.and_then(|f| {
+        let mut iterators = f.iterators.iter().filter(|it| it.bindings.iter().any(|b|
+          Some(b.local) == rd.local && loans.iter().any(|id| b.loans.contains(id))));
+        iterators.next().filter(|_| iterators.next().is_none())
+      });
+      let consumed_item = |it: &crate::facts::IteratorStorage, loans: &[usize]| {
+          let handoffs: Vec<_> = it.bindings.iter().filter(|b| Some(b.local) == rd.local)
+            .flat_map(|b| &b.handoffs).filter(|h| loans.contains(&h.loan)).collect();
+          let first = handoffs.first()?;
+          (handoffs.iter().all(|h| h.occurrence == first.occurrence && h.row == first.row)
+            && loans.iter().all(|id| handoffs.iter().any(|h| h.loan == *id)))
+            .then_some((first.row, handoffs.iter().all(|h| h.next_on_all_paths)))
+      };
+      let mut item_stops = BTreeSet::new();
+      ends.retain(|(lender, end, loans)| {
+        let Some((iter, ix)) = item_storage(loans).zip(ix.as_ref()) else { return true };
+        if matches!(end, End::None) || consumed_item(iter, loans).is_some() { return true; }
+        let Some(stops) = self.place_iterator_boundaries(iter, &from_ro, lender, loans, &ix.exhaustion) else { return true };
+        item_stops.extend(stops);
+        false
+      });
       for (lender, end, loans) in ends {
+        // One item can carry both the iterator's collection loan and a
+        // loan stored inside an element. A HoldEnd on the same MIR edge
+        // is still just one end of the item's use.
+        if !item_stops.is_empty() && !loans.is_empty() && rd.local.is_some_and(|local|
+          loans.iter().all(|&loan| {
+            let mut boundaries = self.reference_effects.ends(loan).filter(|end|
+              end.fact.end_places.iter().any(|p| p.local == local.index() && p.projection.is_empty()));
+            let drawn = |end: crate::facts::repoints::Boundary<'_>|
+              !end.release && item_stops.contains(&end.fact.occurrence);
+            boundaries.next().is_some_and(drawn) && boundaries.all(drawn)
+          }))
+        {
+          continue;
+        }
         let to_ro = match &lender {
           ResourceTy::Anonymous => ResourceTy::Deref(from_ro.clone()),
           l => l.clone(),
@@ -13556,54 +13591,13 @@ pub fn print_out_of_scope(&mut self){
         let co = lender != rd.lender;
         // A reference no one lent to (#1095) gives nothing back.
         let unlent = matches!(rd.lender, ResourceTy::Anonymous) && self.unlent_refs.contains(k);
-        // When a pass stops using the item and only hidden iterator storage
-        // reaches exhaustion, the two endpoints are different. Check the
-        // actual slots on every ending edge before splitting a drawn end.
-        let item_end = rd.local.and_then(|local| {
-          let facts = facts?;
-          let it = facts.iterators.iter().find(|it| it.bindings.iter().any(|b| b.local == local))?;
-          if loans.is_empty() || !loans.iter().all(|l| it.loans.contains(l)) { return None; }
-          // A shared column reached through another iteration or an enclosing
-          // decision keeps its path-specific end on that leg.
-          if facts.loans.iter().any(|l| loans.contains(&l.loan) && !l.issuance_path.is_empty())
-            || facts.iterators.iter().any(|other| other.storage != it.storage && loans.iter().any(|l| other.loans.contains(l))) { return None; }
-          let mut own = None;
-          let mut back = false;
-          for row in &facts.rows {
-            for ev in &row.facts {
-              match &ev.fact {
-                crate::facts::Fact::BorrowEnd { loan, .. } if loans.contains(loan) => {
-                  if ev.end_places.iter().any(|p| p.local != it.storage.index()) || ev.end_places.is_empty() { return None; }
-                  ix.as_ref()?.exhaustion.get(&ev.occurrence.successor?)?;
-                  back = true;
-                }
-                crate::facts::Fact::HoldEnd { loan, .. } if loans.contains(loan)
-                  && ev.end_places.iter().any(|p| p.local == local.index()) => {
-                  if own.replace((row.line, ev.occurrence)).is_some_and(|(_, prev)| prev != ev.occurrence) { return None; }
-                }
-                _ => {}
-              }
-            }
-          }
-          own.filter(|_| back).map(|(line, _)| line)
-        });
+        let item_storage = item_storage(&loans);
+        let consumed_item = item_storage.and_then(|iter| consumed_item(iter, &loans));
         let end = match end {
           End::LoopExit { own, .. } if matches!(lender, ResourceTy::Anonymous) => End::Own(own),
-          End::LoopExit { back, .. } | End::Arrow(back) if item_end.is_some_and(|own| own < back) =>
-            End::LoopExit { own: item_end.unwrap(), back },
           End::LoopExit { back, .. } => End::Arrow(back),
           other => other,
         };
-        let item_storage = facts.and_then(|f| f.iterators.iter().find(|it|
-          it.bindings.iter().any(|b| Some(b.local) == rd.local && loans.iter().any(|id| b.loans.contains(id)))));
-        let consumed_item = item_storage.and_then(|it| {
-          let handoffs: Vec<_> = it.bindings.iter().filter(|b| Some(b.local) == rd.local)
-            .flat_map(|b| &b.handoffs).filter(|h| loans.contains(&h.loan)).collect();
-          let first = handoffs.first()?;
-          (handoffs.iter().all(|h| h.occurrence == first.occurrence && h.row == first.row)
-            && loans.iter().all(|id| handoffs.iter().any(|h| h.loan == *id)))
-            .then_some((first.row, handoffs.iter().all(|h| h.next_on_all_paths)))
-        });
         let end = match (end, consumed_item) {
           (End::Arrow(_) | End::Own(_) | End::LoopExit { .. }, Some((line, _))) => End::Arrow(line),
           (other, _) => other,
@@ -13640,7 +13634,7 @@ pub fn print_out_of_scope(&mut self){
         };
         match end {
           End::None => {}
-          End::Arrow(line) => {
+          End::Arrow(line) | End::LoopExit { back: line, .. } => {
             // A holder moved into a `for` loop has no value left to end a
             // borrow on: the loop gives the lender back (#767). A `&mut` a
             // `move` closure captured is held by the closure (#1148).
@@ -13681,28 +13675,6 @@ pub fn print_out_of_scope(&mut self){
                 }
               }
             }
-          }
-          End::LoopExit { own, back } => {
-            let item = *self.unique_id;
-            self.add_own_end(own, &from_ro, to_ro.clone(), k, &[]);
-            if matches!(&from_ro, ResourceAccessPoint::StaticRef(r) if r.binding.slice_item)
-              && to_ro.extract_rap().is_some_and(|r| r.is_ref()) {
-              let name = crate::svg_generator::hover_messages::styled_name_html(from_ro.name());
-              self.row_layout.iterator_end_notes.insert(item, format!("The borrow of this slice element through {name} ends here"));
-            }
-            let evt = if rd.mut_of(&lender) { Evt::MDie } else { Evt::SDie };
-            let id = *self.unique_id;
-            let place = if to_ro.extract_rap().is_some_and(|r| r.is_ref()) {
-              format!("the data behind {}", crate::svg_generator::hover_messages::styled_name_html(&to_ro.real_name()))
-            } else { crate::svg_generator::hover_messages::styled_name_html(&to_ro.name()) };
-            let kind = if rd.mut_of(&lender) { "mutable" } else { "shared" };
-            self.add_ev(back, evt, to_ro, ResourceTy::Anonymous, false);
-            let note = if rd.co_lenders.is_empty() && !item_storage.is_some_and(|it| it.moves_references) {
-              format!("When the iterator runs out of items, its {kind} borrow of {place} ends. This borrow no longer restricts access to {place}")
-            } else {
-              format!("When the iterator runs out of items, the borrow checker no longer restricts access to {place} through this iterator.")
-            };
-            self.row_layout.iterator_end_notes.insert(id, note);
           }
           End::Own(_) if co => {}
           End::Own(line) if exact_array_loan.is_some() => {
@@ -13828,7 +13800,8 @@ pub fn print_out_of_scope(&mut self){
                 self.row_layout.stored_loans.insert(id, crate::event_order::StoredLoan::SharedInput { mutable: true, binding: false });
               }
             }
-            self.drawn_references.bind_end(id, &loans, rd.borrow_span, *from_ro.hash(), from_ro.ref_local(), matches!(end, End::Arrow(_)), &self.reference_effects);
+            self.drawn_references.bind_end(id, &loans, rd.borrow_span, *from_ro.hash(), from_ro.ref_local(),
+              matches!(end, End::Arrow(_) | End::LoopExit { .. }), &self.reference_effects);
             self.end_loans.insert(id, loans.clone());
           }
         }
@@ -14176,6 +14149,10 @@ pub fn print_out_of_scope(&mut self){
     let mut i = 0;
     while i < self.preprocessed_events.len() {
       let (line, ev) = &self.preprocessed_events[i];
+      if self.row_layout.iterator_item_stops.contains(&ev.get_id()) {
+        i += 1;
+        continue;
+      }
       let (r, lender) = match ev {
         ExternalEvent::StaticDie { from: ResourceTy::Value(r), to, .. }
         | ExternalEvent::MutableDie { from: ResourceTy::Value(r), to, .. } => {

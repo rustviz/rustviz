@@ -1579,6 +1579,20 @@ fn render_branch_dots(
                     Some(State::OutOfScope) | Some(State::FullPrivilege { s: LineState::Uninit })
                 ) && ends_borrow(&b.e_data)
             });
+        // An arm that diverges (`return`) or does nothing after the item's
+        // last use, which came before the split or on its row (`if s.len()
+        // > 1 { return s.len(); }`), still reaches here with the item done.
+        let layout = &visualization_data.row_layout;
+        let item_stopped_before = history.iter()
+            .position(|(_, e)| std::ptr::eq(e, event))
+            .is_some_and(|k| history[..k].iter().any(|(_, e)| layout.iterator_item_stops.contains(&e.get_id()))
+                || history[k + 1..].iter().take_while(|(l, _)| *l == *split_point)
+                    .any(|(_, e)| layout.iterator_item_stops.contains(&e.get_id())));
+        let item_stopped_in_every_arm = all_paths_present(ty, branch_history.len())
+            && branch_history.iter().any(|arm| iterator_item_stopped(&arm.e_data, layout))
+            && branch_history.iter().all(|arm| iterator_item_stopped(&arm.e_data, layout)
+                || arm.diverges
+                || (arm.e_data.is_empty() && item_stopped_before));
         // One whose borrow ended before the conditional (never read
         // again) that an arm gave a new loan, ended in that arm (`r =
         // &t;` in one arm of `if c { r = &t; } else { }`, #1524): its legs
@@ -1700,6 +1714,8 @@ fn render_branch_dots(
                 hover_messages::event_dot_borrowck_maybe_moved(rap.name()), styled_name_html(rap.name())))
         } else if visualization_data.row_layout.ended_at_fork.contains(&(event.get_id(), *hash)) {
             Some(hover_messages::state_ref_borrow_ended(&is.real_name()))
+        } else if item_stopped_in_every_arm {
+            Some(iterator_item_stop_title(rap, "on any branch above"))
         } else if borrow_ended_in_every_arm {
             let mut title = hover_messages::event_dot_branch_merge_borrow_ended(&is.real_name());
             if rap.is_ref() && !rap.is_mutref() && join.is_some_and(|j| j.cell.init == Init::Own)
@@ -1906,7 +1922,14 @@ fn render_branch_dots(
             let checked_leg = branch_history.iter().enumerate().any(|(arm, b)| !b.diverges
                 && seg_drawn(rap, &arm_end_state(rap, b, branch_history, ty))
                 && visualization_data.row_layout.unreachable_arms.contains(&(event.get_id(), arm)));
-            join.filter(|j| checked_leg && !j.checked_only && j.cell.init == Init::Moved).map(|j| {
+            join.filter(|j| {
+                let needs_end = if rap.is_member() {
+                    checked_leg || (join_has_line && j.checked_path_owns)
+                } else {
+                    join_has_line
+                };
+                needs_end && !j.checked_only && j.cell.init == Init::Moved
+            }).map(|j| {
                 let mut title = format!("{} has been moved on every runtime path that reaches this join.", styled_name_html(rap.name()));
                 if j.checked_path_owns {
                     title.push_str(" The borrow checker also considers a path reaching this join that still owns it.");
@@ -1932,12 +1955,12 @@ fn render_branch_dots(
         } else {
             let partial = (|| {
                 if !matches!(rap, ResourceAccessPoint::Struct(_)) { return None; }
-                let cell = &join?.cell;
-                if cell.init != Init::Partly && cell.parts.as_ref().is_none_or(|p| p.moved.is_empty() && p.maybe.is_empty()) {
-                    return None;
-                }
+                let join = join.filter(|join| has_partial_move(&join.cell))?;
                 let row = rv_attrs::line_of(*merge_point, &visualization_data.row_lines)?;
-                { let table = &visualization_data.state_table; let function = function?; partly_moved_cell_title(rap, table, function, row, cell, &|name| table.segment_cell(function, name, row)) }
+                let table = &visualization_data.state_table;
+                let function = function?;
+                partly_moved_cell_title(rap, table, function, row, &join.cell,
+                    &|name| table.join_field_cell(function, join, name))
             })();
             Some(branch_join_message(branch_history, ty, is, imaginary_arm, join, partial))
         };
@@ -2969,7 +2992,7 @@ fn render_dot(
                     // is overwritten drops nothing: a plain dot that says
                     // so, no drop triangle (#1138).
                     let drops_nothing = matches!(event, Event::OwnerDropAtReassign { parts: Some(p), .. }
-                        if !p.other_drops && p.dropped.is_empty() && p.maybe_moved.is_empty());
+                        if p.drops_nothing());
                     if staged_drop_site.is_some() || has_staged_drop {
                         // The source column explains the staged drop. A
                         // triangle there belongs to the binding's own drop.
@@ -3279,6 +3302,9 @@ fn render_dot(
         if matches!(event, Event::RefDie { .. } | Event::MutableDie { .. } | Event::StaticDie { .. }) {
             if let Some(text) = layout.holder_handoff_titles.get(&event.get_id()) {
                 data.title.clone_from(text);
+            }
+            if layout.iterator_item_stops.contains(&event.get_id()) {
+                data.title = iterator_item_stop_title(&visualization_data.timelines[hash].resource_access_point, "on this path");
             }
         }
         if matches!(event, Event::MutableLend { .. } | Event::StaticLend { .. }) {
@@ -3761,6 +3787,23 @@ fn ends_borrow(history: &[(usize, Event)]) -> bool {
         Event::Branch { branch_history, .. } => branch_history.iter().all(|b| ends_borrow(&b.e_data)),
         _ => false,
     })
+}
+
+fn iterator_item_stopped(history: &[(usize, Event)], layout: &crate::event_order::RowLayout) -> bool {
+    history.iter().any(|(_, event)| match event {
+        Event::Branch { branch_history, ty, .. } => all_paths_present(ty, branch_history.len())
+            && branch_history.iter().all(|arm| iterator_item_stopped(&arm.e_data, layout)),
+        _ => layout.iterator_item_stops.contains(&event.get_id()),
+    })
+}
+
+fn iterator_item_stop_title(rap: &ResourceAccessPoint, path: &str) -> String {
+    let name = styled_name_html(rap.name());
+    let mut title = format!("{name} has no further use of this reference {path}. The iterator still keeps the collection borrowed.");
+    if !rap.is_mutref() {
+        title.push_str(&format!(" {name} holds a shared reference, which allows reading its referent while in use."));
+    }
+    title
 }
 
 /// The state an arm reaches its conditional's join in, for drawing: the
@@ -10273,10 +10316,23 @@ fn render_branches(
                 if !rap.is_ref() && !rap.is_closure() && !state_is_dashed(&seg.state) && !keeps_restriction {
                     if let Some((&function, arm)) = visualization_data.fn_source_lines.get(rap.hash()).zip(branch.source) {
                         let table = &visualization_data.state_table;
-                        let cell_for = |column: &str| table.arm_boundary_cell(function, column, arm, joining).cloned();
+                        let to_move = ends_at_move(seg.p2);
+                        // An already partial branch entry is the state
+                        // before a move drawn at the end of this connector.
+                        let arm_cell = table.arm_boundary_cell(function, rap.name(), arm, joining);
+                        let use_entry = !joining && seg.rows == (*split_point, *split_point)
+                            && (to_move || arm_cell.is_none())
+                            && table.branch_entry_cell(function, rap.name(), arm.branch).is_some_and(has_partial_move);
+                        let cell_for = |column: &str| {
+                            if use_entry {
+                                table.branch_entry_cell(function, column, arm.branch).cloned()
+                            } else {
+                                table.arm_boundary_cell(function, column, arm, joining).cloned()
+                            }
+                        };
                         if let Some(cell) = cell_for(rap.name()) {
                             if let Some((state, title)) = owner_segment_of(rap, visualization_data, seg.rows.0, &seg.state,
-                                Some(cell), None, true, ends_at_move(seg.p2), &cell_for)
+                                Some(cell), None, true, to_move && !use_entry, &cell_for)
                             {
                                 seg.state = state;
                                 seg.title = title;
@@ -10412,10 +10468,17 @@ fn render_branches(
             // dashed rest of the arm is "no value" only in the sense
             // that its borrow is over, not that r was never assigned.
             let borrow_end = if rap.is_ref() { first_borrow_end(&branch.e_data) } else { None };
+            let ended_path_title = || {
+                if iterator_item_stopped(&branch.e_data, &visualization_data.row_layout) {
+                    iterator_item_stop_title(rap, "on this path")
+                } else {
+                    hover_messages::state_ref_borrow_ended(rap.name())
+                }
+            };
             let ended_title = |segs: &mut Vec<BranchSeg>, to: usize| {
                 if let (Some(end), Some(seg)) = (borrow_end, segs.last_mut()) {
                     if to > end && matches!(seg.state, State::FullPrivilege { s: LineState::Uninit }) {
-                        seg.title = hover_messages::state_ref_borrow_ended(rap.name());
+                        seg.title = ended_path_title();
                     }
                 }
             };
@@ -10635,7 +10698,20 @@ fn render_branches(
                         }).flatten()
                         .filter(|c| c.init == crate::facts::table::Init::Own && c.parts.is_none() && !c.may_lend && c.lent.is_empty())
                         .map(|_| (State::FullPrivilege { s: LineState::Full }, None));
-                    match diagonal.filter(|(st, _)| lined(st) && lined(&end_state)).or(nested_join) {
+                    // The diagonal can leave an inner join on the last row
+                    // of this arm. It carries the inner continuation's state.
+                    let inner_partial = (!rap.is_ref() && lined(&end_state)).then(|| {
+                        branch.e_data.iter().rev().find_map(|(_, event)| {
+                            let Event::Branch { split_point: s, merge_point: m, join: Some(join), .. } = event else { return None };
+                            let apex = if branch_is_collapsed(*s, *m) { COLLAPSED_APEX } else { 0 };
+                            let y = get_y_axis_pos(*m) + apex - join_rise(visualization_data, hash, history, *s, *m);
+                            if y as f64 != leg_top_y { return None; }
+                            partial_join_segment(rap, visualization_data, *m, &end_state, join)
+                                .map(|(state, title)| (state, Some(title)))
+                        })
+                    }).flatten();
+                    let leaves_inner_join = inner_partial.is_some();
+                    match inner_partial.or_else(|| diagonal.filter(|(st, _)| lined(st) && lined(&end_state))).or(nested_join) {
                         Some((st, Some(title))) => segs.push(BranchSeg {
                             p1: (branch_x, leg_top_y), p2: (parent_x, merge_y), state: st, title,
                             inactive_arm: None, own_row: false, rows: (*merge_point, *merge_point),
@@ -10655,7 +10731,9 @@ fn render_branches(
                     // failed edge of a let-chain. Keep the dashed connector's
                     // explanation and the owner's state once the loan ends.
                     if let Some(seg) = segs.get_mut(n) {
-                        explain_boundary(seg, true);
+                        if !leaves_inner_join {
+                            explain_boundary(seg, true);
+                        }
                         if matches!(seg.state, State::FullPrivilege { s: LineState::Gray }) {
                             if let Some(title) = fieldless_join_title(visualization_data, rap, ev, i, branch) {
                                 seg.title.push(' ');
@@ -10824,7 +10902,7 @@ fn render_branches(
             if rap.is_ref() && had_value && !entry_maybe_init {
                 let no_value = hover_messages::state_uninitialized(rap.name());
                 for seg in segs.iter_mut().filter(|seg| seg.title == no_value) {
-                    seg.title = hover_messages::state_ref_borrow_ended(rap.name());
+                    seg.title = ended_path_title();
                 }
             }
             // A let chain's scrutinee temporary that a later part of the
@@ -11208,8 +11286,7 @@ fn leg_table_pieces(
                 let next = *rl.get(w[0] + 1)?.as_ref()?;
                 if table.continues_to_row(function, source) != Some(next) { return None; }
                 let cell = table.cell(function, rap.name(), source, source)?;
-                (cell.init == Init::Partly || cell.parts.as_ref().is_some_and(|p| !p.moved.is_empty() || !p.maybe.is_empty()))
-                    .then_some(cell)
+                has_partial_move(&cell).then_some(cell)
             }).flatten();
         let from_arm = one_line.is_some();
         if rap.is_ref() {
@@ -11274,6 +11351,11 @@ fn leg_table_pieces(
             continue;
         }
         let row = w[0];
+        let inner_partial = history.iter().rev().find_map(|(_, event)| match event {
+            Event::Branch { merge_point, join: Some(join), .. } if *merge_point == row =>
+                partial_join_segment(rap, visualization_data, row, state, join),
+            _ => None,
+        });
         let source = arm.1.get(arm.0).copied().flatten();
         let function = visualization_data.fn_source_lines[rap.hash()];
         let table = &visualization_data.state_table;
@@ -11327,8 +11409,8 @@ fn leg_table_pieces(
                 let value = owner_value_title(rap, visualization_data, function, cell, Some(row));
                 Some((st, format!("{value}. {borrow}")))
             }).flatten();
-        let from_table = cell.is_some() || entry_piece.is_some();
-        let piece = entry_piece.or_else(|| {
+        let from_table = cell.is_some() || entry_piece.is_some() || inner_partial.is_some();
+        let piece = inner_partial.or(entry_piece).or_else(|| {
             let cell = cell?;
             owner_segment_of(rap, visualization_data, row, state, Some(cell.clone()), None, true, to_move, &cell_for).or_else(|| {
                 // A struct whose trunk ends where its fields were moved out.
@@ -11393,6 +11475,20 @@ fn leg_one_line_arm_cell(
         return None;
     }
     table.one_line_arm_cell(fn_line, rap.name(), src, (*spans.get(i)?)?, spans)
+}
+
+fn has_partial_move(cell: &crate::facts::table::Cell) -> bool {
+    cell.init == crate::facts::table::Init::Partly
+        || cell.parts.as_ref().is_some_and(|p| !p.moved.is_empty() || !p.maybe.is_empty())
+}
+
+/// A connector leaving a nested join describes that continuation on all its columns.
+fn partial_join_segment(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usize, state: &State,
+    join: &crate::facts::table::JoinCell) -> Option<(State, String)> {
+    if !has_partial_move(&join.cell) { return None; }
+    let function = *vd.fn_source_lines.get(rap.hash())?;
+    owner_segment_of(rap, vd, row, state, Some(join.cell.clone()), None, true, false,
+        &|column| vd.state_table.join_field_cell(function, join, column))
 }
 
 /// Push a `BranchSeg` for the given centerline endpoints + state
@@ -13138,7 +13234,7 @@ fn partly_moved_cell_title(rap: &ResourceAccessPoint, table: &crate::facts::tabl
     // Its field columns are all of its fields (none is private to another
     // module): only then can it say every field is gone, or that the
     // others can be used.
-    let complete = table.fields_complete(fn_line, rap.name());
+    let fields = table.fields_of(fn_line, rap.name());
     let is_box = *is_box;
     // Each direct field: what the moved places say of it, else its own
     // column's state (a part of it moved out may have no column: an array
@@ -13147,7 +13243,7 @@ fn partly_moved_cell_title(rap: &ResourceAccessPoint, table: &crate::facts::tabl
         let n = n.trim_start_matches('*');
         n.starts_with(&format!("{f}.")) || n.starts_with(&format!("{f}["))
     };
-    let field_init: Vec<(String, Init)> = table.fields_of(fn_line, rap.name()).into_iter()
+    let field_init: Vec<(String, Init)> = fields.iter().cloned()
         .filter_map(|f| {
             let init = if parts.moved.contains(&f) {
                 Init::Moved
@@ -13161,6 +13257,7 @@ fn partly_moved_cell_title(rap: &ResourceAccessPoint, table: &crate::facts::tabl
             Some((f, init))
         })
         .collect();
+    let complete = table.fields_complete(fn_line, rap.name()) && field_init.len() == fields.len();
     // Every field gone, surely or on some paths: none of it can be used.
     if complete && !field_init.is_empty() && field_init.iter().all(|(_, i)| matches!(i, Init::Moved | Init::Maybe)) {
         let surely: Vec<String> = field_init.iter().filter(|(_, i)| *i == Init::Moved).map(|(f, _)| f.clone()).collect();
@@ -13218,18 +13315,25 @@ fn partly_moved_cell_title(rap: &ResourceAccessPoint, table: &crate::facts::tabl
     // every place named was surely moved out (none may have been, no part
     // unnamed), and every other field holds its whole value on every path
     // here, lent at most shared.
+    let retained: Vec<_> = field_init.iter().filter_map(|(field, init)| {
+        let cell = cell_for(field)?;
+        (*init == Init::Own && !has_partial_move(&cell)).then_some((field, cell))
+    }).collect();
     let others_usable = complete && maybe.is_empty() && partly.is_empty() && partly_maybe.is_empty()
-        && {
-            let others: Vec<&String> = field_init.iter().map(|(f, _)| f)
-                .filter(|f| !surely.iter().any(|n| n.trim_start_matches('*') == f.as_str() || covers(f, n)))
-                .collect();
-            !others.is_empty() && others.iter().all(|f| cell_for(f).is_some_and(|c| {
-                c.init == Init::Own
-                    && c.parts.as_ref().is_none_or(|p| p.moved.is_empty() && p.maybe.is_empty())
-                    && c.lent.iter().all(|l| matches!(l.kind, "shared" | "reserved"))
-            }))
-        };
-    Some(hover_messages::state_table_partly_moved_hedged(rap.name(), &surely, &maybe, &partly, &partly_maybe, others_usable))
+        && !retained.is_empty() && fields.iter().all(|field| {
+            surely.iter().any(|moved| moved.trim_start_matches('*') == field || covers(field, moved))
+                || retained.iter().any(|(name, cell)| *name == field
+                    && cell.lent.iter().all(|l| matches!(l.kind, "shared" | "reserved")))
+        });
+    let mut title = hover_messages::state_table_partly_moved_hedged(
+        rap.name(), &surely, &maybe, &partly, &partly_maybe, others_usable,
+    );
+    let names: Vec<_> = retained.iter().map(|(field, _)| styled_name_html(field)).collect();
+    if let Some((last, first)) = names.split_last().filter(|_| cell.lent.is_empty()) {
+        let names = if first.is_empty() { last.clone() } else { format!("{} and {last}", first.join(", ")) };
+        title.push_str(&format!("&lt;br&gt;{} still owns {names}", styled_name_html(rap.name())));
+    }
+    Some(title)
 }
 
 /// The elements (`pair[0]`) a slice pattern moved out of an array's

@@ -1360,15 +1360,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     },
     TooltipExpect {
         name: "if_inside_for",
-        // if/else inside a for-loop body, both inner arms borrow
-        // the loop variable. Inner merge classifies as Unchanged,
-        // so no merge wording surfaces.
+        // Both inner arms finish using the shared item. The iterator
+        // still needs the collection loan for the next iteration.
         must_contain: &[
             // `for x in &xs` makes x: `&String`; passing it to show
             // copies the shared reference, so no reborrow note.
             "A shared reference through x is passed to show. show may read through it",
+            "x has no further use of this reference on any branch above. The iterator still keeps the collection borrowed. x holds a shared reference, which allows reading its referent while in use.",
+            "x has no further use of this reference on this path. The iterator still keeps the collection borrowed. x holds a shared reference, which allows reading its referent while in use.",
         ],
         must_not_contain: &[
+            "x's borrow ended in each branch above",
+            "x's borrow has ended on this path",
             "x is passed to show by shared reference. show may read it (immutable reborrow — x is read-only until show returns)",
             "may have been moved",
             "moved or dropped in every branch",
@@ -7895,7 +7898,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "z acquires ownership of a resource",
             "z goes out of scope. Its resource is dropped.",
             "n immutably borrows a value",
-            "n's immutable borrow ends",
+            "n has no further use of this reference on this path. The iterator still keeps the collection borrowed. n holds a shared reference, which allows reading its referent while in use.",
             "s is live in a conditional expression ",
         ],
         must_not_contain: &[
@@ -12660,7 +12663,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "for_method_head_label",
         must_contain: &[
             "When the iterator runs out of items, its mutable borrow of v ends. This borrow no longer restricts access to v",
-            "If s holds a shared borrow affecting w, that borrow ends here. It no longer restricts access to w",
+            "When the iterator runs out of items, its shared borrow of w ends. This borrow no longer restricts access to w",
         ],
         must_not_contain: &["borrow of iter_mut ends", "^s's shared borrow of iter ends. This borrow no longer restricts access to iter"],
     },
@@ -15544,11 +15547,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "c's mutable borrow ends",
             "w's resource is no longer mutably borrowed",
             "Immutable borrow from u to s",
-            "If s holds a shared borrow affecting u, that borrow ends here. It no longer restricts access to u",
+            "The iterator's shared borrow of u ends on this path. This borrow no longer restricts access to u.",
+            "When the iterator runs out of items, its shared borrow of u ends. This borrow no longer restricts access to u",
             "u's resource is no longer immutably borrowed",
             "u goes out of scope. Its resource is dropped (including every String it holds).",
+            // The join after `if s.len() > 1 { return s.len(); }`: the item
+            // is done, but the iterator still holds the loan of u.
+            "s has no further use of this reference on any branch above. The iterator still keeps the collection borrowed. s holds a shared reference, which allows reading its referent while in use.",
         ],
         must_not_contain: &[
+            // The iterator, not s, holds u's loan for the next `next()`.
+            "s's borrow ended in each branch above",
             "(moved from",
             "Move from v to",
             "Move from w to",
@@ -15850,7 +15859,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // `&ref s` borrows the String inside names: still drawn.
             "names's resource is immutably borrowed by s; names is read-only while the borrow is live",
             "Immutable borrow from names to s",
-            "If s holds a shared borrow affecting names, that borrow ends here. It no longer restricts access to names",
+            "When the iterator runs out of items, its shared borrow of names ends. This borrow no longer restricts access to names",
         ],
         must_not_contain: &[
             "words's resource is immutably borrowed by w;",
@@ -15995,18 +16004,18 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // = *b2;`), from a call (`*b3 = make()`) and a struct literal
         // (`*bp = P { .. }`, whose old bp.b is dropped at the write).
         must_contain: &[
-            "*bm acquires ownership of a new resource. Its previous bm.0 was moved out earlier, so nothing of it is dropped.",
+            "*bm acquires ownership of a new resource. Its previous bm.0 was moved out earlier. The previous value needs no further drop at this store.",
             "Move from String::from to bm.0",
             "bm.1 is assigned a new value",
             "bm.0 goes out of scope. Its resource is dropped.",
             "bm goes out of scope. Its resource is dropped.",
-            "*b2 acquires ownership of a new resource. Its previous b2.0 was moved out earlier, so nothing of it is dropped.",
+            "*b2 acquires ownership of a new resource. Its previous b2.0 was moved out earlier. The previous value needs no further drop at this store.",
             "Move from o to *b2",
             "Move from o.0 to b2.0",
             "o.0 goes out of scope. No resource is dropped.",
             "b2.0 goes out of scope. Its resource is dropped.",
             "b2 goes out of scope. Its resource is dropped.",
-            "*b3 acquires ownership of a new resource. Its previous b3.0 was moved out earlier, so nothing of it is dropped.",
+            "*b3 acquires ownership of a new resource. Its previous b3.0 was moved out earlier. The previous value needs no further drop at this store.",
             "Move from make to *b3",
             "b3.0 goes out of scope. Its resource is dropped.",
             "b3 goes out of scope. Its resource is dropped.",
@@ -17355,11 +17364,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // The join said "e was moved", and that the whole resource is
         // dropped only on the paths that didn't move it.
         must_contain: &[
-            "e's contents may have been moved out above, so e can't be used from here on.",
-            "f's contents may have been moved out above, so f can't be used from here on until *f or f is assigned again.",
-            "g's contents may have been moved out above, so g can't be used from here on until *g or g is assigned again.",
+            "e's contents may have been moved out above, so e can't be used as a whole from here on.",
+            "f's contents may have been moved out above, so f can't be used as a whole from here on until *f or f is assigned again.",
+            "g's contents may have been moved out above, so g can't be used as a whole from here on until *g or g is assigned again.",
             "g acquires ownership of a new resource. The old Box drops the String if the earlier path left it initialized.",
-            "b's contents may have been moved out above, so b can't be used from here on.",
+            "b's contents may have been moved out above, so b can't be used as a whole from here on.",
         ],
         must_not_contain: &[
             "e was moved in at least one branch above",
@@ -17483,11 +17492,11 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // is dropped at its scope end. Checked with a `Drop`-printing
         // type.
         must_contain: &[
-            "e's contents may have been moved out above, so e can't be used from here on until *e or e is assigned again.",
+            "e's contents may have been moved out above, so e can't be used as a whole from here on until *e or e is assigned again.",
             "A value is stored at *e. Its previous String is dropped here only if nothing above moved it out (Rust tracks this with a runtime drop flag).",
-            "f's contents may have been moved out above, so f can't be used from here on until *f or f is assigned again.",
+            "f's contents may have been moved out above, so f can't be used as a whole from here on until *f or f is assigned again.",
             "f acquires ownership of a new resource. The old Box drops the String if the earlier path left it initialized.",
-            "g's contents may have been moved out above, so g can't be used from here on.",
+            "g's contents may have been moved out above, so g can't be used as a whole from here on.",
         ],
         must_not_contain: &[
             "e was moved in at least one branch above",
@@ -21540,7 +21549,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "u acquires ownership of a new resource. Its previous u.1 was moved out earlier, so only its previous u.0 is dropped.",
             "p.a goes out of scope. Its resource is dropped.",
             "v.0 goes out of scope. Its resource is dropped.",
-            "w acquires ownership of a new resource. Its previous w.0 and w.1 were moved out earlier, so nothing of it is dropped.",
+            "w acquires ownership of a new resource. Its previous w.0 and w.1 were moved out of this slot before the store. The store drops nothing in w's old slot.",
         ],
         must_not_contain: &[
             "=t acquires ownership of a new resource; its previous resource is dropped",
@@ -24416,7 +24425,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Immutable borrow from v to y",
             "If y holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v",
             "Immutable borrow from q.items to s",
-            "If s holds a shared borrow affecting q.items, that borrow ends here. It no longer restricts access to q.items",
+            "When the iterator runs out of items, its shared borrow of q.items ends. This borrow no longer restricts access to q.items",
             "Mutable borrow from v to z",
             "v's resource is mutably borrowed by the `for` loop's iterator. While the iterator or a reference it yielded keeps the borrow live, v can't be used",
         ],
@@ -24662,7 +24671,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "Move from make to *b3",
             "The old value at *b3 is dropped and the replacement is stored there",
             "Move from o to *b2",
-            "*b2 acquires ownership of a new resource. Its previous b2.0 was moved out earlier, so nothing of it is dropped.",
+            "*b2 acquires ownership of a new resource. Its previous b2.0 was moved out earlier. The previous value needs no further drop at this store.",
             "Move from o2 to *b4",
             "The old value at *b4 is dropped and the replacement is stored there",
         ],
@@ -24684,8 +24693,8 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "y is bound to a copy of an element of ys",
             "Move of each element of refs to r",
             "r is bound to a mutable reference moved out of refs",
-            "If r holds a mutable borrow affecting a, that borrow ends here. It no longer restricts access to a",
-            "If r holds a mutable borrow affecting b, that borrow ends here. It no longer restricts access to b",
+            "When the iterator runs out of items, the borrow checker no longer restricts access to a through this iterator.",
+            "When the iterator runs out of items, the borrow checker no longer restricts access to b through this iterator.",
         ],
         must_not_contain: &[
             "y is bound to a copyable value",
@@ -27369,7 +27378,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "f is bound to an immutable reference; it can read the borrowed value",
             "g is bound to an immutable reference; it can read the borrowed value",
             "e's immutable borrow ends",
-            "If h holds a shared borrow affecting words, that borrow ends here. It no longer restricts access to words",
+            "When the iterator runs out of items, its shared borrow of words ends. This borrow no longer restricts access to words",
         ],
         must_not_contain: &[
             "e's shared borrow of v ends",
@@ -28185,7 +28194,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
     TooltipExpect {
         name: "box_zst_drop_1608",
         must_contain: &[
-            "b's contents may have been moved out above, so b can't be used from here on.",
+            "b's contents may have been moved out above, so b can't be used as a whole from here on.",
             "b goes out of scope. Its contents are dropped only if they are still in the Box. The Box's heap allocation, if it has one, is freed here. A runtime drop flag tracks whether the Box still holds its contents.",
             "If the `?` here returns early, whatever pending still holds (if anything) is dropped here.",
             "old acquires ownership of a new resource. Its previous contents were moved out earlier, so the previous Box doesn't drop them; only its heap allocation, if it has one, is freed here.",
@@ -32333,7 +32342,6 @@ fn a_loop_that_can_break_keeps_its_loan_to_the_loop_end() {
         ("If b holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v", "println!(\"{}\", b);"),
         ("If d holds a shared borrow affecting v, that borrow ends here. It no longer restricts access to v", "_ => println!(\"{}\", d),"),
         ("If c holds a mutable borrow affecting w, that borrow ends here. It no longer restricts access to w", "println!(\"short\");"),
-        ("If s holds a shared borrow affecting u, that borrow ends here. It no longer restricts access to u", "return s.len();"),
     ] {
         let row = code_row_y(&code, after);
         let closes: Vec<f64> = code_rows_y(&code, "}").into_iter().filter(|y| *y > row).collect();
@@ -32348,6 +32356,14 @@ fn a_loop_that_can_break_keeps_its_loan_to_the_loop_end() {
     let (brk, cont) = (code_row_y(&code, "0 => break,"), code_row_y(&code, "1 => continue,"));
     assert!(d_ends.iter().any(|y| (y - brk).abs() < 1.0), "d's borrow doesn't end in the `break` arm (y={brk}): {d_ends:?}");
     assert!(d_ends.iter().all(|y| (y - cont).abs() > 1.0), "d's borrow ends in the `continue` arm (y={cont}): {d_ends:?}");
+    let early = arrow_points(&timeline, "The iterator's shared borrow of u ends on this path. This borrow no longer restricts access to u.");
+    assert_eq!(early.len(), 1);
+    assert_eq!(early[0][0].1, code_row_y(&code, "return s.len();"));
+    let exhausted = dots_listing_tooltip(&timeline, "When the iterator runs out of items, its shared borrow of u ends. This borrow no longer restricts access to u");
+    assert_eq!(exhausted.len(), 1);
+    let ret = code_row_y(&code, "return s.len();");
+    let closing = code_rows_y(&code, "}").into_iter().filter(|&y| y > ret).nth(1).unwrap();
+    assert_eq!(exhausted[0].1, closing);
 }
 
 /// #882: an `if` without `else` whose body always leaves ends a borrow on
@@ -35169,6 +35185,188 @@ fn dot_xy(doc: &roxmltree::Document, id: &str) -> Option<(f64, f64)> {
     let n = doc.descendants().find(|n| n.attribute("data-rv-id") == Some(id))?;
     let c = if n.has_tag_name("circle") { n } else { n.descendants().find(|d| d.has_tag_name("circle"))? };
     Some((c.attribute("cx")?.parse().ok()?, c.attribute("cy")?.parse().ok()?))
+}
+
+#[test]
+fn progen_1906_remaining_partial_joins() {
+    // Rustc rejects a borrow of the whole aggregate after the inner join
+    // (E0382). It still accepts access to a field retained on every path.
+    for (case, column, row, moved, retained, certain) in [
+        ("1127_remaining_01", "p", 13, "p.a", "p.b", false),
+        ("1127_remaining_02", "tp", 16, "tp.0", "tp.1", false),
+        ("2711_remaining_01", "p", 32, "p.b", "p.a", false),
+        ("2711_remaining_02", "tp", 21, "tp.0", "tp.1", false),
+    ] {
+        let svg = run_with_local_backend(&format!("edition2024/progen_1906_{case}")).timeline_panel_string();
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        let id = format!("{column}@L{row}:dot:branch_join");
+        let (x, y) = dot_xy(&doc, &id).unwrap();
+        let legs = branch_leg_centrelines(&svg);
+        let departures: Vec<_> = legs.iter().filter(|(_, id, [x1, y1, _, y2])|
+            id.starts_with(&format!("{column}@")) && !id.contains("_gray") && y2 > y1
+                && (x1 - x).abs() < 0.01 && (y1 - y).abs() < 0.01).collect();
+        assert!(!departures.is_empty(), "{case}: missing continuation from {id}");
+        for (_, leg, _) in departures {
+            let tooltip_id = leg.strip_suffix("/sides").map_or_else(|| leg.clone(), |id| format!("{id}/side1"));
+            let tip = tooltip_of_id(&svg, &tooltip_id).unwrap();
+            let (right, wrong) = if certain { ("was", "may have been") } else { ("may have been", "was") };
+            assert!(tip.contains(&format!("{moved} {right} moved out"))
+                && tip.contains(&format!("{column} still owns {retained}"))
+                && tip.contains("can't be used as a whole")
+                && !tip.contains(&format!("{moved} {wrong} moved out"))
+                && !tip.contains("nor can any of its fields"), "{case}: {leg}: {tip}");
+        }
+    }
+}
+
+#[test]
+fn progen_1906_remaining_scope_and_replacement() {
+    let svg = |case| run_with_local_backend(&format!("edition2024/progen_1906_{case}")).timeline_panel_string();
+    // into_a receives the old Pair by move. The replacement has no old
+    // initialized fields to drop in p's slot.
+    let replaced = svg("1127_remaining_03");
+    check_review_tip(&replaced, "p@L18:dot:move+reassign_empty+acquire", &[
+        "p's resource is moved", "p acquires ownership of a new resource",
+        "Its previous p.a and p.b were moved out of this slot before the store",
+        "The store drops nothing in p's old slot",
+    ], &["nothing of it is dropped"]);
+    assert!(!replaced.contains("p@L18:dot:move+owner_drop_at_reassign"));
+}
+
+#[test]
+fn progen_1906_review_shared_item_stop() {
+    // Rustc rejects a write to vr before exhaustion (E0502) even though
+    // the item is no longer used. The iterator's None edge frees vr.
+    let shared = run_with_local_backend("edition2024/progen_1906_1127_remaining_04").timeline_panel_string();
+    for row in [6, 7] {
+        check_review_tip(&shared, &format!("e@L{row}:dot:"), &[
+            "e has no further use of this reference on this path", "The iterator still keeps the collection borrowed",
+        ], &["e's immutable borrow ends", "e's shared borrow ends"]);
+    }
+    check_review_tip(&shared, "e@L9:dot:ref_go_out_of_scope", &["e goes out of scope"], &["borrow ends"]);
+    check_review_tip(&shared, "vr@L9:dot:static_reacquire", &[
+        "its shared borrow of vr ends. This borrow no longer restricts access to vr",
+    ], &[]);
+    assert!(!shared.contains("e>vr@L9:arrow:static_die"));
+}
+
+#[test]
+fn progen_1906_review_exhaustion_in_else() {
+    // Even with an unused item, the iterator holds v's exclusive loan
+    // through next(). The test before the loop and the loop's exhaustion
+    // are on distinct arms of the let-chain.
+    let exclusive = run_with_local_backend("edition2024/progen_1906_2711_remaining_03").timeline_panel_string();
+    let id = "v@L5:dot:mutable_reacquire";
+    check_review_tip(&exclusive, id, &["its mutable borrow of v ends. This borrow no longer restricts access to v"], &[]);
+    let doc = roxmltree::Document::parse(&exclusive).unwrap();
+    let (x, y) = dot_xy(&doc, id).unwrap();
+    let iter = rv_elements(&exclusive, "v@L4:dot:mutable_lend").into_iter()
+        .find(|(_, tip, ..)| tip.contains("iter_mut")).unwrap();
+    let success = rv_elements(&exclusive, "v@L2:dot:static_lend").into_iter().next().unwrap();
+    assert_eq!(x, iter.2.0, "exhaustion belongs to the arm that ran iter_mut");
+    assert_ne!(x, success.2.0, "the let-chain success arm did not start the iterator");
+    assert!(branch_leg_centrelines(&exclusive).iter().any(|(_, leg, [_, y1, x2, y2])|
+        leg.starts_with("v@") && leg.contains(":branch_line:revoked_privilege") && y2 > y1
+            && (x2 - x).abs() < 0.01 && (y2 - y).abs() < 0.01), "iterator release misses its branch leg");
+}
+
+#[test]
+fn progen_1906_review_box_replacement() {
+    let replaced = run_with_local_backend("edition2024/progen_1906_review_box_replace").timeline_panel_string();
+    check_review_tip(&replaced, "b@L5:dot:acquire+owner_drop_at_reassign", &[
+        "The old Box frees its heap allocation", "Its previous b.0 was moved out earlier",
+    ], &["drops nothing", "runtime drop flag"]);
+    assert!(!replaced.contains("b@L5:dot:acquire+reassign_empty"));
+}
+
+#[test]
+fn progen_1906_review_retained_owner() {
+    let svg = run_with_local_backend("break_field_out_1280").timeline_panel_string();
+    check_review_tip(&svg, "p@L59:branch_line:full_privilege", &[
+        "p.bio was moved out", "p can't be used as a whole", "its other fields still can", "p still owns p.name",
+    ], &["p.bio may have been moved out", "nor can any of its fields"]);
+}
+
+#[test]
+fn progen_1906_review_unnamed_payload_at_split() {
+    let svg = run_with_local_backend("edition2024/progen_1906_review_payload_entry").timeline_panel_string();
+    check_review_tip(&svg, "o@L3:branch_line:full_privilege/line", &[
+        "part of o.0 may have been moved out", "o can't be used as a whole", "o still owns o.1",
+    ], &["o is the owner of the resource"]);
+}
+
+#[test]
+fn progen_1906_review_stops_and_exhaustion_share_a_source_row() {
+    let svg = run_with_local_backend("edition2024/progen_1906_review_iterator_same_row").timeline_panel_string();
+    check_review_tip(&svg, "xs@L5:dot:static_reacquire", &[
+        "When the iterator runs out of items, its shared borrow of xs ends.",
+    ], &[]);
+    let x_stops: Vec<_> = rv_elements(&svg, "x@L5:dot:").into_iter()
+        .filter(|(_, tip, ..)| tip.contains("has no further use of this reference on this path"))
+        .collect();
+    assert_eq!(x_stops.len(), 2, "both arms finish using the item on the same source row");
+    assert_ne!(x_stops[0].2.0, x_stops[1].2.0);
+    assert!(x_stops.iter().all(|(_, tip, ..)| !tip.contains("borrow ends")));
+}
+
+#[test]
+fn progen_1906_review_stored_child_keeps_only_its_path_open() {
+    let svg = run_with_local_backend("edition2024/progen_1906_review_iterator_reborrow").timeline_panel_string();
+    check_review_tip(&svg, "e@L9:dot:", &[
+        "e has no further use of this reference on this path", "The iterator still keeps the collection borrowed",
+    ], &["e's mutable borrow ends"]);
+    check_review_tip(&svg, "e@L7:dot:mutable_reacquire", &["child no longer borrows"], &[]);
+    check_review_tip(&svg, "v@L11:dot:mutable_reacquire", &[
+        "When the iterator runs out of items, its mutable borrow of v ends.",
+    ], &[]);
+    assert!(rv_elements(&svg, "e@L5:dot:").iter().all(|(_, tip, ..)| !tip.contains("has no further use")));
+}
+
+#[test]
+fn progen_1906_review_nested_iterator_return_keeps_item_column_open() {
+    let svg = run_with_local_backend("approx_loop_nested_853").timeline_panel_string();
+    check_review_tip(&svg, "row@L12:dot:static_lend", &["iter takes a shared reference"],
+        &["has no further use of this reference"]);
+    check_review_tip(&svg, "row@L14:dot:static_reacquire", &["iterator no longer borrows"], &[]);
+    check_review_tip(&svg, "grid@L15:dot:static_reacquire", &[
+        "When the iterator runs out of items, its shared borrow of grid ends.",
+    ], &[]);
+}
+
+#[test]
+fn progen_1906_review_break_and_exhaustion_releases() {
+    let svg = run_with_local_backend("edition2024/progen_1906_review_iterator_break").timeline_panel_string();
+    check_review_tip(&svg, "o@L5:dot:mutable_reacquire", &["no longer restricts access to o"], &["runs out of items"]);
+    check_review_tip(&svg, "o@L9:dot:mutable_reacquire", &[
+        "When the iterator runs out of items, its mutable borrow of o ends. This borrow no longer restricts access to o",
+    ], &[]);
+    check_review_tip(&svg, "e@L8:dot:", &["e has no further use of this reference on this path"], &["e's mutable borrow ends"]);
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let (iterator_x, _) = dot_xy(&doc, "o@L3:dot:mutable_lend").unwrap();
+    let (early_x, _) = dot_xy(&doc, "o@L5:dot:mutable_reacquire").unwrap();
+    let (exhaustion_x, _) = dot_xy(&doc, "o@L9:dot:mutable_reacquire").unwrap();
+    assert_eq!(exhaustion_x, iterator_x, "exhaustion belongs to the leg that ran the iterator");
+    assert_ne!(early_x, exhaustion_x, "the early release belongs to the inner break leg");
+}
+
+#[test]
+fn progen_1906_remaining_checked_only_and_box_joins() {
+    let svg = |case| run_with_local_backend(&format!("edition2024/progen_1906_2711_remaining_{case}")).timeline_panel_string();
+    // The literal-true break bypasses the only replacement at runtime.
+    // The checked-only field legs meet a join that explains the difference.
+    let checked = svg("04");
+    for field in ["p.a", "p.b"] {
+        check_review_tip(&checked, &format!("{field}@L15:dot:branch_join"), &[
+            "has been moved on every runtime path that reaches this join",
+            "The borrow checker also considers a path reaching this join that still owns it",
+        ], &[]);
+    }
+    // Rustc rejects using b as a whole on the continuation (E0382).
+    // A store to *b is possible because the allocation is still there.
+    let boxed = svg("05");
+    check_review_tip(&boxed, "b@L13:dot:branch_join", &[
+        "b's contents may have been moved out above", "b can't be used as a whole", "until *b or b is assigned again",
+    ], &["b can't be used from here on"]);
 }
 
 #[test]
@@ -39434,8 +39632,10 @@ fn borrow_ends_at_rustcs_end_for_loops_and_reassigned_refs() {
     let exhaustion = dots_listing_tooltip(&svg, "When the iterator runs out of items, its mutable borrow of m ends. This borrow no longer restricts access to m");
     assert_eq!(exhaustion.len(), 1);
     assert_eq!(exhaustion[0].1, code_row_y(&code, "} // end of mut_loop's for"));
+    let exhaustion = dots_listing_tooltip(&svg, "When the iterator runs out of items, its shared borrow of pairs ends. This borrow no longer restricts access to pairs");
+    assert_eq!(exhaustion.len(), 1);
+    assert_eq!(exhaustion[0].1, code_row_y(&code, "} // end of shared_loop's for"));
     for (text, line) in [
-        ("pairs's resource is no longer immutably borrowed", "} // end of shared_loop's for"),
         // `r` is overwritten before it is used again: a is free after
         // the println!.
         ("a's value is no longer immutably borrowed", "println!(\"{}\", r);"),
@@ -41527,7 +41727,7 @@ fn a_reassignment_that_drops_nothing_has_no_drop_triangle() {
     let tl = rv.timeline_panel_string();
     // The drop dot is a <g> holding a circle and the triangle polygon; a
     // plain dot is a lone <circle>.
-    let at = tl.find("nothing of it is dropped").expect("w's reassignment dot");
+    let at = tl.find("old slot.").expect("w's reassignment dot");
     let start = tl[..at].rfind('<').unwrap();
     assert!(tl[start..].starts_with("<circle"), "drop dot drawn for a reassignment that drops nothing: {}", &tl[start..start + 200.min(tl.len() - start)]);
 }
@@ -43020,12 +43220,21 @@ fn every_arm_that_ended_a_borrow_reaches_the_join() {
 #[test]
 fn box_deref_write_drop_marks() {
     let tl = run_with_local_backend("box_deref_write_1345").timeline_panel_string();
-    for id in ["b@L12", "b3@L14", "b4@L21", "b2@L18"] {
+    for (id, event) in [
+        ("b@L12", "owner_drop_at_reassign"),
+        ("b3@L14", "owner_drop_at_reassign"),
+        ("b4@L21", "owner_drop_at_reassign"),
+        // b2.0 moved to s3. The remaining i32 needs no drop.
+        ("b2@L18", "reassign_no_drop"),
+    ] {
         let dots: Vec<&str> = tl.match_indices(&format!("data-rv-id=\"{}:dot:", id))
             .map(|(i, _)| { let rest = &tl[i + 12..]; &rest[..rest.find('"').unwrap()] })
             .collect();
-        assert_eq!(dots, vec![format!("{}:dot:acquire+owner_drop_at_reassign", id).as_str()], "{}'s dots at the write", id);
+        assert_eq!(dots, vec![format!("{id}:dot:acquire+{event}").as_str()], "{id}'s dots at the write");
     }
+    check_review_tip(&tl, "b2@L18:dot:acquire+reassign_no_drop", &[
+        "Its previous b2.0 was moved out earlier", "The previous value needs no further drop at this store",
+    ], &["The old Box frees its heap allocation", "nothing of it is dropped"]);
 }
 
 /// #1343: a swap or rotation by destructuring assignment draws one dot
@@ -43250,7 +43459,7 @@ fn holder_local_ref_borrow_ends() {
 fn borrow_ends_from_facts_review_ids() {
     let tl = run_with_local_backend("borrow_ends_from_facts_review").timeline_panel_string();
     for id in ["s@L12:dot:static_lend\"", "a@L12:dot:static_lend+static_reacquire+static_die", "s@L13:dot:static_reacquire\"",
-        "w@L27:dot:mutable_reacquire\"", "x@L27:dot:mutable_die+ref_go_out_of_scope", "v@L23:dot:mutable_reacquire\"",
+        "w@L27:dot:mutable_reacquire\"", "x@L26:dot:mutable_lend+mutable_reacquire+mutable_die", "x@L27:dot:ref_go_out_of_scope", "v@L23:dot:mutable_reacquire\"",
         "r@L41:dot:duplicate+static_die", "s@L43:dot:static_reacquire+owner_go_out_of_scope", "q@L43:dot:static_lend+static_reacquire+static_die"] {
         assert!(tl.contains(&format!("data-rv-id=\"{id}")), "no {id}");
     }
@@ -47471,7 +47680,7 @@ fn p4_iterator_each_pass_ends_before_exhaustion() {
         && e["end_places"][0]["local"] == storage["storage"]));
     let svg = rv.timeline_panel_string();
     assert!(tooltip_of_id(&svg, "word>strings@L57:arrow:static_die").is_none());
-    assert!(dots_listing_tooltip(&svg, "word's immutable borrow ends")
+    assert!(dots_listing_tooltip(&svg, "word has no further use of this reference on this path. The iterator still keeps the collection borrowed. word holds a shared reference, which allows reading its referent while in use.")
         .iter().any(|dot| dot.1 == code_row_y(&rv.code_panel_string(), "std::hint::black_box(word);")));
 }
 
