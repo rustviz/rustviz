@@ -33647,16 +33647,16 @@ fn corpus_1907_geometry() {
 fn issue_1915_arrows_cross_on_their_event_row() {
     // rustc's MIR takes a shared reference to o in the let-chain and
     // copies h.r into r2 in the first arm of the second fixture.
-    let cases: [(&str, &str, &str, &str, &[&str]); 2] = [
-        ("rv3_1907_2711_05_arrow_along_leg", "o", "x", "7", &["s2", "s3"]),
-        ("rv3_1907_2711_24_arrow_along_leg", "r2", "s", "19", &["r", "h.r"]),
+    let cases: [(&str, &str, &str, &str, &str, &[&str]); 2] = [
+        ("rv3_1907_2711_05_arrow_along_leg", "o", "x", "7", "static_borrow", &["s2", "s3"]),
+        ("rv3_1907_2711_24_arrow_along_leg", "r2", "s", "19", "static_die", &["r", "h.r"]),
     ];
     let mut detours = Vec::new();
-    for (name, from, to, row, crossed) in cases {
+    for (name, from, to, row, event, crossed) in cases {
         let rv = run_with_local_backend(&format!("geometry_1907/{name}"));
         let svg = rv.timeline_panel_string();
         let doc = roxmltree::Document::parse(&svg).unwrap();
-        if !common::geometry::parse(&doc).arrow_stays_on_row(from, to, row, crossed) {
+        if !common::geometry::parse(&doc).arrow_stays_on_row(from, to, row, event, crossed) {
             detours.push(name);
         }
     }
@@ -33675,6 +33675,37 @@ fn issue_1915_field_returns_stay_between_their_columns() {
     for field in ["d.a", "d.b", "e.a", "e.b"] {
         assert!(geometry.arrows_stay_between_columns(field, "s1", "25", 26.0),
             "{field}'s return loops outside its endpoint columns");
+    }
+}
+
+#[test]
+fn issue_1926_outer_field_return_uses_its_event_row() {
+    // The formatting call is the last use of e.b's borrow into s1. Its
+    // return crosses the three intervening field dots on that same row.
+    let svg = run_with_local_backend("field_lenders_1354").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    assert!(common::geometry::parse(&doc).arrow_stays_on_row("e.b", "s1", "25", "static_die", &["e.a", "d.b", "d.a"]),
+        "e.b must return to s1 along its event row and inside their columns");
+}
+
+#[test]
+fn issue_1926_gutter_repair_keeps_the_return_clear_of_branch_legs() {
+    // MIR binds x to a shared reference into o in the let-chain.
+    let svg = run_with_local_backend("geometry_1907/rv3_1907_2711_05_arrow_along_leg").timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    assert!(common::geometry::parse(&doc).return_clears_off_row_legs("x", "o", "7", "s3"));
+}
+
+#[test]
+fn issue_1926_literal_borrow_ends_point_away_from_the_next_column() {
+    for (name, var, row) in [
+        ("c4_10_str_literal_copy", "s", "4"),
+        ("c8_14_hashmap_entry", "text", "9"),
+        ("m_01_shadow_type_change", "spaces", "3"),
+    ] {
+        let svg = run_with_local_backend(&format!("book/{name}")).timeline_panel_string();
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        assert!(common::geometry::parse(&doc).has_leftward_borrow_end_stub(var, row), "{name}");
     }
 }
 

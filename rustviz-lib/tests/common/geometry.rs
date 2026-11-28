@@ -24,7 +24,7 @@ pub const INVARIANTS: &[&str] = &[
     "line-starts-nowhere", "line-ends-nowhere", "line-through-fork", "arrows-overlap",
     "marks-on-one-spot", "arrow-misses-target", "outside-figure", "heads-or-logos-overlap",
     "shaft-through-mark", "arrows-end-to-end",
-    "fork-without-dot", "arrow-along-leg", "arrow-near-dot",
+    "fork-without-dot", "arrow-along-leg", "arrow-near-dot", "arrow-in-gutter",
 ];
 
 /// How far apart two points the drawing means to be one may be.
@@ -39,6 +39,8 @@ const SHAFT_HALF: f64 = 2.5;
 /// An arrow's visible ends stop this close to the event dots' centres
 /// (8.2 px for a diagonal head).
 const ARROW_REACH: f64 = 10.0;
+/// At the first column allow a dot radius and half the width of its arrow shaft.
+const GUTTER_MARGIN: f64 = 8.0;
 /// An arrow's head may lie over this much of a column's slanted leg's
 /// centre line (`arrow-along-leg`): a leg ending at the dot the head
 /// points at, or crossing the head, passes under it for a few px.
@@ -78,6 +80,7 @@ struct Arrow {
     to: String,
     line: String,
     tip: String,
+    event: String,
     /// The shaft's straight pieces (a hop's arc left out).
     pieces: Vec<((f64, f64), (f64, f64))>,
     hops: Vec<Hop>,
@@ -85,6 +88,34 @@ struct Arrow {
     head: Option<(f64, f64)>,
     /// The head's triangle.
     tri: Vec<(f64, f64)>,
+}
+
+impl Arrow {
+    /// Shaft geometry and head vertices. A horizontal half-hop reaches its
+    /// vertical extreme at the midpoint. The parser flattens other SVG arcs.
+    fn path_points(&self) -> impl Iterator<Item = Pt> + '_ {
+        self.pieces.iter().flat_map(|&(p, q)| [p, q])
+            .chain(self.tri.iter().copied())
+            .chain(self.hops.iter().flat_map(|h| {
+                [h.chord.0, h.chord.1, h.point_at(h.start_angle + h.sweep / 2.0)].into_iter()
+                    .chain(h.flattened.iter().map(|&(_, q)| q))
+            }))
+    }
+
+    /// The shaft uses butt caps and miter joins. The head is a filled triangle.
+    fn painted_points(&self) -> impl Iterator<Item = Pt> + '_ {
+        self.pieces.iter().filter_map(|&(p, q)| {
+            let length = len(p, q);
+            if length == 0.0 { return None }
+            let nx = SHAFT_HALF * (p.1 - q.1) / length;
+            let ny = SHAFT_HALF * (q.0 - p.0) / length;
+            Some([(p.0 + nx, p.1 + ny), (p.0 - nx, p.1 - ny),
+                  (q.0 + nx, q.1 + ny), (q.0 - nx, q.1 - ny)])
+        }).flatten().chain(self.hops.iter().flat_map(Hop::stroke_extrema))
+            .chain(self.miters.iter().flat_map(|&(p, q)| [p, q]))
+            .chain(self.tri.iter().copied())
+    }
+
 }
 
 /// An SVG elliptical arc in an arrow shaft, in centre parameterization.
@@ -156,6 +187,27 @@ impl Hop {
         (self.center.0 + x, self.center.1 + y)
     }
 
+    /// Stroke edges at the caps and the x/y extrema swept by this arc.
+    fn stroke_extrema(&self) -> impl Iterator<Item = Pt> + '_ {
+        let (rx, ry) = self.radii;
+        let (cos, sin) = self.axis;
+        let x_extreme = (-ry * sin).atan2(rx * cos);
+        let y_extreme = (ry * cos).atan2(rx * sin);
+        let pi = std::f64::consts::PI;
+        let extrema = [x_extreme, x_extreme + pi, y_extreme, y_extreme + pi];
+        [self.start_angle, self.start_angle + self.sweep].into_iter()
+            .chain(extrema.into_iter().filter(move |angle| {
+                ((angle - self.start_angle) * self.sweep.signum()).rem_euclid(2.0 * pi) <= self.sweep.abs()
+            }))
+            .flat_map(move |angle| {
+                let (x, y) = self.point_at(angle);
+                let (sin, cos) = angle.sin_cos();
+                let (nx, ny) = self.rotate((ry * cos, rx * sin));
+                let scale = SHAFT_HALF / nx.hypot(ny);
+                [(x + scale * nx, y + scale * ny), (x - scale * nx, y - scale * ny)]
+            })
+    }
+
     fn tangent(&self, at_end: bool) -> Pt {
         let angle = self.start_angle + if at_end { self.sweep } else { 0.0 };
         let (sin, cos) = angle.sin_cos();
@@ -183,6 +235,7 @@ impl Hop {
 #[derive(Debug, Clone)]
 struct Logo {
     id: String,
+    event: String,
     var: String,
     to: String,
     line: String,
@@ -345,11 +398,11 @@ pub fn parse(doc: &roxmltree::Document) -> Geo {
                 let head = tri.get(1).copied();
                 g.arrows.push(Arrow {
                     id, var: a("data-rv-var"), to: a("data-rv-to"), line: a("data-rv-line"),
-                    tip: a("data-tooltip-text"), pieces, hops, miters, head, tri,
+                    event: a("data-rv-event"), tip: a("data-tooltip-text"), pieces, hops, miters, head, tri,
                 });
             }
             "fn" => g.logos.push(Logo {
-                id, var: a("data-rv-var"), to: a("data-rv-to"), line: a("data-rv-line"),
+                event: a("data-rv-event"), id, var: a("data-rv-var"), to: a("data-rv-to"), line: a("data-rv-line"),
                 x: num(n, "x"), y: num(n, "y"), tip: a("data-tooltip-text"),
             }),
             "header" => g.headers.push(a("data-rv-var")),
@@ -401,28 +454,26 @@ impl Geo {
         })
     }
 
-    /// An arrow can bend around an obstruction while its main track
-    /// stays on the event row and within the two columns it connects.
-    pub fn arrow_stays_on_row(&self, var: &str, to: &str, line: &str, crossed: &[&str]) -> bool {
+    fn endpoint_dots(&self, a: &Arrow) -> Option<(&Dot, &Dot)> {
+        let dot = |var: &str, point| self.dots.iter()
+            .find(|d| d.var == var && d.line == a.line && len((d.x, d.y), point) <= ARROW_REACH);
+        dot(&a.var, a.pieces.first()?.0).zip(dot(&a.to, a.head?))
+    }
+
+    /// Straight shaft pieces and hop chords must stay on the event row.
+    pub fn arrow_stays_on_row(&self, var: &str, to: &str, line: &str, event: &str, crossed: &[&str]) -> bool {
         self.arrows.iter().any(|a| {
-            if a.var != var || a.to != to || a.line != line {
+            if a.var != var || a.to != to || a.line != line || a.event != event {
                 return false;
             }
-            let (Some(&(start, _)), Some(head)) = (a.pieces.first(), a.head) else { return false };
-            let Some((source, target)) = self.dots.iter()
-                .find(|d| d.var == var && d.line == line && len((d.x, d.y), start) <= ARROW_REACH)
-                .zip(self.dots.iter().find(|d| d.var == to && d.line == line && len((d.x, d.y), head) <= ARROW_REACH))
-                else { return false };
+            let Some((source, target)) = self.endpoint_dots(a) else { return false };
             let (left, right) = (source.x.min(target.x), source.x.max(target.x));
             let row = source.y;
-            let on_row: f64 = a.pieces.iter().filter(|(p, q)| (p.1 - row).abs() < TOL && (q.1 - row).abs() < TOL)
-                .map(|(p, q)| (q.0 - p.0).abs()).sum();
-            let row_hops = || a.hops.iter().filter(|h| h.chord.0.1 == row && h.chord.1.1 == row);
-            row == target.y && on_row + row_hops().map(|h| len(h.chord.0, h.chord.1)).sum::<f64>() > 0.75 * (right - left)
-                && a.pieces.iter().flat_map(|&(p, q)| [p, q]).chain(a.tri.iter().copied())
-                    .chain(a.hops.iter().flat_map(|hop| [hop.chord.0, hop.chord.1, hop.point_at(hop.start_angle + hop.sweep / 2.0)]))
-                    .all(|(x, y)| (left - 0.01..=right + 0.01).contains(&x) && (y - row).abs() <= 15.0)
-                && crossed.iter().all(|col| row_hops().any(|hop| {
+            row == target.y && a.head.is_some_and(|h| (h.1 - row).abs() < 1e-8)
+                && a.pieces.iter().all(|(p, q)| (p.1 - row).abs() < 1e-8 && (q.1 - row).abs() < 1e-8)
+                && a.hops.iter().all(|h| h.is_horizontal_semicircle() && h.chord.0.1 == row)
+                && a.path_points().all(|(x, y)| (left - 0.01..=right + 0.01).contains(&x) && (y - row).abs() <= 15.0)
+                && crossed.iter().all(|col| a.hops.iter().any(|hop| {
                     let center = mid(hop.chord.0, hop.chord.1);
                     self.dots.iter().any(|d| d.var == *col && d.line == line && near((d.x, d.y), center))
                         || self.segs.iter().any(|s| !s.main && s.var == *col
@@ -431,16 +482,39 @@ impl Geo {
         })
     }
 
+    /// On a displaced track, a hop leaves a gap in the straight shaft where
+    /// the branch leg crosses. Derive the intersection from the drawn leg.
+    pub fn return_clears_off_row_legs(&self, var: &str, to: &str, line: &str, branch: &str) -> bool {
+        self.arrows.iter().any(|a| {
+            if a.var != var || a.to != to || a.line != line || a.event != "static_die" { return false }
+            let Some((source, target)) = self.endpoint_dots(a) else { return false };
+            if source.y != target.y { return false }
+            let mut legs = self.segs.iter().filter(|s| !s.main && s.var == branch).peekable();
+            legs.peek().is_some() && legs.all(|s| a.pieces.iter().all(|&(p, q)| {
+                if p.1 == source.y || p.1 != q.1 || s.a.1 == s.b.1 { return true }
+                let t = (p.1 - s.a.1) / (s.b.1 - s.a.1);
+                let x = s.a.0 + t * (s.b.0 - s.a.0);
+                !(0.0..=1.0).contains(&t) || x < p.0.min(q.0) || x > p.0.max(q.0)
+            }))
+        })
+    }
+
+    pub fn has_leftward_borrow_end_stub(&self, var: &str, line: &str) -> bool {
+        self.arrows.iter().any(|a| {
+            let ([(start, base)], Some(head)) = (a.pieces.as_slice(), a.head) else { return false };
+            a.var == var && a.to == var && a.line == line && a.event == "static_die" && a.hops.is_empty()
+                && head.0 < base.0 && base.0 < start.0 && start.1 == base.1 && base.1 == head.1
+                && self.dots.iter().any(|d| d.var == var && d.line == line && d.y == start.1
+                    && d.x > start.0 && d.x - start.0 <= ARROW_REACH && d.x - head.0 <= 30.75)
+        })
+    }
+
     /// Keep every route between the columns it connects, with room for a
     /// short head approach from the far side.
     pub fn arrows_stay_between_columns(&self, from: &str, to: &str, line: &str, jog: f64) -> bool {
         let mut arrows = self.arrows.iter().filter(|a| a.var == from && a.to == to && a.line == line).peekable();
         arrows.peek().is_some() && arrows.all(|a| {
-            let (Some(&(start, _)), Some(head)) = (a.pieces.first(), a.head) else { return false };
-            let Some((source, target)) = self.dots.iter()
-                .find(|d| d.var == from && d.line == line && len((d.x, d.y), start) <= ARROW_REACH)
-                .zip(self.dots.iter().find(|d| d.var == to && d.line == line && len((d.x, d.y), head) <= ARROW_REACH))
-                else { return false };
+            let Some((source, target)) = self.endpoint_dots(a) else { return false };
             let span = (source.x.min(target.x) - jog)..=(source.x.max(target.x) + jog);
             a.pieces.iter().flat_map(|&(p, q)| [p, q])
                 .chain(a.tri.iter().copied())
@@ -898,6 +972,42 @@ pub fn check(g: &Geo) -> Vec<(&'static str, String)> {
 
     // Inside the figure.
     let (w, ht) = g.size;
+    let first_column = g.dots.iter().map(|d| d.x)
+        .chain(g.segs.iter().flat_map(|s| [s.a.0, s.b.0])).reduce(f64::min);
+    for a in &g.arrows {
+        // A caller or function logo can be an endpoint in the gutter.
+        // Include the endpoints, but never let an intermediate bend define the limit.
+        if let (Some(left), Some(&(start, _)), Some(head)) = (first_column, a.pieces.first(), a.head) {
+            // Only the endpoint beside the matching glyph gets its clearance.
+            // A source function can have a header of its own elsewhere.
+            let mut source_in_gutter = a.var == "caller" && a.event == "init_ref_param";
+            let mut target_in_gutter = a.to == "caller" && matches!(a.event.as_str(), "move" | "copy");
+            for logo in g.logos.iter().filter(|l| l.var == a.var && l.to == a.to && l.line == a.line && l.event == a.event) {
+                let center = (logo.x + 5.0, logo.y - 5.0);
+                if len(start, center) < len(head, center) {
+                    source_in_gutter |= in_box(logo_box(logo), start, 6.0);
+                } else {
+                    target_in_gutter |= in_box(logo_box(logo), head, 6.0);
+                }
+            }
+            // A local borrow-end stub has its own narrow strip beside the dot.
+            let stub = a.var == a.to && matches!(a.event.as_str(), "static_die" | "mutable_die")
+                && matches!(a.pieces.as_slice(), [(p, q)] if p.1 == q.1 && q.1 == head.1) && a.hops.is_empty()
+                && g.dots.iter().any(|d| d.var == a.var && d.line == a.line && len((d.x, d.y), start) <= ARROW_REACH);
+            let edge = left - if stub { 30.75 } else { GUTTER_MARGIN };
+            let source_limit = if source_in_gutter { edge.min(start.0 - GUTTER_MARGIN) } else { edge };
+            let target_limit = if target_in_gutter { edge.min(head.0 - GUTTER_MARGIN) } else { edge };
+            let limit = source_limit.min(target_limit);
+            let outside = [(start, source_limit), (head, target_limit)].into_iter()
+                .chain(a.path_points().map(|p| (p, limit))).find(|(p, bound)| p.0 < *bound);
+            if let Some((p, bound)) = outside {
+                out.push(("arrow-in-gutter", format!("{} at {} runs left of {bound:.1}", a.id, fmt(p))));
+            }
+        }
+        if let Some(p) = a.painted_points().find(|&(x, y)| x < -1e-8 || x > w + 1e-8 || y < -1e-8 || y > ht + 1e-8) {
+            out.push(("outside-figure", format!("{} at {} outside {w} × {ht}", a.id, fmt(p))));
+        }
+    }
     if w.is_finite() && ht.is_finite() {
         for (id, axis, v) in &g.coords {
             let lim = if *axis == 'x' { w } else { ht };
@@ -1096,25 +1206,26 @@ mod unit {
     fn shafts_through_dots_and_stop_bars_are_caught() {
         // `match (a, (b, c))` (#1344): b's move to x dips half a row, onto
         // the row of c's dot.
+        let source = dot("b", 140.0, 185.0, "acquire");
         let c = dot("c", 210.0, 245.0, "move");
         let through = arrow("b>x", "b", "x", "142.9 219.4 160 245 330 245 340 230", "334.8,226.7 345.6,219.3 344.8,233.3");
-        assert_eq!(invs(&[c.clone(), through].concat()), vec!["shaft-through-mark"]);
+        assert_eq!(invs(&[source.clone(), c.clone(), through].concat()), vec!["shaft-through-mark"]);
         // On a track that misses it, or hopping it, it's fine.
         let clear = arrow("b>x", "b", "x", "144.2 218.2 160 230 330 230 335.6 225.8", "332,221 345.8,218 339.2,230.6");
-        assert_eq!(invs(&[c.clone(), clear].concat()), Vec::<&str>::new());
+        assert_eq!(invs(&[source.clone(), c.clone(), clear].concat()), Vec::<&str>::new());
         let grazing = arrow("b>x", "b", "x", "144 218 160 237 330 237 340 230", "334.8,226.7 345.6,219.3 344.8,233.3");
-        assert_eq!(invs(&[c.clone(), grazing].concat()), vec!["arrow-near-dot"]);
+        assert_eq!(invs(&[source.clone(), c.clone(), grazing].concat()), vec!["arrow-near-dot"]);
         let near_head = dot("q", 349.0, 215.0, "branch_join");
         let head = arrow("b>x", "b", "x", "140 220 330 220", "330,214 342.75,220 330,226");
-        assert_eq!(invs(&[near_head, head.clone()].concat()), Vec::<&str>::new());
+        assert_eq!(invs(&[source.clone(), near_head, head.clone()].concat()), Vec::<&str>::new());
         let near_head = dot("q", 347.0, 220.0, "branch_join");
-        assert_eq!(invs(&[near_head, head].concat()), vec!["arrow-near-dot"]);
+        assert_eq!(invs(&[source.clone(), near_head, head].concat()), vec!["arrow-near-dot"]);
         let hop = "<g data-rv-id=\"b>x\" data-rv-kind=\"arrow\" data-rv-var=\"b\" data-rv-to=\"x\" data-rv-line=\"1\" \
                    data-tooltip-text=\"b>x\"><path class=\"arrow-shaft\" d=\"M 142.9 219.4 L 160 245 L 200 245 A 10 10 0 0 1 220 245 L 330 245 L 340 230\"/>\
                    <polygon class=\"arrow-head\" points=\"334.8,226.7 345.6,219.3 344.8,233.3\"/></g>";
-        assert_eq!(invs(&[c.clone(), hop.to_string()].concat()), Vec::<&str>::new());
+        assert_eq!(invs(&[source.clone(), c.clone(), hop.to_string()].concat()), Vec::<&str>::new());
         let near_hop = dot("q", 210.0, 230.0, "branch_join");
-        assert_eq!(invs(&[hop, &near_hop].concat()), vec!["arrow-near-dot"]);
+        assert_eq!(invs(&[&source, hop, &near_hop].concat()), vec!["arrow-near-dot"]);
         // Its own dots (5.25 px off their centres) don't count.
         let own = [dot("b", 70.0, 245.0, "move"), dot("x", 300.0, 245.0, "acquire"),
                    arrow("b>x", "b", "x", "75.25 245 282 245", "282,239 294.75,245 282,251")].concat();
@@ -1129,18 +1240,20 @@ mod unit {
 
     #[test]
     fn clearance_includes_the_dot_stroke() {
+        let source = dot("b", 9.75, 20.0, "move");
         let near = dot("q", 50.0, 29.0, "branch_join");
         let straight = arrow("b>x", "b", "x", "15 20.25 80 20.25", "80,14.25 92.75,20.25 80,26.25");
-        assert_eq!(invs(&format!("{near}{straight}")), vec!["arrow-near-dot"]);
-        assert!(invs(&format!("{}{straight}", dot("q", 50.0, 29.25, "branch_join"))).is_empty());
+        assert_eq!(invs(&format!("{source}{near}{straight}")), vec!["arrow-near-dot"]);
+        assert!(invs(&format!("{source}{}{straight}", dot("q", 50.0, 29.25, "branch_join"))).is_empty());
     }
 
     #[test]
     fn clearance_includes_the_stroke_miter() {
+        let source = dot("b", 9.75, 20.0, "move");
         let near = dot("q", 46.0, 13.0, "branch_join");
         let bent = arrow("b>x", "b", "x", "15 20 40 20 40 40", "34,40 40,52.75 46,40");
-        assert_eq!(invs(&format!("{near}{bent}")), vec!["arrow-near-dot"]);
-        assert!(invs(&format!("{}{bent}", dot("q", 48.0, 13.0, "branch_join"))).is_empty());
+        assert_eq!(invs(&format!("{source}{near}{bent}")), vec!["arrow-near-dot"]);
+        assert!(invs(&format!("{source}{}{bent}", dot("q", 48.0, 13.0, "branch_join"))).is_empty());
     }
 
     #[test]
@@ -1155,16 +1268,16 @@ mod unit {
     }
 
     #[test]
-    fn event_row_pin_requires_the_named_crossings_and_bounds_the_jog() {
+    fn event_row_pin_requires_the_event_and_all_straights_on_row() {
         let row_dot = |name, x| dot(name, x, 80.0, "branch_join").replace("/>", " data-rv-line=\"19\"/>");
         let (source, target, r, hr) = (row_dot("r2", 220.0), row_dot("s", 20.0), row_dot("r", 150.0), row_dot("h.r", 60.0));
-        let path = r#"<g data-rv-id="r2>s" data-rv-kind="arrow" data-rv-var="r2" data-rv-to="s" data-rv-line="19">
+        let path = r#"<g data-rv-id="r2>s" data-rv-kind="arrow" data-rv-var="r2" data-rv-to="s" data-rv-line="19" data-rv-event="static_die">
             <path class="arrow-shaft" d="M 214.75 80 L 160 80 A 10 10 0 0 0 140 80 L 70 80 A 10 10 0 0 0 50 80 L 38 80"/>
             <polygon class="arrow-head" points="38,74 25.25,80 38,86"/></g>"#;
         let matches = |source: &str, target: &str, r: &str, hr: &str, path: &str| {
             let svg = format!("<svg>{source}{target}{r}{hr}{path}</svg>");
             let doc = roxmltree::Document::parse(&svg).unwrap();
-            parse(&doc).arrow_stays_on_row("r2", "s", "19", &["r", "h.r"])
+            parse(&doc).arrow_stays_on_row("r2", "s", "19", "static_die", &["r", "h.r"])
         };
         assert!(matches(&source, &target, &r, &hr, path));
         let wrong_row = |mark: &str| mark.replace("line=\"19\"", "line=\"18\"");
@@ -1173,6 +1286,9 @@ mod unit {
             ("wrong target row", matches(&source, &wrong_row(&target), &r, &hr, path)),
             ("wrong crossing row", matches(&source, &target, &wrong_row(&r), &hr, path)),
             ("missing crossing", matches(&source, &target, &r, &hr, &path.replace("A 10 10 0 0 0 50 80", "L 50 80"))),
+            ("wrong event", matches(&source, &target, &r, &hr, &path.replace("static_die", "move"))),
+            ("short off-row track", matches(&source, &target, &r, &hr,
+                &path.replace("L 70 80", "L 135 80 L 132 92 L 118 92 L 115 80 L 70 80"))),
             ("deep jog", matches(&source, &target, &r, &hr, &path.replace("L 160 80", "L 210 55 L 200 55 L 195 80 L 160 80"))),
         ].into_iter().filter_map(|(reason, matched)| matched.then_some(reason)).collect();
         assert!(accepted.is_empty(), "accepted invalid routes: {accepted:?}");
@@ -1212,6 +1328,49 @@ mod unit {
         let clear = arrow("c>z", "c", "z", "251.66 189.98 270 245 280 245 310.02 199.98",
                           "305.02,196.65 317.09,189.37 315.01,203.31");
         assert_eq!(invs(&[cols, clear].concat()), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn gutter_clearance_belongs_to_the_endpoint() {
+        let col = [header("s"), dot("s", 70.0, 90.0, "acquire")].concat();
+        let route = |pts| arrow("r>s", "r", "s", pts, "52,84 64.75,90 52,96");
+        let hook = route("170 90 150 120 44 120 44 90 52 90");
+        assert!(invs(&format!("{col}{hook}")).contains(&"arrow-in-gutter"));
+        let stub = arrow("s>s", "s", "s", "64.75 90 52 90", "52,84 39.25,90 52,96");
+        assert!(invs(&format!("{col}{stub}")).contains(&"arrow-in-gutter"));
+        let from_logo = route("20 90 52 90");
+        assert!(invs(&format!("{col}{from_logo}")).contains(&"arrow-in-gutter"));
+        let logo = r#"<text x="8" y="95" data-rv-id="call" data-rv-kind="fn"
+            data-rv-var="r" data-rv-to="s" data-rv-line="1"/>"#;
+        assert!(!invs(&format!("{}{col}{from_logo}{logo}", header("r"))).contains(&"arrow-in-gutter"));
+
+        let caller = arrow("r>caller", "r", "caller", "75 90 42 90 42 78", "36,78 42,65.25 48,78")
+            .replace("data-rv-kind=\"arrow\"", "data-rv-kind=\"arrow\" data-rv-event=\"move\"");
+        assert!(!invs(&format!("{col}{caller}")).contains(&"arrow-in-gutter"));
+        let bad_column_end = arrow("r>s", "r", "s", "20 90 37 90", "37,84 49.75,90 37,96");
+        assert!(invs(&format!("{col}{bad_column_end}{logo}")).contains(&"arrow-in-gutter"));
+
+        // The logo identifies only the endpoint next to its glyph.
+        let far_logo = logo.replace("x=\"8\"", "x=\"155\"");
+        let bad_head = arrow("r>s", "r", "s", "152 90 50 90 50 120", "49,116 40,120 51,126");
+        assert!(invs(&format!("{col}{bad_head}{far_logo}")).contains(&"arrow-in-gutter"));
+        let bad_tail = arrow("s>f", "s", "f", "40 90 140 90", "140,84 152.75,90 140,96");
+        let target_logo = far_logo.replace("var=\"r\"", "var=\"s\"").replace("to=\"s\"", "to=\"f\"");
+        assert!(invs(&format!("{col}{bad_tail}{target_logo}")).contains(&"arrow-in-gutter"));
+    }
+
+    #[test]
+    fn outside_figure_includes_the_painted_shaft_and_joins() {
+        let arc = |y: f64| format!(r#"<g data-rv-id="arc" data-rv-kind="arrow">
+            <path class="arrow-shaft" d="M 10 {y} L 20 {y} A 10 10 0 0 1 40 {y} L 50 {y}"/></g>"#);
+        assert_eq!(invs(&arc(5.0)), vec!["outside-figure"]);
+        assert_eq!(invs(&arc(11.0)), vec!["outside-figure"]); // apex at y=1
+        assert!(invs(&arc(12.5)).is_empty()); // outer stroke touches y=0
+        let turn = arrow("r>s", "r", "s", "480 60 497.5 42.5 480 25", "480,25 470,20 478,30");
+        assert_eq!(invs(&turn), vec!["outside-figure"]); // only the miter exceeds x=500
+        let flat = arrow("r>s", "r", "s", "0 2.5 100 2.5", "100,0 110,2.5 100,5");
+        assert!(invs(&flat).is_empty()); // butt cap flush with the left edge
+        assert_eq!(invs(&flat.replace("0 2.5", "0 2")), vec!["outside-figure"]);
     }
 
     #[test]
