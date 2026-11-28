@@ -10138,7 +10138,17 @@ pub fn emit_call_result_borrows(&mut self, lhs: &ResourceTy, call: &'tcx Expr<'t
   if let Some(holds) = via.tie.enum_holds_reference {
     self.row_layout.enum_reference_holders.entry(*lhs.hash()).and_modify(|prior| *prior &= holds).or_insert(holds);
   }
+  let first = *self.unique_id;
   self.draw_holder_borrows(lhs, &lenders, &rd, &borrows, line_num, Some(&via), proven_lender);
+  if let Some(site) = self.mir_call(call).and_then(|c| c.site).filter(|site| {
+    matches!(self.mir_body[site.at.block].terminator().kind,
+        rustc_middle::mir::TerminatorKind::Call { destination, target: Some(_), .. }
+            if destination.projection.is_empty() && lhs_rap.ref_local() == Some(destination.local))
+  }) {
+    for id in first..*self.unique_id {
+      self.row_layout.reference_results.insert(id, site.at);
+    }
+  }
   self.mark_borrow_kept_by_result(call, &lenders);
   true
 }

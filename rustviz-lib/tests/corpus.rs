@@ -37487,6 +37487,91 @@ fn reference_bracket_starts_below_the_branch_diamond() {
     );
 }
 
+#[test]
+fn reference_bracket_starts_when_the_call_result_is_initialized() {
+    // The normal return edge from longest writes result. In this fixed
+    // figure y=335 is the argument-call row and y=365 is the next row,
+    // before the first use at y=395.
+    let svg = run_with_local_backend("book/c10_06_longest").timeline_panel_string();
+    assert_eq!(bracket_ranges(&svg, "result"), [(365.0, 395.0)]);
+    assert!(rv_elements(&svg, "result@L8").iter().any(|(id, title, _, ys)|
+        id.contains(":line:") && title == "result has no value yet" && *ys == (335.0, 365.0)));
+}
+
+fn bracket_ranges(svg: &str, var: &str) -> Vec<(f64, f64)> {
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    doc.descendants().filter(|node| node.attribute("data-rv-kind") == Some("bracket")
+        && node.attribute("data-rv-var") == Some(var)).map(|path| {
+        let d: Vec<_> = path.attribute("d").unwrap().split_whitespace().collect();
+        let y = |i: usize| d[i].parse::<f64>().unwrap();
+        (y(2), y(2) + y(5) + y(7) + y(10))
+    }).collect()
+}
+
+#[test]
+fn reference_bracket_leaves_a_gap_during_a_mutable_reference_swap() {
+    let svg = run_with_local_backend("ref_swap_keeps_borrow").timeline_panel_string();
+    // MIR moves m1 into the RHS tuple before the new reference is stored.
+    assert_eq!(bracket_ranges(&svg, "m1"), [(725.0, 785.0), (815.0, 875.0)]);
+}
+
+#[test]
+fn reference_bracket_waits_for_a_multiline_call_to_return() {
+    let svg = run_with_local_backend("rv3_issues/1765_two_phase_multiline_insert").timeline_panel_string();
+    // The receiver is reserved on L4. The call, at its closing parenthesis
+    // on L6, initializes r on its normal successor.
+    assert_eq!(bracket_ranges(&svg, "r"), [(215.0, 245.0)]);
+}
+
+#[test]
+fn successive_call_result_brackets_straddle_the_intervening_argument() {
+    let svg = run_with_local_backend("p4_replay_review").timeline_panel_string();
+    let argument = rv_elements(&svg, "r@L13:dot").into_iter().find(|(_, title, _, _)|
+        title.contains("passed to pick")).expect("r is passed to the second pick call").3.0;
+    let first = bracket_ranges(&svg, "r").into_iter().find(|(_, end)| *end > argument).unwrap().0;
+    let [(second, _)] = bracket_ranges(&svg, "s").try_into().unwrap();
+    // The first normal return writes r. The next call reads r as an
+    // argument and writes s only on its own normal return.
+    assert!(first < argument && argument < second, "r begins at {first}, argument at {argument}, s at {second}");
+}
+
+#[test]
+fn old_loan_end_does_not_restore_access_to_the_new_reference() {
+    let svg = run_with_local_backend("p4_replay_review").timeline_panel_string();
+    let (_, title, _, _) = rv_elements(&svg, "r@L6:dot").into_iter().find(|(id, ..)| id.contains("mutable_die")).unwrap();
+    // new reborrows y through r. Writing through r before the print is
+    // rejected by rustc because new is later used.
+    assert!(!title.contains("it can read and write the borrowed value"), "{title}");
+    assert!(title.contains("r's mutable borrow ends"), "{title}");
+    assert!(title.contains("the value r points to is mutably borrowed by new through r"), "{title}");
+    assert!(tooltip_of_id(&svg, "r@L6-7:line:revoked_privilege")
+        .is_some_and(|t| t.contains("mutably borrowed by new through r")));
+    assert!(!svg.contains("data-rv-invalid="));
+}
+
+#[test]
+fn collapsed_call_dot_credits_access_to_the_reference_receipt() {
+    let svg = run_with_local_backend("pattern_mutref_field_match").timeline_panel_string();
+    let dots = tooltip_lines(&svg);
+    let dot = dots.iter().find(|lines| lines.iter().any(|line| line == "r is bound to a mutable reference")).unwrap();
+    let receipt = dot.iter().position(|t| t ==
+        "At receipt, r holds a mutable reference; it can read and write the borrowed resource");
+    let call = dot.iter().position(|t| t.contains("passed to push"));
+    assert!(receipt.zip(call).is_some_and(|(a, b)| a < b), "{dot:?}");
+    assert!(!dot.iter().any(|t| t == "r holds a mutable reference; it can read and write the borrowed resource"));
+}
+
+#[test]
+fn partial_array_drop_is_explained_on_the_return_path() {
+    let svg = run_with_local_backend("p4_replay_review").timeline_panel_string();
+    let return_drops = rv_elements(&svg, "v@L19:dot");
+    assert!(return_drops.iter().any(|(_, title, ..)| title.ends_with(
+        "v goes out of scope. v[0] was moved out earlier, so only v[1] is dropped.")), "{return_drops:?}");
+    assert!(return_drops.iter().all(|(_, title, ..)| !title.contains("every String") && !title.contains("drop flag")));
+    assert!(rv_elements(&svg, "v@L20:dot").iter().any(|(_, title, ..)| title ==
+        "v goes out of scope. Its resource is dropped (including every String it holds)."));
+}
+
 /// #1458: on the `else` path of `let Some(f) = p else { return };` (and of
 /// `let Some(k) = s.first_mut() else`), the lender gets its value back
 /// before the exit drops it, on the drop's own dot: the loan ended where

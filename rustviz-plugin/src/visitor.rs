@@ -2347,7 +2347,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let exit_facts = self.body_facts.filter(|_| ordinary_exit)
       .map(|body| body.scope_ends.at_exit(site.source_callsite()).collect::<Vec<_>>())
       .unwrap_or_default();
-    let mut droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &handed_on, true, line, false, ordinary_exit)
+    let mut droppable: Vec<(usize, ResourceAccessPoint)> = self.droppable_locals_at(from, end, &handed_on, true, line, false, ordinary_exit, Some(site.source_callsite()))
       .into_iter().filter(|(_, rap)| !declared_outside(rap)).collect();
     // The in-scope order interleaves locals with temporary tuple drops.
     // Membership and initialization of ordinary places come from the
@@ -2607,7 +2607,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// non-`Copy` references (`&mut T`). A temporary whose scope ended
   /// before `line` was dropped already. Each comes with its index in
   /// `in_scope`.
-  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, binds: bool, pictured_by_facts: bool) -> Vec<(usize, ResourceAccessPoint)> {
+  fn droppable_locals_at(&self, from: usize, end: usize, moved: &BTreeSet<String>, refs: bool, line: usize, binds: bool, pictured_by_facts: bool, site: Option<rustc_span::Span>) -> Vec<(usize, ResourceAccessPoint)> {
     if from >= end {
       return Vec::new();
     }
@@ -2628,7 +2628,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       // One its drop flag decides about (moved, or given a value, on
       // some paths only) is included too: the exit drops it if it
       // still holds a value (#1194).
-      if self.ownership_here(*rd.rap.hash(), binds) == OwnHere::No {
+      let array_remainder = self.body_facts.zip(site).zip(rd.rap.owner_local()).is_some_and(|((body, site), local)| {
+        body.columns.iter().any(|col| col.local == local && col.name == name && col.array_len.is_some())
+          && body.rows.iter().flat_map(|row| &row.partial_drops).any(|(at, owner, column, drop)| {
+            *at == Some(site) && *owner == local && column == name && drop.drops_resource
+          })
+      });
+      if !array_remainder && self.ownership_here(*rd.rap.hash(), binds) == OwnHere::No {
         continue;
       }
       out.push((idx, rd.rap.clone()));
@@ -2713,7 +2719,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // An outer `let x;` first assigned inside the block also registered
     // a column inside it. Its declaration still owns its drop scope.
     let outer = self.scope_names(0, locals_from).into_iter().map(|(_, name)| name.to_owned()).collect();
-    for (idx, rap) in self.droppable_locals_at(locals_from, end, &outer, false, line, true, false) {
+    for (idx, rap) in self.droppable_locals_at(locals_from, end, &outer, false, line, true, false, None) {
       while tuples.last().is_some_and(|t| idx < t.len) {
         let t = tuples.pop().unwrap();
         self.drop_tuple_if_try_returns(&t, line);

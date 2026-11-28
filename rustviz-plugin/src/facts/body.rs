@@ -4881,7 +4881,21 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             Some(VariantDrop { column: name.to_owned(), variant: data.name.to_string(), payload, tracks_variant_init, payload_flag })
         }).collect()
     };
-    let partial_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, drop_at: Option<Location>, top: MovePathIndex| {
+    let array_indices = |place: Place<'tcx>, part: Place<'tcx>, len: usize| {
+        if part.local != place.local || !part.projection.starts_with(place.projection) {
+            return None;
+        }
+        match part.projection[place.projection.len()..] {
+            [ProjectionElem::ConstantIndex { offset, from_end, .. }] => {
+                let i = if from_end { len - offset as usize } else { offset as usize };
+                Some(i..i + 1)
+            }
+            [ProjectionElem::Subslice { from, to, from_end }] =>
+                Some(from as usize..if from_end { len - to as usize } else { to as usize }),
+            _ => None,
+        }
+    };
+    let partial_drops = |rt: &mut Flow<'_, '_, 'tcx>, at: &[Location], after: bool, drop_at: Option<Location>, top: MovePathIndex, early_exit: bool| {
         let state = rt.state(at, after, top);
         if !state.ever_init || (state.may_init && state.sub_moved.is_empty() && state.sub_maybe.is_empty()) {
             return Vec::new();
@@ -4898,6 +4912,27 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             let place = move_paths[m].place;
             let ty = place.ty(&body.local_decls, tcx).ty;
             let (copy, needs_drop, _) = ty_info(ty);
+            if let Some(len) = array_len(place).filter(|&len| early_exit && needs_drop && len <= super::schema::MAX_NAMED_ARRAY_LEN) {
+                let Some((_, _, name)) = columns.iter().find(|(_, p, _)| *p == place) else { continue };
+                let st = rt.state(at, after, m);
+                if !st.sub_moved.is_empty() && st.sub_maybe.is_empty() && st.may_init && !st.may_uninit {
+                    let moved: Option<Vec<_>> = st.sub_moved.iter()
+                        .map(|&part| array_indices(place, move_paths[part].place, len)).collect();
+                    if let Some(moved) = moved {
+                        let moved: BTreeSet<_> = moved.into_iter().flatten().collect();
+                        let dropped: Vec<_> = (0..len).filter(|i| !moved.contains(i))
+                            .map(|i| format!("{name}[{i}]")).collect();
+                        let split = PartialDrop {
+                            moved: moved.into_iter().map(|i| format!("{name}[{i}]")).collect(),
+                            drops_resource: !dropped.is_empty(),
+                            dropped,
+                            ..PartialDrop::default()
+                        };
+                        out.push((place.local, name.clone(), split));
+                    }
+                }
+                continue;
+            }
             if copy || !(ty.is_box() || matches!(ty.kind(), TyKind::Tuple(_))
                 || matches!(ty.kind(), TyKind::Adt(def, _) if def.is_struct() || def.is_enum()))
             {
@@ -5363,7 +5398,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let row = site.map_or(boundary, |span| cx.r.line_lo(span));
         let mut parts = match rt_md.rev_lookup.find(Place::from(local).as_ref()) {
             LookupResult::Exact(root) => {
-                let mut inputs = sites.iter().map(|at| partial_drops(rt, std::slice::from_ref(at), after, (!storage).then_some(loc), root));
+                let mut inputs = sites.iter().map(|at| partial_drops(rt, std::slice::from_ref(at), after, (!storage).then_some(loc), root, false));
                 let mut common = inputs.next().unwrap_or_default();
                 for input in inputs { common.retain(|part| input.contains(part)); }
                 common
@@ -5548,7 +5583,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let contents_gone = emptied_box(&mut rt, *lhs, how);
                     let how = if contents_gone { "drops" } else { how };
                     let flag_for_whole = how != "nothing_to_drop" && flag(*lhs);
-                    let parts = exact(*lhs).map_or_else(Vec::new, |path| partial_drops(&mut rt, &sites, false, Some(at), path));
+                    let parts = exact(*lhs).map_or_else(Vec::new, |path| partial_drops(&mut rt, &sites, false, Some(at), path, false));
                     let detail = |place: Place<'tcx>, how| {
                         let split = cx.name(place).and_then(|name| parts.iter().find(|(local, label, _)|
                             *local == place.local && *label == name).map(|(_, _, part)| part.clone()));
@@ -5866,7 +5901,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         if let LookupResult::Exact(top) = rt_md.rev_lookup.find(Place::from(*l).as_ref()) {
                             let site = cx.rows.exit_site.get(&loc).map(|&at| cx.r.exit_span(at));
                             scope_partials.entry(ev.0).or_default().extend(
-                                partial_drops(&mut rt, &runtime_locations(loc).collect::<Vec<_>>(), false, None, top).into_iter().map(|(local, name, parts)| (site, local, name, parts)));
+                                partial_drops(&mut rt, &runtime_locations(loc).collect::<Vec<_>>(), false, None, top, false).into_iter().map(|(local, name, parts)| (site, local, name, parts)));
                         }
                         push(&mut evs, ev);
                     }
@@ -6087,7 +6122,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                 |site| (cx.r.line_lo(site), site),
                             );
                             scope_partials.entry(row).or_default().extend(
-                                partial_drops(&mut rt, &edge, true, Some(loc), mpi).into_iter()
+                                partial_drops(&mut rt, &edge, true, Some(loc), mpi, true).into_iter()
                                     .map(|(local, name, parts)| (Some(site), local, name, parts)));
                             if how_there == "nothing_to_drop" {
                                 continue;
@@ -6145,7 +6180,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                                     |site| (cx.r.line_lo(site), Some(site)),
                                 );
                                 scope_partials.entry(row).or_default().extend(
-                                    partial_drops(&mut rt, &runtime, false, Some(loc), top).into_iter()
+                                    partial_drops(&mut rt, &runtime, false, Some(loc), top, exit.is_some()).into_iter()
                                         .map(|(local, name, parts)| (site, local, name, parts)));
                             }
                         }
@@ -6667,18 +6702,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     if let Some(n) = column_name(*m) { return vec![n]; }
                     let mp = move_data.move_paths[*m].place;
                     let Some(n) = array_len(*place).filter(|&n| n <= super::schema::MAX_NAMED_ARRAY_LEN) else { return vec![] };
-                    if mp.local != place.local || !mp.projection.starts_with(place.projection) { return vec![]; }
-                    let range = match mp.projection[place.projection.len()..] {
-                        [ProjectionElem::ConstantIndex { offset, from_end, .. }] => {
-                            let i = if from_end { n - offset as usize } else { offset as usize };
-                            i..i+1
-                        }
-                        [ProjectionElem::Subslice { from, to, from_end }] => {
-                            from as usize..if from_end { n - to as usize } else { to as usize }
-                        }
-                        _ => return vec![],
-                    };
-                    range.map(|i| format!("{name}[{i}]")).collect()
+                    array_indices(*place, mp, n).into_iter().flatten().map(|i| format!("{name}[{i}]")).collect()
                 };
                 let mut parts = Parts {
                     moved: s.sub_moved.iter().chain(rt_moved.iter()).flat_map(part_names).collect(),

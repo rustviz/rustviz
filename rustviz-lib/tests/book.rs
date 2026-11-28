@@ -1016,7 +1016,8 @@ const BOOK: &[Snippet] = &[
             "y holds an immutable reference; it can read the borrowed value",
             "string1 is passed to longest by shared reference. longest may read it",
             "string2 is passed to longest by shared reference. longest may read it",
-            "L9 result holds an immutable reference",
+            // The result is initialized after the argument effects on L9.
+            "L9+ result holds an immutable reference",
             "L9 Immutable borrow from string1 to result: longest's signature gives the reference it returns the same lifetime as both arguments. The code in longest has return paths from both tied inputs. At the caller, both stay borrowed while result is in use",
             "L9 Immutable borrow from string2 to result: longest's signature gives the reference it returns the same lifetime as both arguments. The code in longest has return paths from both tied inputs. At the caller, both stay borrowed while result is in use",
             "L10 If result holds a shared borrow affecting string1, that borrow ends here. It no longer restricts access to string1",

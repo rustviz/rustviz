@@ -2415,30 +2415,75 @@ fn loop_runs_on_owns(line_number: &usize, hash: &u64, history: &[(usize, Event)]
     whole.then_some(true)
 }
 
-/// A readable interval that fits entirely on the borrow's end dot.
-fn one_dot_holder_state(history: &[(usize, Event)], i: usize, rap: &ResourceAccessPoint,
-    layout: &crate::event_order::RowLayout) -> Option<State> {
+struct ReferenceAccess {
+    at_receipt: bool,
+    holds_value: bool,
+}
+
+/// The event and placement for an access clause on a collapsed dot.
+/// A receipt and the end can have different permissions.
+fn one_dot_holder_access(history: &[(usize, Event)], i: usize, rap: &ResourceAccessPoint,
+    vd: &VisualizationData) -> Option<(usize, ReferenceAccess)> {
+    use crate::facts::schema::{ReferenceTarget, SegmentPoint};
+    use crate::facts::table::Init;
+    let layout = &vd.row_layout;
     let (row, event) = &history[i];
     let (Event::StaticDie { readable, .. } | Event::MutableDie { readable, .. }) = event else { return None };
-    if !rap.is_ref() { return None; }
     let here = event_dot_y(history, i);
     let mut on_dot = history[..i].iter().enumerate().rev()
         .take_while(|(j, (r, _))| r == row && event_dot_y(history, *j) == here)
-        .map(|(_, (_, e))| e);
-    if on_dot.clone().next().is_some_and(|e| layout.restored.contains(&(e.get_id(), event.get_id()))) {
-        return Some(State::FullPrivilege { s: LineState::Full });
+        .map(|(j, (_, e))| (j, e));
+    if on_dot.clone().next().is_some_and(|(_, e)| layout.restored.contains(&(e.get_id(), event.get_id()))) {
+        return Some((i, ReferenceAccess { at_receipt: false, holds_value: rap.points_to_copy() }));
     }
-    let acquired = on_dot.find(|e| matches!(e, Event::StaticDie { .. } | Event::MutableDie { .. } | Event::Move { .. }
+    let (receipt, acquired) = on_dot.find(|(_, e)| matches!(e, Event::StaticDie { .. } | Event::MutableDie { .. } | Event::Move { .. }
         | Event::StaticBorrow { .. } | Event::MutableBorrow { .. } | Event::Copy { is: ResourceTy::Value(_), .. }
         | Event::Acquire { is: ResourceTy::Value(_), .. } | Event::StaticLend { is: ResourceTy::DerefField(..), .. }
-        | Event::MutableLend { is: ResourceTy::DerefField(..), .. }));
-    let same_generation = acquired.is_some_and(|start|
-        layout.field_generations.get(&start.get_id()) == layout.field_generations.get(&event.get_id()));
-    (*readable && same_generation && matches!(acquired, Some(Event::StaticBorrow { .. } | Event::MutableBorrow { .. }
-        | Event::Copy { .. } | Event::Acquire { .. }))).then(|| {
-        if rap.is_mutref() { State::FullPrivilege { s: LineState::Full } }
-        else { State::PartialPrivilege { s: LineState::Full } }
-    })
+        | Event::MutableLend { is: ResourceTy::DerefField(..), .. }))?;
+    if layout.field_generations.get(&acquired.get_id()) != layout.field_generations.get(&event.get_id())
+        || !matches!(acquired, Event::StaticBorrow { .. } | Event::MutableBorrow { .. }
+            | Event::Copy { .. } | Event::Acquire { .. }) {
+        return None;
+    }
+    if let Some((&function, local)) = vd.fn_source_lines.get(rap.hash()).zip(rap.ref_local()) {
+        let table = &vd.state_table;
+        let before_end = layout.segment_points.get(&event.get_id()).map(|point| match *point {
+            SegmentPoint::Before(at) | SegmentPoint::After(at) | SegmentPoint::Edge { from: at, .. } =>
+                SegmentPoint::Before(at),
+        });
+        let ids = table.end_loans.get(&event.get_id());
+        let cell_at = |point| table.segment_point_cell(function, rap.name(), point)
+            .filter(|cell| cell.local == Some(local) && cell.reference_type.is_some());
+        let usable = |cell: &crate::facts::table::Cell| cell.init == Init::Own
+            && cell.lent.iter().all(|loan| {
+                cell.replaced_references.contains(&loan.loan)
+                    || !rap.is_mutref() && match table.reference_target(function, rap.name(), cell, loan.loan) {
+                        Some(ReferenceTarget::Binding) => loan.kind == "shared",
+                        Some(_) => true,
+                        None => false,
+                    }
+            });
+        if let Some(cell) = before_end.and_then(cell_at)
+        {
+            let holds_value = !cell.reference_type?.referent_needs_drop;
+            if usable(cell) && ids.is_none_or(|ids| cell.holds.is_empty() || ids.iter().any(|id| cell.holds.contains(id))) {
+                return Some((i, ReferenceAccess { at_receipt: false, holds_value }));
+            }
+            // Keep a proved receipt clause with the acquisition. Its
+            // permissions describe the value the store just installed.
+            let id = acquired.get_id();
+            let usable_at_receipt = if let Some(&point) = layout.reference_receipts.get(&id) {
+                // A successful store into the direct reference local
+                // gives it a usable reference at the store itself.
+                cell_at(point).is_none_or(usable)
+            } else {
+                layout.segment_points.get(&id).copied().and_then(cell_at).is_some_and(usable)
+            };
+            return usable_at_receipt.then_some((receipt, ReferenceAccess { at_receipt: true, holds_value }));
+        }
+    }
+    // Some projected marks still lack a matching compiler boundary.
+    readable.then_some((i, ReferenceAccess { at_receipt: false, holds_value: rap.points_to_copy() }))
 }
 
 /// Introduce the closure capture first, then explain that the previous
@@ -2482,6 +2527,12 @@ fn render_dot(
     // (#561): only one of them did, so a later one isn't an assignment
     // over an earlier one. (line, whether it held a value before them)
     let mut before_breaks: Option<(usize, bool)> = None;
+    let rap = &visualization_data.timelines[hash].resource_access_point;
+    let access: BTreeMap<_, _> = if rap.is_ref() {
+        (0..history.len()).filter_map(|i| one_dot_holder_access(history, i, rap, visualization_data)).collect()
+    } else {
+        BTreeMap::new()
+    };
     for (i, (line_number, event)) in history.iter().enumerate() {
         let resource_hold = if scope_ends > 1 && matches!(event, Event::OwnerGoOutOfScope { .. }) {
             held
@@ -3425,6 +3476,14 @@ fn render_dot(
                     styled_name_html(input)));
             }
         }
+        let access_tip = access.get(&i).map(|&ReferenceAccess { at_receipt, holds_value }| {
+            let title = if rap.is_mutref() {
+                hover_messages::state_mut_ref_full_privilege(rap.name(), holds_value)
+            } else {
+                hover_messages::state_static_ref_full_privilege(rap.name(), holds_value)
+            };
+            (if at_receipt { format!("At receipt, {title}") } else { title }, at_receipt)
+        });
         // push to individual timelines
         let lend_id = match event {
             Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => Some(*id),
@@ -3472,12 +3531,8 @@ fn render_dot(
                 None => title,
             }
         };
-        if one_dot_holder_state(history, i, rap, &visualization_data.row_layout).is_some() {
-            let tip = qualify(if rap.is_mutref() {
-                hover_messages::state_mut_ref_full_privilege(rap.name(), rap.points_to_copy())
-            } else {
-                hover_messages::state_static_ref_full_privilege(rap.name(), rap.points_to_copy())
-            });
+        if let Some((tip, false)) = &access_tip {
+            let tip = qualify(tip.clone());
             let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
             if !stacked || !dot.lines.iter().any(|(_, line)| *line == tip) {
                 dot.lines.push((None, tip));
@@ -3494,6 +3549,13 @@ fn render_dot(
             dots.entry(data.hash, data.dot_x, data.dot_y, *line_number, timeline_data).projected_access = true;
         }
         append_dot(data, timeline_data, dots, lend_id, event_kind, *line_number);
+        if let Some((tip, true)) = access_tip {
+            let tip = qualify(tip);
+            let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
+            if !stacked || !dot.lines.iter().any(|(_, line)| *line == tip) {
+                dot.lines.push((None, tip));
+            }
+        }
         if (stacked || layout.field_generations.contains_key(&event.get_id()))
             && matches!(event, Event::StaticBorrow { .. }) && rap.is_ref() && !rap.is_mutref() {
             let tip = hover_messages::state_static_ref_full_privilege(rap.name(), rap.points_to_copy());
@@ -11835,13 +11897,7 @@ fn render_timeline(
                 }
                 (State::FullPrivilege { s: LineState::Uninit }, title)
             } else if table_ref_rows {
-                let r = w[0];
-                let cell = if visualization_data.row_lines.get(r + 1).is_some_and(Option::is_none) {
-                    segment_interval_cell(rap, visualization_data, r, history)
-                } else {
-                    line(r).and_then(|src| visualization_data.state_table.segment_cell(
-                        visualization_data.fn_source_lines[hash], rap.name(), src))
-                };
+                let cell = reference_interval_cell(rap, visualization_data, w[0], history);
                 if short_circuit_join && cell.as_ref().is_some_and(|c| c.init == crate::facts::table::Init::Maybe && c.cause == Some("moved")) {
                     (state.clone(), hover_messages::state_maybe(rap.name(), Some("moved")))
                 } else {
@@ -11907,6 +11963,28 @@ fn render_timeline(
                 bars.cols.push(((data.x1, y1 as f64), (data.x2, y2 as f64)));
             }
         }
+    }
+}
+
+fn reference_interval_cell(rap: &ResourceAccessPoint, vd: &VisualizationData, row: usize, history: &[(usize, Event)]) -> Option<crate::facts::table::Cell> {
+    if vd.row_lines.get(row + 1).is_some_and(Option::is_none) {
+        // A call's result dot can sit above the rows that evaluate the
+        // other arguments; until the call returns, its slot is as it was
+        // just before the call.
+        let function = *vd.fn_source_lines.get(rap.hash())?;
+        if let Some(&at) = history.iter().filter(|(r, _)| *r == row)
+            .find_map(|(_, event)| vd.row_layout.reference_results.get(&event.get_id())) {
+            if let Some(cell) = vd.state_table.segment_point_cell(function, rap.name(),
+                crate::facts::schema::SegmentPoint::Before(at))
+                .filter(|cell| matches!(cell.init, crate::facts::table::Init::Unassigned | crate::facts::table::Init::Moved)) {
+                return Some(cell.clone());
+            }
+        }
+        segment_interval_cell(rap, vd, row, history)
+    } else {
+        let function = *vd.fn_source_lines.get(rap.hash())?;
+        let src = rv_attrs::line_of(row, &vd.row_lines)?;
+        vd.state_table.segment_cell(function, rap.name(), src)
     }
 }
 
@@ -13471,148 +13549,108 @@ fn render_timelines(
     }
 }
 
-// vertical lines indicating whether a reference can mutate its resource(deref as many times)
-// (iff it's a MutRef && it has FullPrivilege)
+/// Draw the brackets outside the branch diamond. The straight timeline
+/// supplies the display windows; the MIR effect boundary can delay the
+/// start within a window when the receiving slot is still uninitialized.
 fn render_ref_line(
     output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
-    visualization_data: &VisualizationData,
-    resource_owners_layout: &BTreeMap<u64, TimelineColumnData>,
+    vd: &VisualizationData,
+    columns: &BTreeMap<u64, TimelineColumnData>,
     registry: &Handlebars,
     brackets: &mut Vec<Piece>,
-){
-    let timelines = &visualization_data.timelines;
-
-    for (hash, timeline) in timelines{
-        match timeline.resource_access_point {
-            ResourceAccessPoint::Function(_) => (), /* do nothing */
-            ResourceAccessPoint::Struct(_) | ResourceAccessPoint::Owner(_) | ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_) =>
-            {
-                let ro = timeline.resource_access_point.to_owned();
-                // verticle state lines
-                let states = &timeline.states;
-                // A reference bound by an `if`/`match` only exists once the
-                // join below the diamond has produced it, so its bracket
-                // starts at the join, clear of the arms (#489).
-                let apexes = CollapsedApexes::of(&timeline.history);
-                let start_y = |line: usize| get_y_axis_pos(line)
-                    + if apexes.merges.contains(&line) { COLLAPSED_APEX } else { 0 };
-                let end_y = |line: usize| get_y_axis_pos(line) - if apexes.splits.contains(&line) {
-                    COLLAPSED_APEX
-                } else {
-                    apexes.raised_splits.get(&line).copied().unwrap_or(0)
-                };
-                // struct can live over events
-                let mut alive = false;
-                let mut data = RefLineData {
-                    line_class: String::new(),
-                    hash: 0,
-                    x1: 0,
-                    x2: 0,
-                    y1: 0,
-                    y2: 0,
-                    v: 0,
-                    dx: 15,
-                    dy: 0,
-                    title: String::new(),
-                    rv: String::new(),
-                };
-                let mut bracket = Rv::new(rv_attrs::BRACKET);
-                let mut bracket_start = 0;
-                for (line_start, _line_end, state) in states.iter() {
-                    match state { 
-                        State::OutOfScope | State::ResourceMoved{ .. } => {
-                            if alive {
-                                // finish line template
-                                data.x2 = data.x1.clone();
-                                // Before a conditional whose fork is drawn
-                                // above its row (one-line, or `if let`
-                                // binding from x), the column stops at the
-                                // fork dot, and so does the bracket: run on
-                                // to the row, it ended in the middle of the
-                                // diamond (#1308).
-                                data.y2 = end_y(*line_start).max(data.y1);
-                                let dv = data.y2 - data.y1;
-                                // A reference bound and ended on one dot
-                                // (`let r = x;` never used) has no span to
-                                // bracket: drawn, it was a 15 px stub off
-                                // the dot (#1611). The dot says it all.
-                                if dv <= 0 {
-                                    alive = false;
-                                    continue;
-                                }
-                                data.v = dv - 2*dv/5;
-                                data.dy = dv/5;
-                                if let_else_segment(visualization_data, &ro, &timeline.history, bracket_start, *line_start) {
-                                    data.title = format!("{LET_ELSE_SUCCESS_TOOLTIP}{}", data.title);
-                                }
-                                if let Some(checked) = unreachable_binding(visualization_data, &ro) {
-                                    data.title = unreachable_title(checked, &data.title);
-                                }
-                                data.rv = bracket.clone().rows(bracket_start, *line_start).attrs();
-                                // (`M x1 y1 l dx dy v v l -dx dy`: its two
-                                // slanted ends, for the arrows.)
-                                if matches!(ro, ResourceAccessPoint::MutRef(_) | ResourceAccessPoint::StaticRef(_)) {
-                                    let (x, y1, y2) = (data.x1 as f64, data.y1 as f64, data.y2 as f64);
-                                    let (dx, dy) = (data.dx as f64, data.dy as f64);
-                                    brackets.push(((x, y1), (x + dx, y1 + dy)));
-                                    brackets.push(((x + dx, y2 - dy), (x, y2)));
-                                }
-
-                                match ro {
-                                    ResourceAccessPoint::MutRef(_) => {
-                                        output.get_mut(&-1).unwrap().0.ref_line.push_str(&registry.render("solid_ref_line_template", &data).unwrap());
-                                    },
-                                    ResourceAccessPoint::StaticRef(_) => {
-                                        output.get_mut(&-1).unwrap().0.ref_line.push_str(&registry.render("hollow_ref_line_template", &data).unwrap());
-                                    },
-                                    _ => (),
-                                }
-
-                                alive = false;
-                            }
-                        },
-                        State::FullPrivilege{..} => {
-                            if !alive {
-                                // set known vals
-                                data.hash = *hash;
-                                data.x1 = resource_owners_layout[hash].x_val;
-                                data.y1 = start_y(*line_start);
-                                bracket_start = *line_start;
-                                bracket = Rv::new(rv_attrs::BRACKET).state(state).var(&resource_owners_layout[hash].name);
-
-                                let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
-                                data.title = hover_messages::ref_line_holds_reference(&styled, matches!(ro, ResourceAccessPoint::MutRef(_)));
-                                data.line_class = String::from("solid");
-                                alive = true;
-                            }
-                        },
-                        State::PartialPrivilege{..} => {
-                            if !alive {
-                                // set known vals
-                                data.hash = *hash;
-                                data.x1 = resource_owners_layout[hash].x_val;
-                                data.y1 = start_y(*line_start);
-                                bracket_start = *line_start;
-                                bracket = Rv::new(rv_attrs::BRACKET).state(state).var(&resource_owners_layout[hash].name);
-
-                                let styled = styled_name_html(&visualization_data.get_name_from_hash(hash).unwrap());
-                                // A `&mut` whose referent is shared for now
-                                // (resumed after a join) is still a mutable
-                                // reference (#1591).
-                                data.title = match ro {
-                                    ResourceAccessPoint::MutRef(_) => hover_messages::ref_line_holds_reference(&styled, true),
-                                    _ => hover_messages::ref_line_holds_immutable_reference(&styled),
-                                };
-                                data.line_class = String::from("solid");
-                                alive = true;
-                            }
-                        },
-                        _ => (),
+) {
+    use crate::facts::table::Init;
+    for (hash, timeline) in &vd.timelines {
+        let rap = &timeline.resource_access_point;
+        if !rap.is_ref() {
+            continue;
+        }
+        let history = &timeline.history;
+        let apexes = CollapsedApexes::of(history);
+        let mut open = None;
+        for (start, end, state) in &timeline.states {
+            match state {
+                State::OutOfScope | State::ResourceMoved { .. } => {
+                    let Some((top, bracket_state)) = open.take() else { continue };
+                    if let Some(ys) = apexes.segment_ys(top, *start, None).filter(|(y1, y2)| y1 < y2) {
+                        append_reference_bracket(output, registry, brackets, vd, history, rap, &columns[hash],
+                            (top, *start), ys, bracket_state);
                     }
                 }
-            },  
+                State::FullPrivilege { .. } | State::PartialPrivilege { .. } if open.is_none() => {
+                    // A bind dot for a call result can sit above the
+                    // result store, among the argument effects. Within
+                    // this window, prove both the uninitialized prefix
+                    // and the first initialized interval for this local.
+                    let binding = |row| reference_interval_cell(rap, vd, row, history).filter(|cell| {
+                        cell.reference_type.is_some()
+                            && rap.ref_local().is_some_and(|local| cell.local == Some(local))
+                    });
+                    let call_result = history.iter().any(|(row, event)| {
+                        row == start && vd.row_layout.reference_results.contains_key(&event.get_id())
+                    });
+                    let mut top = *start;
+                    if !apexes.merges.contains(start) {
+                        while top < *end && (call_result || vd.row_lines.get(top + 1).is_some_and(Option::is_none))
+                            && binding(top).is_some_and(|cell| matches!(cell.init, Init::Unassigned | Init::Moved))
+                        {
+                            top += 1;
+                        }
+                    }
+                    let top = if top < *end && binding(top).is_some_and(|cell| cell.init == Init::Own)
+                        && apexes.segment_ys(top, *end, None).is_some_and(|(y1, y2)| y1 < y2) { top } else { *start };
+                    open = Some((top, state));
+                }
+                _ => {}
+            }
         }
     }
+}
+
+fn append_reference_bracket(
+    output: &mut BTreeMap<i64, (TimelinePanelData, TimelinePanelData)>,
+    registry: &Handlebars,
+    brackets: &mut Vec<Piece>,
+    vd: &VisualizationData,
+    history: &[(usize, Event)],
+    rap: &ResourceAccessPoint,
+    column: &TimelineColumnData,
+    (start, end): (usize, usize),
+    (y1, y2): (i64, i64),
+    state: &State,
+) {
+    let dy = (y2 - y1) / 5;
+    let x = column.x_val;
+    let dx = 15;
+    let mutable = rap.is_mutref();
+    let styled = styled_name_html(rap.name());
+    let title = if mutable || matches!(state, State::FullPrivilege { .. }) {
+        hover_messages::ref_line_holds_reference(&styled, mutable)
+    } else {
+        hover_messages::ref_line_holds_immutable_reference(&styled)
+    };
+    let title = if let_else_segment(vd, rap, history, start, end) { format!("{LET_ELSE_SUCCESS_TOOLTIP}{title}") } else { title };
+    let title = match unreachable_binding(vd, rap) {
+        Some(checked) => unreachable_title(checked, &title),
+        None => title,
+    };
+    let data = RefLineData {
+        line_class: "solid".to_owned(),
+        hash: *rap.hash(),
+        x1: x,
+        x2: x,
+        y1,
+        y2,
+        v: y2 - y1 - 2 * dy,
+        dx,
+        dy,
+        title,
+        rv: Rv::new(rv_attrs::BRACKET).state(state).var(&column.name).rows(start, end).attrs(),
+    };
+    brackets.push(((x as f64, y1 as f64), ((x + dx) as f64, (y1 + dy) as f64)));
+    brackets.push((((x + dx) as f64, (y2 - dy) as f64), (x as f64, y2 as f64)));
+    let template = if mutable { "solid_ref_line_template" } else { "hollow_ref_line_template" };
+    output.get_mut(&-1).unwrap().0.ref_line.push_str(&registry.render(template, &data).unwrap());
 }
 
 fn render_struct_box(
