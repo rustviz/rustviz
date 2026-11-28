@@ -4033,9 +4033,9 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             // reborrows `&mut *n` instead of moving n (#289); n is
             // usable again after m's last use.
             "Mutable reborrow from n to m",
-            // `t = first(&y, &x)` reassigns t with a reference that
-            // borrows both arguments (#171), so it is drawn as borrows.
-            "Immutable borrow from y to t: first's signature gives the reference it returns the same lifetime as both arguments. At the caller, both stay borrowed while t is in use",
+            // The signature keeps both arguments borrowed. The reference
+            // actually returned points into y, the first argument.
+            "Immutable borrow from y to t: first's signature gives the reference it returns the same lifetime as both arguments. At the caller, both stay borrowed while t is in use. The reference first returns points into y.",
             "Immutable borrow from a to u",
         ],
         must_not_contain: &[
@@ -4804,7 +4804,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // Since #1361 v and w, which hold borrows, take the stored one
         // as `v.push(&u)` would: an arrow into v / w and back.
         must_contain: &[
-            "u is passed to point by shared reference. point may read it; point's signature lets it store this reference in h, so u stays borrowed while h is in use",
+            "u is passed to point by shared reference. point may read it; point's signature lets it store this reference in h.r, so u stays borrowed while h is in use",
             "u's resource is immutably borrowed by v; u is read-only while the borrow is live",
             "Immutable borrow from u to v",
             "If v holds a shared borrow affecting u, that borrow ends here. It no longer restricts access to u",
@@ -4818,6 +4818,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "the resource z points to is immutably borrowed, and the reference is stored in a place that isn't drawn",
         ],
         must_not_contain: &[
+            "so u stays borrowed while h.r is in use",
             // y and z are references: they don't own the String.
             "y's resource is immutably borrowed, and the reference is stored in a place that isn't drawn",
             "z's resource is immutably borrowed, and the reference is stored in a place that isn't drawn",
@@ -6033,14 +6034,17 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         // can't store its argument: u's borrow ends at that call.
         must_contain: &[
             "t's resource is immutably borrowed by point; t is read-only while the borrow is live",
-            "t is passed to point by shared reference. point may read it; point's signature lets it store this reference in hold, so t stays borrowed while hold is in use",
-            "s is passed to set by shared reference. set may read it; set's signature lets it store this reference in h2, so s stays borrowed while h2 is in use",
-            "b is passed to put by mutable reference. put may read or write it; put's signature lets it store this reference in m, so b stays borrowed while m is in use",
+            "t is passed to point by shared reference. point may read it; point's signature lets it store this reference in hold.r, so t stays borrowed while hold is in use",
+            "s is passed to set by shared reference. set may read it; set's signature lets it store this reference in h2.r, so s stays borrowed while h2 is in use",
+            "b is passed to put by mutable reference. put may read or write it; put's signature lets it store this reference in m.r, so b stays borrowed while m is in use",
             "u is passed to look by shared reference. look may read it",
             "t's resource is no longer immutably borrowed",
             "b's resource is no longer mutably borrowed",
         ],
         must_not_contain: &[
+            "so t stays borrowed while hold.r is in use",
+            "so s stays borrowed while h2.r is in use",
+            "so b stays borrowed while m.r is in use",
             // Main's call dots, which also ended the borrow there.
             // `=`: whole tooltip. The correct tooltips continue "; point's signature lets it store this reference in ...".
             "=t is passed to point by shared reference. point may read it",
@@ -17718,7 +17722,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "b's resource is no longer borrowed by look, but is still immutably borrowed by wb",
             "c is passed to keepv by shared reference. keepv may read it; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use, and while wc, a clone of vc, is in use",
             "c's resource is no longer borrowed by look, but is still immutably borrowed by wc",
-            "t is passed to keepv by shared reference. keepv may read it; keepv's signature lets it store this reference in h.v, so t stays borrowed while h.v is in use, and while h2.v, a clone of h.v, is in use",
+            "t is passed to keepv by shared reference. keepv may read it; keepv's signature lets it store this reference in h.v, so t stays borrowed while h is in use, and while h2.v, a clone of h.v, is in use",
             "t's resource is no longer borrowed by look, but is still immutably borrowed by h2.v",
             "m is passed to keepv by shared reference. keepv may read it; keepv's signature lets it store this reference in vm, so m stays borrowed while vm is in use, and while wm, a clone of vm, is in use, and after the borrow moves on to xm, while xm is in use",
             "m's resource is no longer borrowed by look, but is still immutably borrowed by xm",
@@ -17731,7 +17735,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "=a is passed to keepv by shared reference. keepv may read it; keepv's signature lets it store this reference in va, so a stays borrowed while va is in use",
             "=b is passed to keepv by shared reference. keepv may read it; keepv's signature lets it store this reference in vb, so b stays borrowed while vb is in use",
             "=c is passed to keepv by shared reference. keepv may read it; keepv's signature lets it store this reference in vc, so c stays borrowed while vc is in use",
-            "=t is passed to keepv by shared reference. keepv may read it; keepv's signature lets it store this reference in h.v, so t stays borrowed while h.v is in use",
+            "so t stays borrowed while h.v is in use",
             "=m is passed to keepv by shared reference. keepv may read it; keepv's signature lets it store this reference in vm, so m stays borrowed while vm is in use",
             "=g is passed to keepd by shared reference. keepd may read it; keepd's signature lets it store this reference in d, so g stays borrowed while d is in use",
             // The original isn't used after the clone: it holds nothing.
@@ -28654,6 +28658,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
             "push stores a shared reference in refs (refs isn't a reference itself). While that reference is in use, the borrow checker keeps the mutable borrow of the `.0` of an element of b.0 live",
             "The shared reference in v stops keeping the mutable borrow of the `.0` of an element of a.0 live",
             "After extend, empty holds a value that can contain references (empty isn't a reference itself). The borrow checker keeps the shared borrow of the `.0` of an element of a.0 live while empty is in use",
+            "The borrow checker keeps the shared borrow of the `.0` of an element of a.0 live while empty is in use. While the borrow is live, you can't overwrite or move the `.0` of an element of a.0",
             "empty owns a value that can hold references (empty isn't a reference itself). The borrow checker tracks borrowed data from the `.0` of an element of a.0 through empty",
             "out immutably borrows the value inside an element of a. While the borrow is live, you can't overwrite or move the value inside an element of a",
             "Immutable borrow of the value inside an element of a stored in out by push. out isn't a reference itself. Its value holds the reference",
@@ -28677,7 +28682,7 @@ const EXPECTED_TOOLTIPS: &[TooltipExpect] = &[
         name: "known_bugs/call_slot_transfers_1898",
         must_contain: &[
             "Immutable borrow from q to dst.0: replace_slot's signature lets it store this reference in dst.0",
-            "If dst.0 holds a shared borrow affecting the reference slot q, that borrow ends here. It no longer restricts access to the reference slot q",
+            "dst.0's shared borrow of the reference slot q ends. This borrow no longer restricts access to the reference slot q.",
             "Immutable borrow from q to second: store_second's signature lets it store this reference in second",
             "If second holds a shared borrow affecting the reference slot q, that borrow ends here. It no longer restricts access to the reference slot q",
         ],
@@ -48684,6 +48689,257 @@ fn p4_closure_receiver_and_result_are_separate() {
     assert!(tips.iter().any(|tip| tip.contains("y is initialized with the value add_one() returns")));
     assert!(tips.iter().any(|tip| tip.contains("y receives the value add_one() returns")));
     assert!(!tips.iter().any(|tip| tip.contains("Copy of the value add_one() returns") || tip.contains("Copy from add_one to y")));
+}
+
+#[test]
+fn p4_call_receiver_constraint_does_not_imply_storage() {
+    let rv = run_with_local_backend("rv3_call_holders");
+    let body = fact_body(rv.facts().unwrap(), "receiver_constraint");
+    let calls = body["call_relationships"]["calls"].as_array().unwrap();
+    let inspect = calls.iter().find(|call| call["callee"].as_str().is_some_and(|name| name.ends_with("::inspect"))).unwrap();
+    assert_eq!(inspect["receiver"]["unchanged"], true);
+    assert!(inspect["stores"].is_null());
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    assert!(tips.iter().any(|tip| tip.contains("The signature of inspect can keep this loan active through bag.")));
+    assert!(tips.iter().any(|tip| tip.contains("bag holds a value that borrows from kept")));
+    for wrong in ["stored in bag by inspect", "Immutable borrow from inspected to bag",
+        "bag holds a value that borrows from inspected", "bag holds a value that immutably borrows inspected"] {
+        assert!(!forbidden_present(wrong, &tips), "{wrong}");
+    }
+}
+
+#[test]
+fn p4_call_variant_construction_identifies_its_operand() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_call_holders");
+    let body = fact_body(rv.facts().unwrap(), "construct");
+    let variant = &body["variant_constructions"][0];
+    let field = &variant["fields"][0];
+    // MIR constructs the Left variant with the tuple operand in field 0.
+    assert_eq!(variant["variant"], 0);
+    assert_eq!(field["place"]["projection"], json!([{"downcast": 0}, {"field": 0}]));
+    let loans = body["loans"].as_array().unwrap();
+    let stored = loans.iter().find(|loan| loan["lender"] == "stored").unwrap();
+    assert_eq!(field["loans"], json!([{"loan": stored["loan"], "issued": true, "conditional": false}]));
+}
+
+#[test]
+fn p4_call_returns_keep_constraints_and_effective_origins() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_call_holders");
+    let main = fact_body(rv.facts().unwrap(), "main");
+    let calls = main["call_relationships"]["calls"].as_array().unwrap();
+    let call = |name| calls.iter().find(|call| call["callee"] == name).unwrap();
+    let lenders = |ids: &serde_json::Value| {
+        ids.as_array().unwrap().iter().map(|id| {
+            main["loans"].as_array().unwrap().iter()
+                .find(|loan| loan["loan"] == *id).unwrap()["lender"].as_str().unwrap()
+        }).collect::<BTreeSet<_>>()
+    };
+    let first = call("first");
+    // The body returns a, but the signature makes both loans reach only.
+    assert_eq!(first["return_lender"]["name"], "alpha");
+    assert_eq!(lenders(&first["result"]["slots"][0]["loans"]), BTreeSet::from(["alpha", "beta"]));
+
+    let branch = call("choose");
+    let cases = branch["return_payloads"].as_array().unwrap();
+    assert_eq!(cases.len(), 2);
+    for (case, (variant, lender, index)) in cases.iter().zip([("Left", "alpha", 0), ("Right", "beta", 1)]) {
+        assert_eq!(case["variant"], variant);
+        assert_eq!(case["projection"], json!([{"variant": index}, {"field": 0}, {"field": 0}]));
+        assert_eq!(case["lender"]["name"], lender);
+        assert!(case["sources"].as_array().unwrap().contains(&json!({"kind": "absent"})));
+    }
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    assert!(tips.iter().any(|tip| tip.contains("The reference first returns points into alpha.")
+        && tip.contains("At the caller, both stay borrowed while only is in use")));
+    assert!(tips.iter().any(|tip| tip.contains("If choose returns Left, its result contains a reference into alpha.")
+        && tip.contains("If choose returns Right, its result contains a reference into beta.")
+        && tip.contains("both stay borrowed while branch is in use")));
+    assert!(tips.iter().any(|tip| tip.contains("The borrow checker tracks a shared borrow of beta through only")));
+    for wrong in ["branch isn't a reference, but its value holds one",
+        "branch holds a value that borrows from alpha and beta",
+        "branch holds a value that immutably borrows alpha",
+        "branch holds a value that immutably borrows beta",
+        "beta's resource is immutably borrowed by only"] {
+        assert!(!forbidden_present(wrong, &tips), "{wrong}");
+    }
+
+    // fixed() returns None and receives no arguments. A different arm's
+    // loan can reach the join but cannot come from this call.
+    let fixed = run_with_local_backend("known_bugs/1662_arm_loan_kinds").timeline_panel_string();
+    let tips = timeline_tooltips(&fixed);
+    assert!(tips.iter().any(|tip| tip == "v receives the value fixed() returns"));
+    assert!(!tips.iter().any(|tip| tip.contains("borrow from s to v: fixed's signature")));
+}
+
+#[test]
+fn p4_call_projected_store_distinguishes_slot_from_whole_holder() {
+    let svg = run_with_local_backend("rv3_call_holders").timeline_panel_string();
+    // Rust rejects c.clear() after reading slots.first and before reading slots.second.
+    check_review_tip(&svg, "c@L43:dot:static_lend+pass_by_static_reference",
+        &["lets it store this reference in slots.first", "c stays borrowed while slots is in use",
+          "Use of another field of slots can keep this borrow live"],
+        &["c stays borrowed while slots.first is in use"]);
+}
+
+#[test]
+fn p4_call_projected_store_end_names_the_replacement() {
+    let svg = run_with_local_backend("rv3_call_holders").timeline_panel_string();
+    // repoint_field assigns replacement to first; the fixture checks pointer identity.
+    check_review_tip(&svg, "slots.first@L45:dot:static_die",
+        &["slots.first's shared borrow of c ends. This borrow no longer restricts access to c.",
+          "The borrow checker stops tracking the borrows of c and a through slots.first"],
+        &["The reference in slots.first no longer keeps its possible lenders borrowed"]);
+}
+
+#[test]
+fn p4_call_write_to_unrelated_field_does_not_prove_receiver_storage() {
+    let svg = run_with_local_backend("rv3_call_holder_review").timeline_panel_string();
+    // MIR writes the flag, and the Rust fixture checks that bag still points to kept.
+    check_review_tip(&svg, "bag@L16:dot:mutable_lend+mutable_reacquire+static_borrow+pass_by_mutable_reference",
+        &["The signature of inspect can keep this loan active through bag", "bag isn't a reference itself"],
+        &["bag holds a value that immutably borrows inspected"]);
+    let tips = timeline_tooltips(&svg);
+    for wrong in ["stored in bag by inspect", "bag holds a value that borrows from inspected"] {
+        assert!(!forbidden_present(wrong, &tips), "{wrong}");
+    }
+
+    // A real receiver write still gets storage wording. The Save impl
+    // forwards the one-element array to Vec::extend and appends extra.
+    let saved = run_with_local_backend("known_bugs/1689_kept_field_loans").timeline_panel_string();
+    let tips = timeline_tooltips(&saved);
+    assert!(tips.iter().any(|tip| tip.contains("Immutable borrow from p.0 to dst, stored in dst by save")));
+    assert!(tips.iter().any(|tip| tip.contains("save stores a shared reference in dst")));
+}
+
+#[test]
+fn p4_call_enum_reference_presence_is_independent_of_lender_identity() {
+    let svg = run_with_local_backend("rv3_call_holder_review").timeline_panel_string();
+    // maybe can return Empty. Each variant of Always has one reference field.
+    check_review_tip(&svg, "perhaps@L51:dot:static_borrow",
+        &["perhaps's value can hold a reference", "both stay borrowed while perhaps is in use"],
+        &["its value holds one", "holds a value that immutably borrows"]);
+    check_review_tip(&svg, "definitely@L52:dot:static_borrow",
+        &["definitely isn't a reference, but its value holds one", "If always returns Right, its result contains a reference into b"],
+        &["definitely's value can hold a reference", "holds a value that immutably borrows"]);
+}
+
+#[test]
+fn p4_call_enum_payload_does_not_inherit_every_operand() {
+    let svg = run_with_local_backend("rv3_issues/1797_aggregate_arg").timeline_panel_string();
+    // pick only inspects xs[0] and either returns it or constructs None.
+    let tips = timeline_tooltips(&svg);
+    assert!(tips.iter().any(|tip| tip.contains("pick's signature gives the value it returns the same lifetime as its argument")
+        && tip.contains("both stay borrowed while r is in use")));
+    assert!(!forbidden_present("r holds the borrows its argument holds: a and b", &tips));
+}
+
+#[test]
+fn p4_call_variant_condition_describes_the_result_of_the_call() {
+    let svg = run_with_local_backend("rv3_call_holder_review").timeline_panel_string();
+    // MIR extracts and copies the reference payload on the Some edge.
+    check_review_tip(&svg, "x@L55:dot:copy+static_borrow",
+        &["If pick returns Some, its result contains a reference into a", "x is a reference copied out of the value pick returned"],
+        &["If x is Some", "x is immutably borrowed by b"]);
+}
+
+fn review_call<'a>(facts: &'a serde_json::Value, body: &str, callee: &str) -> &'a serde_json::Value {
+    fact_body(facts, body)["call_relationships"]["calls"].as_array().unwrap()
+        .iter().find(|call| call["callee"] == callee).unwrap()
+}
+
+#[test]
+fn p4_call_swap_lender_requires_a_reaching_definition() {
+    let rv = run_with_local_backend("rv3_call_holder_review");
+    for (body, wrong) in [("aggregate_write", "alpha"), ("destructor_write", "alpha"), ("index_write", "gamma")] {
+        // Runtime probes cover both tuple/array cases and the guard's normal Drop edge.
+        let stores = review_call(rv.facts().unwrap(), body, "std::mem::swap")["stores"].as_array().unwrap();
+        let from_left = stores.iter().find(|store| store["destination"]["name"] == "right").unwrap();
+        assert_eq!(from_left["source"]["name"], "left");
+        let stale = fact_body(rv.facts().unwrap(), body)["loans"].as_array().unwrap()
+            .iter().find(|loan| loan["loan"] == from_left["effective_loan"]);
+        assert!(stale.is_none(), "{body} cannot prove a lender, especially {wrong}: {stale:?}");
+    }
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    for wrong in ["alpha", "gamma"] {
+        assert!(!forbidden_present(&format!("puts the reference from left, which points into {wrong}"), &tips));
+    }
+    assert!(tips.iter().any(|tip| tip.contains("std::mem::swap puts the reference from left in right.")));
+    assert!(tips.iter().any(|tip| tip.contains("std::mem::swap puts the reference from right, which points into beta, in left.")));
+    // The call's sentence and the swap sentence are separate sentences.
+    assert!(tips.iter().any(|tip| tip.contains("may read or write it. std::mem::swap puts the reference from left")));
+    assert!(!forbidden_present("may read or write it std::mem::swap puts", &tips));
+    assert!(!forbidden_present("returns) std::mem::swap puts", &tips));
+}
+
+#[test]
+fn p4_call_swap_source_uses_the_pattern_binding() {
+    let rv = run_with_local_backend("rv3_call_holder_review");
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    // The &mut binding aliases the Some payload; the fixture checks the swap.
+    assert!(!forbidden_present("puts the reference from (e as Some).0", &tips));
+    assert!(tips.iter().any(|tip| tip.contains("puts the reference from *payload in other.")));
+}
+
+#[test]
+fn p4_call_result_survives_sibling_call() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_call_holder_review");
+    let first = review_call(rv.facts().unwrap(), "sibling_call", "first");
+    let tag = review_call(rv.facts().unwrap(), "sibling_call", "tag");
+    // MIR saves first's result, calls tag, and then builds the tuple.
+    assert_eq!(first["result"]["destination"]["projection"], json!([{"field": 0}]));
+    assert_eq!(first["result"]["destination"]["name"], "pair.0");
+    assert_eq!(first["result"]["arrival"], tag["result"]["arrival"]);
+}
+
+#[test]
+fn p4_call_returned_closure_keeps_unique_immutable_capture() {
+    let svg = run_with_local_backend("rv3_call_holder_review").timeline_panel_string();
+    // rustc captures x by unique immutable borrow: the closure takes &x
+    // and also writes through the mutable reference in x.
+    check_review_tip(&svg, "x@L150:dot:mutable_lend",
+        &["g captures x by unique immutable borrow", "The closure can write through x",
+          "other code cannot use x while the capture is live", "keep returned this closure"],
+        &["Immutable borrow from x to g"]);
+    assert!(!forbidden_present("Immutable borrow from x to g", &timeline_tooltips(&svg)));
+    // The binding's list of captures must not call the unique capture a plain shared one.
+    let tips = timeline_tooltips(&svg);
+    assert!(tips.iter().any(|tip| tip.contains("g is bound to the closure keep returned, which borrows: value (mutably), x (uniquely)")), "{tips:?}");
+    assert!(!forbidden_present("x (immutably)", &tips));
+}
+
+#[test]
+fn p4_call_repoint_and_swap_use_reaching_reference_slots() {
+    use serde_json::json;
+    let rv = run_with_local_backend("rv3_call_holders");
+    let facts = rv.facts().unwrap();
+    let main = fact_body(facts, "main");
+    let calls = main["call_relationships"]["calls"].as_array().unwrap();
+    let call = |name| calls.iter().find(|call| call["callee"] == name).unwrap();
+    let effective = |store: &serde_json::Value| {
+        main["loans"].as_array().unwrap().iter()
+            .find(|loan| loan["loan"] == store["effective_loan"]).and_then(|loan| loan["lender"].as_str())
+    };
+    assert_eq!(effective(&call("repoint")["stores"][0]), Some("gamma"));
+    let swapped = call("std::mem::swap")["stores"].as_array().unwrap();
+    assert_eq!(swapped.len(), 2);
+    for (from, to, lender) in [("left", "right", "gamma"), ("right", "left", "beta")] {
+        let store = swapped.iter().find(|store| store["destination"]["name"] == to).unwrap();
+        assert_eq!(store["source"]["name"], from);
+        assert_eq!(effective(store), Some(lender));
+    }
+    let projected = fact_body(facts, "projected_store")["call_relationships"]["calls"].as_array().unwrap()
+        .iter().find(|call| call["callee"] == "repoint_field").unwrap();
+    let stores = projected["stores"].as_array().unwrap();
+    assert_eq!(stores.len(), 1);
+    assert_eq!(stores[0]["destination"]["name"], "slots.first");
+    assert_eq!(stores[0]["destination"]["projection"], json!([{"field": 0}]));
+    let tips = timeline_tooltips(&rv.timeline_panel_string());
+    assert!(tips.iter().any(|tip| tip.contains("std::mem::swap puts the reference from left, which points into gamma, in right.")));
+    assert!(!tips.iter().any(|tip| tip.contains("std::mem::swap puts the reference from left, which points into alpha")));
+    assert!(!tips.iter().any(|tip| tip.contains("std::mem::swap puts the reference from first_holder")));
 }
 
 #[test]

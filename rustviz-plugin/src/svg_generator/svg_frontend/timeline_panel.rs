@@ -3300,7 +3300,25 @@ fn render_dot(
             }
         }
         if let Some(title) = visualization_data.row_layout.aggregate_titles.get(&event.get_id()) {
-            data.title.clone_from(title);
+            let carrier_lend = matches!(event, Event::StaticLend { .. } | Event::MutableLend { .. })
+                && matches!(stored, Some(crate::event_order::StoredLoan::Carrier { .. }));
+            // The projected lender dot already explains the exact access
+            // restriction on this part. Keep that clause.
+            if !carrier_lend || projected.is_none() {
+                data.title.clone_from(title);
+                if carrier_lend {
+                    match stored {
+                        Some(crate::event_order::StoredLoan::Carrier { mutable: true, .. }) =>
+                            data.title.push_str(". Other access to the borrowed place is restricted while this mutable borrow is live."),
+                        _ => data.title.push_str(". While this shared borrow is live, you can't overwrite or move the borrowed place."),
+                    }
+                }
+            }
+        }
+        if let Event::StaticDie { id, .. } | Event::MutableDie { id, .. } = event {
+            if let Some(title) = layout.call_slot_ends.get(id) {
+                data.title.clone_from(title);
+            }
         }
         if visualization_data.row_layout.collection_reborrow_ends.contains(&event.get_id()) {
             if let Event::MutableReacquire { from, .. } = event {
@@ -3348,7 +3366,7 @@ fn render_dot(
                 data.title.clone_from(title);
             }
         }
-        if layout.unique_closure_captures.contains(&event.get_id()) {
+        if layout.unique_closure_captures.contains(&event.get_id()) && !layout.aggregate_titles.contains_key(&event.get_id()) {
             if let Event::MutableLend { is, to, .. } = event {
                 data.title = hover_messages::unique_closure_capture(is, to);
             }
@@ -3553,7 +3571,11 @@ fn field_lenders_dot_title(event: &Event, name: &String, vd: &VisualizationData)
         }
     }
     Some(if end {
-        hover_messages::event_dot_field_lenders_end(name, &f.lenders)
+        if f.constraint_end {
+            hover_messages::field_constraint_end(name, &f.lenders)
+        } else {
+            hover_messages::event_dot_field_lenders_end(name, &f.lenders)
+        }
     } else {
         hover_messages::event_dot_field_lenders_borrow(name, &f.lenders, mutable)
     })
@@ -7814,7 +7836,7 @@ fn render_generic_arrow(
     if let Some(end) = layout.joined_end_titles.get(&id).map(|(title, _)| title)
         .or_else(|| layout.fork_arrow_titles.get(&id)) {
         title.clone_from(end);
-    } else if let Some(operand) = layout.aggregate_titles.get(&id) {
+    } else if let Some(operand) = layout.aggregate_titles.get(&id).or_else(|| layout.call_slot_ends.get(&id)) {
         title.clone_from(operand);
     } else if let Some(&detail) = layout.stored_loans.get(&id) {
         match external_event {
@@ -7841,7 +7863,7 @@ fn render_generic_arrow(
             _ => {}
         }
     }
-    if layout.unique_closure_captures.contains(&id) {
+    if layout.unique_closure_captures.contains(&id) && !layout.aggregate_titles.contains_key(&id) {
         title = hover_messages::unique_closure_capture(from, to);
     }
     if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::VecElement { id, nested: true, .. } if *id == external_event.get_id())) {
@@ -7994,6 +8016,12 @@ fn render_generic_arrow(
             } else {
                 hover_messages::arrow_call_title(external_event, function, from_variable)
             };
+            if let Some(note) = layout.call_store_notes.get(&id) {
+                // The call's own text may end mid-sentence or at a parenthesis.
+                if !title.ends_with('.') { title.push('.'); }
+                title.push(' ');
+                title.push_str(note);
+            }
             if let Some(checked) = unreachable {
                 title = unreachable_title(checked, &title);
             }
@@ -9038,7 +9066,7 @@ pub fn field_lender_groups(vd: &VisualizationData) -> HashMap<usize, FieldLender
 
 /// Per field column: the lenders it may point into here, with the row
 /// each lent on, in source order.
-type FieldPending = BTreeMap<u64, Vec<(String, usize, Option<crate::event_order::FieldGeneration>)>>;
+type FieldPending = BTreeMap<u64, Vec<(String, usize, Option<crate::event_order::FieldGeneration>, bool)>>;
 type FieldGroup = (u64, usize, bool, Option<crate::event_order::FieldGeneration>);
 
 fn field_lender_walk(
@@ -9050,7 +9078,7 @@ fn field_lender_walk(
     // (field, row, mutable) -> (id, lender, place in the call's arguments)
     let mut borrows: Vec<(FieldGroup, Vec<(usize, String, usize)>)> = Vec::new();
     // (field, row, mutable) -> (lenders before the row, [(id, lender)])
-    let mut ends: Vec<(FieldGroup, Vec<String>, Vec<(usize, String)>)> = Vec::new();
+    let mut ends: Vec<(FieldGroup, Vec<String>, Vec<(usize, String)>, bool)> = Vec::new();
     for (row, ev) in events {
         match ev {
             ExternalEvent::Branch { branches, .. } => {
@@ -9069,16 +9097,16 @@ fn field_lender_walk(
                     any = true;
                     for (field, list) in p {
                         let m = merged.entry(field).or_default();
-                        for (n, r, store) in list {
+                        for (n, r, store, proved) in list {
                             if !m.iter().any(|(x, ..)| *x == n) {
-                                m.push((n, r, store));
+                                m.push((n, r, store, proved));
                             }
                         }
                     }
                 }
                 if any {
                     for list in merged.values_mut() {
-                        list.sort_by_key(|(_, r, _)| *r);
+                        list.sort_by_key(|(_, r, ..)| *r);
                     }
                     *pending = merged;
                 }
@@ -9091,12 +9119,12 @@ fn field_lender_walk(
                 // A new assignment replaces what it pointed into (the
                 // other lenders of its own row are alternatives).
                 let generation = layout.field_generations.get(id).copied();
-                list.retain(|(_, r, prior)| r == row && *prior == generation);
+                list.retain(|(_, r, prior, _)| r == row && *prior == generation);
                 // A reborrow through a reference (`M(r)`, `r: &mut String`)
                 // points into what that reference borrows: the field's end
                 // names those, not the reference (#1482).
                 if !lender.is_ref() && !list.iter().any(|(n, ..)| *n == name) {
-                    list.push((name.clone(), *row, generation));
+                    list.push((name.clone(), *row, generation, layout.proved_field_stores.contains(id)));
                 }
                 let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableBorrow { .. }), generation);
                 let order = via.as_ref().and_then(|v| v.lenders.iter().position(|l| l == lender.name())).unwrap_or(usize::MAX);
@@ -9109,7 +9137,7 @@ fn field_lender_walk(
             // `hold.r = tr;`) replaces what it pointed into too.
             ExternalEvent::Move { to, .. } | ExternalEvent::Copy { to, .. } => {
                 if let Some(list) = ref_field(to).and_then(|f| pending.get_mut(f.hash())) {
-                    list.retain(|(_, r, _)| r == row);
+                    list.retain(|(_, r, ..)| r == row);
                 }
             }
             ExternalEvent::StaticDie { from, to, id, .. } | ExternalEvent::MutableDie { from, to, id, .. } => {
@@ -9120,16 +9148,18 @@ fn field_lender_walk(
                 }
                 if layout.stored_field_ends.contains(id) { continue; }
                 let key = (*field.hash(), *row, matches!(ev, ExternalEvent::MutableDie { .. }), layout.field_generations.get(id).copied());
-                let before: Vec<String> = pending.get(field.hash()).into_iter().flatten()
-                    .filter(|(_, r, _)| r != row && key.3.is_none()).map(|(n, ..)| n.clone()).collect();
+                let incoming = pending.get(field.hash()).into_iter().flatten();
+                let constraint_end = incoming.clone().any(|(_, _, _, proved)| *proved);
+                let before: Vec<String> = incoming
+                    .filter(|(_, r, ..)| r != row && key.3.is_none()).map(|(n, ..)| n.clone()).collect();
                 match ends.iter_mut().find(|(k, ..)| *k == key) {
-                    Some((_, _, g)) => g.push((*id, to.name())),
-                    None => ends.push((key, before, vec![(*id, to.name())])),
+                    Some((_, _, g, _)) => g.push((*id, to.name())),
+                    None => ends.push((key, before, vec![(*id, to.name())], constraint_end)),
                 }
                 // What it borrowed before this row is given back here;
                 // what it borrows on this row is a new loan, still held.
                 if let Some(list) = pending.get_mut(field.hash()) {
-                    list.retain(|(_, r, _)| r == row);
+                    list.retain(|(_, r, ..)| r == row);
                 }
             }
             _ => {}
@@ -9149,10 +9179,10 @@ fn field_lender_walk(
             continue;
         }
         for (k, (id, _, _)) in g.iter().enumerate() {
-            out.insert(*id, FieldLenders { lenders: lenders.clone(), drawn: k == 0, end: false });
+            out.insert(*id, FieldLenders { lenders: lenders.clone(), drawn: k == 0, end: false, constraint_end: false });
         }
     }
-    for (_, before, g) in ends {
+    for (_, before, g, constraint_end) in ends {
         let mut lenders = before;
         for (_, n) in &g {
             if !lenders.contains(n) {
@@ -9166,7 +9196,7 @@ fn field_lender_walk(
             .min_by_key(|(_, (_, n))| lenders.iter().position(|l| l == n).unwrap_or(usize::MAX))
             .map(|(k, _)| k).unwrap_or(0);
         for (k, (id, _)) in g.iter().enumerate() {
-            out.insert(*id, FieldLenders { lenders: lenders.clone(), drawn: k == first, end: true });
+            out.insert(*id, FieldLenders { lenders: lenders.clone(), drawn: k == first, end: true, constraint_end });
         }
     }
 }
@@ -12477,7 +12507,27 @@ fn owner_value_title(rap: &ResourceAccessPoint, vd: &VisualizationData, fn_line:
             title.push_str(&hover_messages::state_holder_tracks(name, &from));
             return title;
         }
+        let constraints: BTreeSet<_> = vd.row_layout.holder_constraint_loans
+            .range((*rap.hash(), 0)..=(*rap.hash(), usize::MAX))
+            .filter(|(_, id)| cell.holds.is_empty() || cell.holds.contains(id))
+            .map(|&(_, id)| id)
+            .filter(|id| cell.borrowed_from.contains(id))
+            .collect();
+        if !constraints.is_empty() {
+            let actual = display_loan_sources(vd, fn_line, name, &cell.borrowed_from.difference(&constraints).copied().collect());
+            let mut title = if actual.is_empty() && vd.row_layout.enum_reference_holders.get(rap.hash()) == Some(&true) {
+                hover_messages::state_holder_full_privilege(name)
+            } else if actual.is_empty() {
+                hover_messages::state_holder_starts_empty(name)
+            } else {
+                hover_messages::state_holder_borrows_from(name, &actual)
+            };
+            title.push_str(&hover_messages::state_holder_tracks(name, &display_loan_sources(vd, fn_line, name, &constraints)));
+            return title;
+        }
         return hover_messages::state_holder_borrows_from(name, &from);
+    } else if vd.row_layout.enum_reference_holders.get(rap.hash()) == Some(&false) {
+        return hover_messages::state_holder_starts_empty(name);
     }
     timeline_segment_title(&State::FullPrivilege { s: LineState::Full }, rap, vd, row)
 }

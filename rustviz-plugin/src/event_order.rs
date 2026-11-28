@@ -1679,11 +1679,18 @@ pub struct RowLayout {
     pub(crate) returned_call_titles: BTreeMap<usize, String>,
     /// Projected moves into `?` whose residual edge drops the remaining Box.
     pub(crate) try_box_drops: BTreeSet<usize>,
+    pub(crate) call_store_notes: BTreeMap<usize, String>,
     pub(crate) argument_results: BTreeSet<usize>,
     pub(crate) transfer_stack: BTreeSet<usize>,
     transfer_order: BTreeSet<(usize, usize)>,
     pub(crate) closure_result_holders: BTreeSet<u64>,
     pub(crate) stored_lender_loans: BTreeMap<u64, BTreeSet<usize>>,
+    /// Borrowck follows these loans through a holder without a proven
+    /// reference to their lender in the holder's runtime value.
+    pub(crate) holder_constraint_loans: BTreeSet<(u64, usize)>,
+    pub(crate) enum_reference_holders: BTreeMap<u64, bool>,
+    pub(crate) proved_field_stores: BTreeSet<usize>,
+    pub(crate) call_slot_ends: BTreeMap<usize, String>,
     pub(crate) stored_loans: BTreeMap<usize, StoredLoan>,
     /// Borrow events drawn on an ancestor column, with the actual MIR loan and place.
     pub(crate) projected_loan_places: BTreeMap<usize, (usize, crate::facts::ProjectedPlace)>,
@@ -1792,11 +1799,16 @@ impl RowLayout {
         self.shadowed_borrow_lenders.append(&mut other.shadowed_borrow_lenders);
         self.returned_call_titles.append(&mut other.returned_call_titles);
         self.try_box_drops.append(&mut other.try_box_drops);
+        self.call_store_notes.append(&mut other.call_store_notes);
         self.argument_results.append(&mut other.argument_results);
         self.transfer_stack.append(&mut other.transfer_stack);
         self.transfer_order.append(&mut other.transfer_order);
         self.closure_result_holders.append(&mut other.closure_result_holders);
         self.stored_lender_loans.append(&mut other.stored_lender_loans);
+        self.holder_constraint_loans.append(&mut other.holder_constraint_loans);
+        self.enum_reference_holders.append(&mut other.enum_reference_holders);
+        self.proved_field_stores.append(&mut other.proved_field_stores);
+        self.call_slot_ends.append(&mut other.call_slot_ends);
         self.restored.append(&mut other.restored);
         self.stored_loans.append(&mut other.stored_loans);
         self.projected_loan_places.append(&mut other.projected_loan_places);

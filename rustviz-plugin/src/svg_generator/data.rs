@@ -1517,7 +1517,14 @@ pub enum ImplicitRef {
 /// (`let w: Vec<&String> = hold.iter().copied().collect();`, #1015),
 /// each with the holder it was made from.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StoredIn(pub Option<String>, pub Vec<String>, pub Vec<String>, pub bool, pub Vec<String>, pub bool, pub Vec<(String, String)>);
+pub struct StoredIn(pub Option<StoreDestination>, pub Vec<String>, pub Vec<String>, pub bool, pub Vec<String>, pub bool, pub Vec<(String, String)>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreDestination {
+    pub slot: String,
+    pub holder: String,
+    pub sibling_use: bool,
+}
 
 impl StoredIn {
     /// Takes the later holders (all but the place) from `other`.
@@ -1642,6 +1649,12 @@ pub struct ArgTie {
     pub reference_source: Option<(String, Option<&'static str>, bool)>,
     /// Body return assignments directly derive from each tied reference parameter.
     pub returns_alternatives: bool,
+    /// An input the callee's body always returns and its known caller place.
+    pub proven_lender: Option<String>,
+    /// Return-variant payloads with a single proven lender in each case.
+    pub variant_lenders: Vec<(String, String)>,
+    /// Whether an enum result is known to contain a reference on every return.
+    pub enum_holds_reference: Option<bool>,
     /// The resolved callee constructs a variant with the argument in it.
     pub constructs_variant: bool,
 }
@@ -4903,6 +4916,8 @@ pub struct FieldLenders {
     pub drawn: bool,
     /// The group is the field's borrow ending, not starting.
     pub end: bool,
+    /// A proved store replaced the earlier referent before these loans ended.
+    pub constraint_end: bool,
 }
 
 // VisualizationData supplies all the information we need in the frontend,
