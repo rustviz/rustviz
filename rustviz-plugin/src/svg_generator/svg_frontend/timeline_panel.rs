@@ -321,7 +321,11 @@ fn merged_dot_title(lines: &[(Option<usize>, String)]) -> String {
     // its previous resource is dropped": the plain "acquires ownership of
     // a resource" next to it adds nothing (#506, #519).
     let all = texts.clone();
-    texts.retain(|t| !all.iter().any(|r| hover_messages::reassign_subsumes_acquire(r, t)));
+    texts.retain(|t| !all.iter().any(|r| {
+        let (reassign_path, reassign) = tooltip_path(r);
+        let (acquire_path, acquire) = tooltip_path(t);
+        reassign_path == acquire_path && hover_messages::reassign_subsumes_acquire(reassign, acquire)
+    }));
     // The same for a value one of several `break`s carried (#586).
     let mut texts: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
     if let Some((i, j, merged)) = (0..texts.len()).find_map(|i| (0..texts.len())
@@ -1908,6 +1912,57 @@ fn render_branch_dots(
         return;
 }
 
+fn unreachable_path(checked: bool) -> &'static str {
+    if checked {
+        "This path never runs. Rust's borrow checker still checks it."
+    } else {
+        "This code never runs."
+    }
+}
+
+const CHECKED_PATH_TOOLTIP: &str = "This path never runs. Rust's borrow checker still checks it. The following describes the checked path only.&lt;br&gt;";
+const UNREACHED_CODE_TOOLTIP: &str = "This code never runs. If execution reached it, the following would apply. ";
+const LET_ELSE_SUCCESS_TOOLTIP: &str = "The following applies only if the pattern matches. ";
+
+fn tooltip_path(title: &str) -> ((Option<bool>, bool), &str) {
+    let (unreachable, title) = if let Some(rest) = title.strip_prefix(CHECKED_PATH_TOOLTIP) {
+        (Some(true), rest)
+    } else if let Some(rest) = title.strip_prefix(UNREACHED_CODE_TOOLTIP) {
+        (Some(false), rest)
+    } else {
+        (None, title)
+    };
+    let matched = title.strip_prefix(LET_ELSE_SUCCESS_TOOLTIP);
+    ((unreachable, matched.is_some()), matched.unwrap_or(title))
+}
+
+fn unreachable_title(checked: bool, title: &str) -> String {
+    let prefix = if checked { CHECKED_PATH_TOOLTIP } else { UNREACHED_CODE_TOOLTIP };
+    format!("{prefix}{title}")
+}
+
+fn unreachable_binding(vd: &VisualizationData, rap: &ResourceAccessPoint) -> Option<bool> {
+    let local = rap.scope_local()?;
+    vd.row_layout.unreachable_bindings.get(&(*rap.hash(), local)).copied()
+}
+
+fn let_else_effect_id(event: &Event) -> usize {
+    match event {
+        Event::OrAltBorrow { id, .. } | Event::RefDie { id, .. } => *id,
+        _ => event.get_id(),
+    }
+}
+
+fn let_else_segment(vd: &VisualizationData, rap: &ResourceAccessPoint, history: &[(usize, Event)], start: usize, end: usize) -> bool {
+    let layout = &vd.row_layout;
+    let Some(statement) = layout.let_else_span(rap) else { return false };
+    // A short-lived binding can have a state between its initialization and
+    // its same-statement release. A line extending into later code describes
+    // the state once the binding is already in scope.
+    [start, end].into_iter().all(|row| history.iter().any(|(at, event)|
+        *at == row && layout.let_else_success_events.get(&let_else_effect_id(event)) == Some(&statement)))
+}
+
 /// The dot for `Event::OwnerGoOutOfScope`: a variable's scope end, with the
 /// drop triangle when its resource is dropped there. Return the tooltip
 /// and whether that occurrence runs drop glue.
@@ -2449,6 +2504,23 @@ fn render_dot(
             title: hover_messages::event_dot_unknown_owner()
         };
         if let Some(mut name) = visualization_data.get_name_from_hash(hash) {
+            let dead_scope = visualization_data.row_layout.unreachable_scope_ends.get(&event.get_id()).copied()
+                .or_else(|| (matches!(event, Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope { .. })
+                    && visualization_data.row_layout.unreachable_events.contains(&event.get_id())).then_some(true));
+            if let Some(checked) = dead_scope {
+                let rap = &visualization_data.timelines[hash].resource_access_point;
+                let scope = if rap.is_member() {
+                    let root = visualization_data.get_name_from_hash(&rap.get_owner());
+                    root.map_or_else(|| format!("The local binding's lexical scope ends here, so {} is no longer accessible.", styled_name_html(&name)),
+                        |root| format!("{}'s lexical scope ends here, so {} is no longer accessible through {}.",
+                            styled_name_html(&root), styled_name_html(&name), styled_name_html(&root)))
+                } else {
+                    format!("{}'s lexical scope ends here.", styled_name_html(&name))
+                };
+                data.title = format!("{scope} {}", unreachable_path(checked));
+                append_dot(data, timeline_data, dots, None, rv_attrs::event_name(event), *line_number);
+                continue;
+            }
             if matches!(event, Event::OwnerGoOutOfScope { .. } | Event::RefGoOutOfScope { .. })
                 && visualization_data.row_layout.terminal_calls.contains(&event.get_id()) {
                 data.title = format!("The timeline for {} ends here because this call never returns.", hover_messages::styled_name_html(&name));
@@ -3209,13 +3281,6 @@ fn render_dot(
                     styled_name_html(input)));
             }
         }
-        if let Some(state) = one_dot_holder_state(history, i, rap, &visualization_data.row_layout) {
-            let tip = timeline_segment_title(&state, rap, visualization_data, None);
-            let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
-            if !stacked || !dot.lines.iter().any(|(_, line)| *line == tip) {
-                dot.lines.push((None, tip));
-            }
-        }
         // push to individual timelines
         let lend_id = match event {
             Event::StaticLend { id, .. } | Event::MutableLend { id, .. } => Some(*id),
@@ -3241,6 +3306,36 @@ fn render_dot(
                 data.title.push_str(&hover_messages::event_dot_box_remainder_drop_if_try_returns(rap.name()));
             }
         }
+        // A dot describing both sides of a transfer uses the same path
+        // as its arrow, including on the lender's own column.
+        let unr = match event {
+            Event::StaticLend { to, .. } | Event::MutableLend { to, .. } => to.extract_rap(),
+            Event::StaticReacquire { from, .. } | Event::MutableReacquire { from, .. } => from.extract_rap(),
+            _ => None,
+        };
+        let involved = || std::iter::once(rap).chain(unr);
+        let matched = layout.let_else_success_events.get(&let_else_effect_id(event)).is_some_and(|&statement|
+            involved().any(|r| layout.let_else_span(r) == Some(statement)));
+        let unreachable = involved()
+            .find_map(|r| unreachable_binding(visualization_data, r))
+            .or_else(|| (visualization_data.row_layout.unreachable_events.contains(&event.get_id())
+                || matches!(event, Event::OwnerDropAtReassign { skipped: true, .. })).then_some(true));
+        let qualify = |title: String| {
+            if title.is_empty() { return title; }
+            let title = if matched { format!("{LET_ELSE_SUCCESS_TOOLTIP}{title}") } else { title };
+            match unreachable {
+                Some(checked) => unreachable_title(checked, &title),
+                None => title,
+            }
+        };
+        if let Some(state) = one_dot_holder_state(history, i, rap, &visualization_data.row_layout) {
+            let tip = qualify(timeline_segment_title(&state, rap, visualization_data, None));
+            let dot = dots.entry(*hash, timeline_data.x_val, event_y, *line_number, timeline_data);
+            if !stacked || !dot.lines.iter().any(|(_, line)| *line == tip) {
+                dot.lines.push((None, tip));
+            }
+        }
+        data.title = qualify(data.title);
         append_dot(data, timeline_data, dots, lend_id, event_kind, *line_number);
         if (stacked || layout.field_generations.contains_key(&event.get_id()))
             && matches!(event, Event::StaticBorrow { .. }) && rap.is_ref() && !rap.is_mutref() {
@@ -7584,6 +7679,16 @@ fn render_generic_arrow(
     if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedTransfer { id, .. } if *id == external_event.get_id())) {
         title = format!("{} {}", hover_messages::UNREACHED_TRANSFER, title);
     }
+    let involved = || [from.extract_rap(), to.extract_rap()].into_iter().flatten();
+    if layout.let_else_success_events.contains_key(&id) {
+        title = format!("{LET_ELSE_SUCCESS_TOOLTIP}{title}");
+    }
+    let unreachable = involved()
+        .find_map(|rap| unreachable_binding(visualization_data, rap))
+        .or_else(|| layout.unreachable_events.contains(&id).then_some(true));
+    if let Some(checked) = unreachable {
+        title = unreachable_title(checked, &title);
+    }
 
     // order of points is to -> from
     let mut data = ArrowData {
@@ -7702,7 +7807,7 @@ fn render_generic_arrow(
             // get position of to_variable
             let from_timeline = fetch_timeline(from_variable.hash(), visualization_data, resource_owners_layout, external_event.get_id());
 
-            let title = if visualization_data.row_layout.reassigned_receivers.contains(&external_event.get_id()) {
+            let mut title = if visualization_data.row_layout.reassigned_receivers.contains(&external_event.get_id()) {
                 format!("{} may read or write through the receiver reserved before {} was reassigned", styled_name_html(&function.name), styled_name_html(&from_variable.name()))
             } else if let Some((_, place)) = visualization_data.row_layout.projected_loan_places.get(&external_event.get_id()) {
                 let shared = visualization_data.row_layout.shared_projected_calls.contains(&external_event.get_id());
@@ -7715,6 +7820,9 @@ fn render_generic_arrow(
             } else {
                 hover_messages::arrow_call_title(external_event, function, from_variable)
             };
+            if let Some(checked) = unreachable {
+                title = unreachable_title(checked, &title);
+            }
             if dots.lanes.recording || dots.lanes.probing {
                 return;
             }
@@ -10051,6 +10159,10 @@ fn render_branches(
         let arm_sources: Vec<_> = branch_history.iter().map(|b| b.source).collect();
         for (i, branch) in branch_history.iter().enumerate() {
             let branch_x = branch.t_data.x_val as f64;
+            let unreachable = unreachable_binding(visualization_data, rap).or_else(|| {
+                (branch.imaginary.is_none() && visualization_data.row_layout.unreachable_arms.contains(&(*id, i)))
+                    .then_some(true)
+            });
             // The arms this one is nested in, and this one, by their
             // conditional's split line (`lent_out_title`).
             let arm_path = [path, &[(*split_point, i)]].concat();
@@ -10690,6 +10802,11 @@ fn render_branches(
                     seg.title = title.clone();
                 }
             }
+            if let Some(checked) = unreachable {
+                for seg in &mut segs {
+                    seg.title = unreachable_title(checked, &seg.title);
+                }
+            }
             let runs = split_centerline_runs(&segs);
             // Its slanted legs (into a split's arm, out to a join), for
             // `untangle`: an arrow's head along one hides it (#1476).
@@ -10724,7 +10841,7 @@ fn render_branches(
             // `render_branch_run`), each its own `branch-group`.
             let mut stretches: Vec<String> = Vec::new();
             for (run_index, run) in runs.iter().enumerate() {
-                let (joints, run_stretches) = render_branch_run(rap, *hash, run, (*id, i, run_index), own_y, split_row, row_lines, stop_at);
+                let (joints, run_stretches) = render_branch_run(rap, *hash, run, (*id, i, run_index), own_y, split_row, row_lines, stop_at, unreachable.is_some());
                 // Joint discs are decorative; they ride with the first stretch.
                 let mut run_stretches = run_stretches.into_iter();
                 if let Some(first) = run_stretches.next() { stretches.push(joints + &first); }
@@ -11394,6 +11511,7 @@ fn render_branch_run(
     split_row: f64,
     row_lines: Option<&[Option<usize>]>,
     stop_at: Option<(f64, f64)>,
+    unreachable: bool,
 ) -> (String, Vec<String>) {
     let mut svg = String::new();
 
@@ -11402,7 +11520,7 @@ fn render_branch_run(
     // classifier.
     let classified: Vec<(OwnerLine, bool, &BranchSeg)> = run.iter().map(|seg| {
         let style = determine_owner_line_styles(rap, &seg.state);
-        let dashed = state_is_dashed(&seg.state);
+        let dashed = unreachable || state_is_dashed(&seg.state);
         (style, dashed, *seg)
     }).collect();
 
@@ -11625,6 +11743,7 @@ fn render_timeline(
 
     let apexes = CollapsedApexes::of(history);
     let owner = !rap.is_ref() && !rap.is_closure();
+    let unreachable = unreachable_binding(visualization_data, rap);
     let cuts = if owner { Vec::new() } else { field_borrow_rows(rap, history, visualization_data) };
     // A reference column's line reads the table for what is borrowed
     // through it (P1-4b; where its line runs and stops stays 2.x's until
@@ -11717,7 +11836,7 @@ fn render_timeline(
         bounds.dedup();
         bounds.push(*seg_end);
         // (Pieces with the same state and text are drawn as one.)
-        let mut pieces: Vec<(usize, usize, State, String, Option<i64>)> = Vec::new();
+        let mut pieces: Vec<(usize, usize, State, String, Option<i64>, bool)> = Vec::new();
         let between_own_dots = owner && line(*seg_start).is_some_and(|src| line(*seg_end) == Some(src))
             && own_dots.contains(seg_start) && own_dots.contains(seg_end);
         for w in bounds.windows(2) {
@@ -11776,15 +11895,28 @@ fn render_timeline(
                     None => (state.clone(), timeline_segment_title(state, rap, visualization_data, Some(w[0]))),
                 }
             };
-            let title = if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedValue { hash: h } if h == hash)) {
+            if title.is_empty() {
+                continue;
+            }
+            let title = if let_else_segment(visualization_data, rap, history, w[0], w[1]) {
+                format!("{LET_ELSE_SUCCESS_TOOLTIP}{title}")
+            } else { title };
+            let dead = unreachable.or_else(|| {
+                let source = line(w[0])?;
+                let &function = visualization_data.fn_source_lines.get(hash)?;
+                visualization_data.state_table.segment_never_runs(function, source).then_some(true)
+            });
+            let title = if let Some(checked) = dead {
+                unreachable_title(checked, &title)
+            } else if visualization_data.approx_notes.iter().any(|n| matches!(n, ApproxNote::UnreachedValue { hash: h } if h == hash)) {
                 format!("{} is never initialized because a preceding closure call never returns", styled_name_html(rap.name()))
             } else { title };
             match pieces.last_mut() {
                 Some(last) if restart_y.is_none() && last.1 == w[0] && last.3 == title && std::mem::discriminant(&last.2) == std::mem::discriminant(&st) => last.1 = w[1],
-                _ => pieces.push((w[0], w[1], st, title, restart_y)),
+                _ => pieces.push((w[0], w[1], st, title, restart_y, dead.is_some())),
             }
         }
-        for (line_start, line_end, piece_state, title, restart_y) in pieces {
+        for (line_start, line_end, piece_state, title, restart_y, dead) in pieces {
             let state = &piece_state;
             // Every part was moved out: nothing is left to draw (#1157).
             if title.is_empty() {
@@ -11810,7 +11942,7 @@ fn render_timeline(
                     y2,
                     title,
                     opacity: 1.0,
-                    dasharray: "none".to_owned(),
+                    dasharray: if dead { "4 4" } else { "none" }.to_owned(),
                     rv: Rv::new(rv_attrs::LINE).state(state).var(&timeline_data.name)
                         .rows(line_start, line_end).attrs(),
             };
@@ -13473,6 +13605,12 @@ fn render_ref_line(
                                 }
                                 data.v = dv - 2*dv/5;
                                 data.dy = dv/5;
+                                if let_else_segment(visualization_data, &ro, &timeline.history, bracket_start, *line_start) {
+                                    data.title = format!("{LET_ELSE_SUCCESS_TOOLTIP}{}", data.title);
+                                }
+                                if let Some(checked) = unreachable_binding(visualization_data, &ro) {
+                                    data.title = unreachable_title(checked, &data.title);
+                                }
                                 data.rv = bracket.clone().rows(bracket_start, *line_start).attrs();
                                 // (`M x1 y1 l dx dy v v l -dx dy`: its two
                                 // slanted ends, for the arrows.)
@@ -13597,6 +13735,19 @@ fn try_assigned_part(visualization_data: &VisualizationData, owner: u64, line: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_reassignment_does_not_hide_an_executing_acquisition() {
+        let s = styled_name_html("s");
+        let acquire = format!("{s} acquires ownership of a resource");
+        let reassign = format!("{s} acquires ownership of a new resource; its previous resource is dropped");
+        let checked_reassign = unreachable_title(true, &reassign);
+        let title = merged_dot_title(&[(None, acquire.clone()), (None, checked_reassign.clone())]);
+        assert!(title.contains(&acquire) && title.contains(&checked_reassign), "{title}");
+
+        let checked_acquire = unreachable_title(true, &acquire);
+        assert_eq!(merged_dot_title(&[(None, checked_acquire), (None, checked_reassign.clone())]), checked_reassign);
+    }
 
     fn arm(e_data: Vec<(usize, Event)>) -> BranchData {
         BranchData {

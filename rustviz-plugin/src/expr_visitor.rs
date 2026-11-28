@@ -9448,6 +9448,14 @@ pub(crate) fn scope_event(&mut self, ro: ResourceAccessPoint, layout_end: usize,
     let mut exit_site = None;
     if let Some(local) = ro.scope_local() {
         let facts = self.body_facts?;
+        if let Some(&checked) = facts.scope_ends.unreachable.get(&local) {
+            let boundary = facts.scope_ends.boundaries[&local].source_callsite();
+            line = self.tcx.sess.source_map().lookup_char_pos(boundary.hi()).line;
+            self.row_layout.unreachable_scope_ends.insert(id, checked);
+            self.row_layout.unreachable_bindings.insert((*ro.hash(), local), checked);
+            *self.unique_id += 1;
+            return Some((line, ExternalEvent::GoOutOfScope { ro, id, exit_site, early: None }));
+        }
         let ends: Vec<_> = facts.scope_ends.for_place(local, ro.name()).iter().filter(|e| !e.optional_unwind).collect();
         let normal: Vec<_> = ends.iter().copied().filter(|end| end.site.is_none()).collect();
         let within_leg: Vec<_> = normal.iter().copied().filter(|end|
@@ -9475,6 +9483,10 @@ pub(crate) fn scope_event(&mut self, ro: ResourceAccessPoint, layout_end: usize,
             line = if self.dead_ends.contains_key(&layout_end) { layout_end } else { end.boundary };
             exit_site = end.site;
             self.row_layout.scope_ends.insert(id, end);
+        } else if ends.is_empty() && facts.scope_ends.unreached_boundaries.contains(&local) {
+            let boundary = facts.scope_ends.boundaries[&local].source_callsite();
+            line = self.tcx.sess.source_map().lookup_char_pos(boundary.hi()).line;
+            self.row_layout.unreachable_scope_ends.insert(id, true);
         } else if !self.dead_ends.contains_key(&layout_end) {
             let calls = facts.scope_ends.terminal_calls.get(&local)?;
             let mut reachable = calls.iter().filter(|(site, _)| leg.is_none_or(|span| span.contains(*site)));
@@ -12246,7 +12258,17 @@ pub fn match_rhs_call(&mut self, lhs: ResourceTy, rhs: &'tcx Expr<'tcx>, evt: Ev
   }
   // The receiver operand and the value written on the call's normal
   // successor are separate. The receiver's move is drawn at the call.
-  let Some(call) = self.mir_call(rhs).filter(|c| c.has_result) else {
+  let call = self.mir_call(rhs);
+  let Some(call) = call.filter(|c| c.has_result) else {
+    // MIR can retain the declaration after an unconditional exit while
+    // omitting the initializer. Give that binding a hypothetical value
+    // without drawing an unproven transfer from the call.
+    if call.is_none() && lhs.extract_rap().and_then(ResourceAccessPoint::owner_local)
+      .is_some_and(|local| self.body_facts.is_some_and(|facts|
+        facts.scope_ends.unreachable.get(&local) == Some(&false)))
+    {
+      self.bind_from_anonymous(line_num, lhs);
+    }
     return;
   };
   let evt = if matches!(lhs, ResourceTy::Caller) && call.copyable { Evt::Copy } else { evt };
@@ -12727,9 +12749,12 @@ pub fn print_out_of_scope(&mut self){
   for rap in raps.iter() {
     if rap.rap.scope_local().is_some() {
       for (ro, layout_end) in named.iter().filter(|(ro, _)| ro.hash() == rap.rap.hash()) {
-        let facts = self.body_facts.map(|f| f.scope_ends.for_place(ro.scope_local().unwrap(), ro.name())).unwrap_or_default();
+        let local = ro.scope_local().unwrap();
+        let facts = self.body_facts.map(|f| &f.scope_ends);
         if self.all_paths_exit && *layout_end >= self.all_paths_exit_from && !ro.never_drops() && !ro.is_ref()
-          && !facts.iter().any(|end| end.site.is_none() && end.row < self.all_paths_exit_from) { continue; }
+          && !facts.is_some_and(|f| f.unreachable.contains_key(&local) || f.unreached_boundaries.contains(&local)
+            || f.for_place(local, ro.name()).iter().any(|end| end.site.is_none()
+              && (end.has_value || end.row < self.all_paths_exit_from))) { continue; }
         self.add_scope_end(ro.clone(), *layout_end);
       }
       continue;

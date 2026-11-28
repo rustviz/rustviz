@@ -4538,7 +4538,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       return HashSet::new();
     }
     #[expect(clippy::disallowed_methods, reason = "collected into a set; order is lost")]
-    let left = decls.iter().filter(|v| !v.never_drops() || self.exit_scope_ended.contains(v.name().as_str())).cloned().collect();
+    let left = decls.iter().filter(|v| {
+      let never_live = self.body_facts.zip(v.scope_local())
+        .is_some_and(|(facts, local)| facts.scope_ends.unreachable.contains_key(&local));
+      !never_live && (!v.never_drops() || self.exit_scope_ended.contains(v.name().as_str()))
+    }).cloned().collect();
     left
   }
 
@@ -8777,6 +8781,9 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.visit_expr(arm.body);
       self.arm_frames.pop();
       self.bind_deferred_arm(arm.body);
+      if self.body_facts.is_some_and(|facts| facts.dead_guarded_bodies.contains(&arm.body.hir_id)) {
+        self.row_layout.unreachable_events.extend(body_lo..*self.unique_id);
+      }
       if live {
         self.live_tuples.pop();
       }
@@ -12282,6 +12289,28 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       } else {
         self.bind_pat(pat, init, is_skipped);
       }
+      if els.is_some() && self.let_else_has_failure_edge(pat) {
+        let statement = self.tcx.hir_span(self.tcx.parent_hir_id(pat.hir_id));
+        let mut bindings = BTreeSet::new();
+        pat.each_binding_or_first(&mut |_, id, _, _| {
+          if let Some(rap) = self.raps.binding(id).map(|r| &r.rap) {
+            if let Some(local) = rap.scope_local() {
+              bindings.insert((rap.get_owner(), local));
+            }
+          }
+        });
+        self.row_layout.let_else_success_events.extend(self.preprocessed_events.iter()
+          .filter(|(_, ev)| ev.get_id() >= first_id)
+          .filter_map(|(_, ev)| {
+            let binding = match ev {
+              ExternalEvent::OrAltBorrow { into, end: false, .. } => Some(into),
+              _ => ResourceAccessPoint_extract(ev).1.extract_rap(),
+            }?;
+            binding.scope_local().filter(|&local| bindings.contains(&(binding.get_owner(), local)))?;
+            Some((ev.get_id(), statement))
+          }));
+        self.row_layout.let_else_bindings.extend(bindings.into_iter().map(|local| (local, statement)));
+      }
       if let Some(l) = saved_line {
         self.line_override = l;
       }
@@ -12329,6 +12358,12 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.keep_literal_temp_with_refs(pat);
   }
 
+  fn let_else_has_failure_edge(&self, pat: &Pat<'_>) -> bool {
+    let branch = self.tcx.parent_hir_id(pat.hir_id);
+    self.body_facts.is_some_and(|facts| facts.switches.iter().any(|switch|
+      switch.branch == Some(branch) && switch.arm == Some(0)))
+  }
+
   /// The `else` block of `let pat = init else { … };` (#906), visited
   /// after `init` and before `pat` binds anything: it runs when the
   /// pattern doesn't match, and can't finish (`return`, a panic, `break`
@@ -12344,7 +12379,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// `init_len`: the length `in_scope` had before `init` was visited.
   /// The unbound temporaries `init` made are dropped before the `else`
   /// block runs, so its exit doesn't drop them again. Returns the line
-  /// the branches join on, when they're drawn.
+  /// the successful path resumes on, when it needs a separate drawing row.
   fn visit_let_else(&mut self, pat: &'tcx Pat<'tcx>, init: &'tcx Expr<'tcx>, els: &'tcx rustc_hir::Block<'tcx>, init_len: usize) -> Option<usize> {
     let sm = self.tcx.sess.source_map();
     let split = sm.lookup_char_pos(pat.span.lo()).line;
@@ -12376,6 +12411,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.inside_branch = prev_inside_branch;
     self.uninit_locals = uninit_before;
     self.maybe_init_locals = maybe_init_before;
+    let decl = get_decl_of_block(els, &self.tcx, &self.raps);
+    // A checked-only binding has no drop on the failed pattern's exit.
+    // Keep its lexical boundary even when the block is drawn inline.
+    for var in in_decl_order(&decl) {
+      if self.body_facts.zip(var.scope_local())
+        .is_some_and(|(facts, local)| facts.scope_ends.unreachable.contains_key(&local))
+      {
+        if let Some((row, event)) = self.scope_event(var.clone(), merge, Some(els.span)) {
+          self.add_external_event(row, event);
+        }
+      }
+    }
     let ids = lo..*self.unique_id;
     // Drawn inline when the block changes nothing the matched path
     // sees: no drop at its exit, and no move out of a variable declared
@@ -12391,12 +12438,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let moves_outer = |e: &ExternalEvent| matches!(e, ExternalEvent::Move { from: ResourceTy::Value(r), .. }
       if !r.is_fn() && !r.is_temporary() && *r.hash() < hash_lo as u64);
     let draws_something = self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id()));
+    let failure_arm = crate::facts::SourceArm { branch: self.tcx.parent_hir_id(els.hir_id), index: 0 };
     if !self.preprocessed_events.iter().any(|(_, e)| ids.contains(&e.get_id())
       && (self.exit_drops.contains(&e.get_id()) || moves_outer(e)))
       && !((draws_something || !branch_is_collapsed(split, merge))
         && self.borrow_may_end_at_exit(BranchBody::LetElse(els), init, split, merge, &inner))
+      && !(draws_something && self.let_else_has_outer_end(failure_arm))
     {
-      return None;
+      // A checked-only binding's illustrative timeline starts after the
+      // failure block. A binding that can run keeps its initializer at
+      // the inline match, where any scrutinee temporary is still live.
+      let mut checked_only = false;
+      if let Some(facts) = self.body_facts {
+        pat.each_binding_or_first(&mut |_, id, _, _| {
+          checked_only |= facts.bindings.declarations.get(&id)
+            .is_some_and(|local| facts.scope_ends.unreachable.get(local) == Some(&true));
+        });
+      }
+      return (split != merge && checked_only && self.let_else_has_failure_edge(pat)).then_some(merge);
     }
     let mut else_ev = self.take_branch_events(ids, None, &HashSet::new());
     let in_branch: HashSet<usize> = else_ev.iter().map(|(_, e)| e.get_id()).collect();
@@ -12408,7 +12467,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     liveness.extend(self.keep_exit_drops(&mut else_ev, true));
     let forked = self.fork_let_else_temporary(init, split, merge, &mut else_ev);
     let scoped = scoped_in_events(&else_ev, &self.exit_drops);
-    let decl = get_decl_of_block(els, &self.tcx, &self.raps);
     let mut decl_vars = &(&decl | &inner) | &scoped;
     liveness = &liveness - &decl_vars;
     // (The forked temporary's drop on the `else` path doesn't make it
@@ -12434,7 +12492,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       diverges: false, exits: Vec::new(), break_carries: Vec::new(),
     };
     let branches = vec![
-      ExtBranchData { source: Some(crate::facts::SourceArm { branch: self.tcx.parent_hir_id(els.hir_id), index: 0 }), source_span: self.arm_span(els.span), imaginary: None, e_data: else_ev, line_map: else_map, decl_vars, diverges, exits, break_carries },
+      ExtBranchData { source: Some(failure_arm), source_span: self.arm_span(els.span), imaginary: None, e_data: else_ev, line_map: else_map, decl_vars, diverges, exits, break_carries },
       matched,
     ];
     // The matched path is named by the pattern as written.

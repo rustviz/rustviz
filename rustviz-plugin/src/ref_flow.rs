@@ -822,9 +822,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
   /// `call_arg_tie` for the part `target` of the result.
   fn call_arg_tie_to(&self, call: &'tcx Expr<'tcx>, target: FlowTarget<'_>) -> ArgTie {
-    let Some((_, _, args, callee)) = self.callee_sig(call) else { return ArgTie::default() };
+    let Some((sig, _, args, callee)) = self.callee_sig(call) else { return ArgTie::default() };
     let mut tie = ArgTie {
       receiver: matches!(call.kind, ExprKind::MethodCall(..)),
+      receiver_is_ref: sig.inputs().first().is_some_and(|ty| ty.is_ref()),
       total: args.len(),
       constructs_variant: callee.is_some_and(|def_id| matches!(self.tcx.def_kind(def_id),
         rustc_hir::def::DefKind::Ctor(rustc_hir::def::CtorOf::Variant, _))),

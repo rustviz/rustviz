@@ -57,6 +57,8 @@ struct Order<'a, 'tcx> {
     references: &'a DrawnReferenceEffects<'a, 'tcx>,
     closure_arrivals: &'a BTreeMap<usize, Location>,
     transfers: &'a BTreeMap<usize, crate::facts::value_flow::Site>,
+    let_else_branches: &'a BTreeSet<usize>,
+    arm_bindings: &'a BTreeMap<usize, Vec<(usize, rustc_middle::mir::Local)>>,
 }
 
 fn place(r: &ResourceTy) -> Option<String> {
@@ -766,6 +768,7 @@ impl Order<'_, '_> {
         for i in 0..events.len() {
             let (line, branch) = &events[i];
             let E::Branch {
+                id: branch_id,
                 split_point,
                 merge_point,
                 branches,
@@ -786,8 +789,18 @@ impl Order<'_, '_> {
             };
             let blocks = self.body.basic_blocks.reverse_postorder();
             let switch = Location { block: blocks[rank], statement_index: at };
+            let let_else = self.let_else_branches.contains(branch_id);
             let mut edits = Vec::new();
             for (_, e) in events.iter().filter(|(l, e)| l == line && end(e)) {
+                // Only a newly bound reference is absent from the failure
+                // leg. Outer holders still use their own MIR end edges.
+                if let_else
+                    && endpoints(e).0.extract_rap().and_then(ResourceAccessPoint::ref_local)
+                        .is_some_and(|local| self.arm_bindings.get(branch_id)
+                            .is_some_and(|bindings| bindings.iter().any(|&(_, binding)| binding == local)))
+                {
+                    continue;
+                }
                 let Some(&[id]) = self.ends.get(&e.get_id()).map(Vec::as_slice) else {
                     continue;
                 };
@@ -798,10 +811,9 @@ impl Order<'_, '_> {
                 {
                     continue;
                 }
-                if branches
-                    .iter()
-                    .any(|a| a.e_data.iter().any(|(_, other)| end(other) && endpoints(other) == endpoints(e)))
-                {
+                let has_end = |arm: &crate::svg_generator::data::ExtBranchData| arm.e_data.iter()
+                    .any(|(_, other)| end(other) && endpoints(other) == endpoints(e));
+                if !let_else && branches.iter().any(has_end) {
                     continue;
                 }
                 let holder = place(endpoints(e).0);
@@ -825,7 +837,7 @@ impl Order<'_, '_> {
                         })
                     };
                     let Some(arm) = source.and_then(|s| branches.iter().position(|b| b.source == Some(s))) else { break };
-                    if dests.insert(arm, (entry, fact_point(edge))).is_some() {
+                    if dests.insert(arm, (entry, *edge)).is_some() {
                         break;
                     }
                 }
@@ -834,6 +846,17 @@ impl Order<'_, '_> {
                     && edges.len()
                         == normal_facts(row).filter(|f| matches!(f.fact, Fact::BorrowEnd{loan,..} if loan==id)).count()
                 {
+                    // The failure exit can already contain its copy of
+                    // an outer reference's end. Place the other edge
+                    // without inserting a second end in the same arm.
+                    if let_else {
+                        dests.retain(|&arm, (_, edge)| !branches[arm].e_data.iter().any(|(_, other)| {
+                            self.references.ends.get(&other.get_id()).is_some_and(|ends| ends.iter()
+                                .any(|end| end.release && end.key() == (id, edge.occurrence)))
+                        }));
+                        if dests.is_empty() { continue; }
+                        if dests.keys().any(|&arm| has_end(&branches[arm])) { continue; }
+                    }
                     edits.push((e.clone(), dests));
                 }
             }
@@ -842,14 +865,14 @@ impl Order<'_, '_> {
             for (event, dests) in edits {
                 removed.insert(event.get_id());
                 let listed = map.get(&line).is_some_and(|es| es.iter().any(|e| e.get_id() == event.get_id()));
-                for (arm, (entry, point)) in dests {
+                for (arm, (entry, edge)) in dests {
                     let mut ev = event.clone();
                     let (E::MutableDie { id, .. } | E::StaticDie { id, .. } | E::RefDie { id, .. }) = &mut ev else {
                         unreachable!()
                     };
                     *id = *next;
                     *next += 1;
-                    layout.arm_points.insert(*id, point);
+                    layout.arm_points.insert(*id, fact_point(edge));
                     let arm = &mut branches[arm];
                     if listed {
                         let arrows = arm.line_map.entry(line).or_default();
@@ -1310,7 +1333,7 @@ impl Order<'_, '_> {
         }))
     }
 
-    fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout) {
+    fn order_list(&self, events: &mut [(usize, E)], map: &mut BTreeMap<usize, Vec<E>>, layout: &mut RowLayout, dead: bool) {
         for (line, e) in events.iter() {
             if let E::GoOutOfScope { ro, early: None, .. } = e {
                 if let Some(local) = ro.ref_local() {
@@ -1343,10 +1366,33 @@ impl Order<'_, '_> {
         }
         let mut lines: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, (line, ev)) in events.iter_mut().enumerate() {
-            if let E::Branch { branches, .. } = ev {
-                for arm in branches {
+            // Only a release at the binding statement needs its success
+            // qualifier. A later use can share the same printed line.
+            if end(ev) {
+                let span = endpoints(ev).0.extract_rap().and_then(|holder| layout.let_else_span(holder));
+                if let Some(span) = span.filter(|span| self.references.ends.get(&ev.get_id()).is_some_and(|ends| {
+                    !ends.is_empty() && ends.iter().all(|e| {
+                        span.contains(self.body.source_info(e.fact.occurrence.at).span.source_callsite())
+                    })
+                })) {
+                    layout.let_else_success_events.insert(ev.get_id(), span);
+                }
+            }
+            // The whole row can be unreachable even without a drawn leg
+            // (for example after a loop with no executing break edge).
+            // A scope dot already has its own MIR boundary occurrence.
+            let dead = dead || layout.unreachable_events.contains(&ev.get_id());
+            if dead || !matches!(ev, E::GoOutOfScope { .. }) && self.facts.dead_lines.contains(line) {
+                layout.unreachable_events.insert(ev.get_id());
+            }
+            if let E::Branch { branches, id, .. } = ev {
+                for (index, arm) in branches.iter_mut().enumerate() {
+                    let unreachable = dead || arm.source.is_some_and(|source| {
+                        self.facts.dead_arms.get(&source.branch).is_some_and(|arms| arms.contains(&source.index))
+                    });
+                    if unreachable { layout.unreachable_arms.insert((*id, index)); }
                     self.describe_shared_call_result(&arm.e_data, layout);
-                    self.order_list(&mut arm.e_data, &mut arm.line_map, layout);
+                    self.order_list(&mut arm.e_data, &mut arm.line_map, layout, unreachable);
                 }
             }
             if let Some(lender) = self.shadowed_borrow_lender(ev) {
@@ -1508,6 +1554,8 @@ pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
         references: &visitor.drawn_references,
         reference_facts: &visitor.reference_effects,
         closure_arrivals: &visitor.closure_result_arrivals,
+        let_else_branches: &visitor.let_else_branches,
+        arm_bindings: &visitor.arm_bindings,
     };
     order.place_arm_ends(
         visitor.preprocessed_events,
@@ -1516,7 +1564,7 @@ pub(crate) fn order_body(visitor: &mut ExprVisitor<'_, '_>, facts: &BodyFacts) {
         &mut visitor.row_layout,
     );
     order.across_arms(visitor.preprocessed_events, &mut Vec::new(), &mut visitor.row_layout);
-    order.order_list(visitor.preprocessed_events, visitor.event_line_map, &mut visitor.row_layout);
+    order.order_list(visitor.preprocessed_events, visitor.event_line_map, &mut visitor.row_layout, false);
 }
 
 /// Read the independent columns in their existing order, emitting any
@@ -1599,6 +1647,17 @@ pub struct RowLayout {
     /// The scope-ending MIR occurrence selected before rows are shifted or
     /// stacked. Two exits on the same printed line can have different drops.
     pub(crate) scope_ends: BTreeMap<usize, crate::facts::ScopeEnd>,
+    /// Lexical boundaries for locals whose storage never becomes live.
+    pub(crate) unreachable_scope_ends: BTreeMap<usize, bool>,
+    /// Whether non-executing storage is still present in borrowck MIR.
+    pub(crate) unreachable_bindings: BTreeMap<(u64, rustc_middle::mir::Local), bool>,
+    pub(crate) unreachable_arms: BTreeSet<(usize, usize)>,
+    pub(crate) unreachable_events: BTreeSet<usize>,
+    /// Statement span of a MIR local initialized only on a let-else's success edge.
+    pub(crate) let_else_bindings: BTreeMap<(u64, rustc_middle::mir::Local), Span>,
+    /// Initialization and same-statement releases, keyed by event so inserted
+    /// drawing rows and later statements sharing a source line stay distinct.
+    pub(crate) let_else_success_events: BTreeMap<usize, Span>,
     /// The call ends the pictured control flow without a normal storage boundary.
     pub(crate) terminal_calls: BTreeSet<usize>,
     /// Both column dots and the connecting arrow describe the same aggregate operand.
@@ -1675,6 +1734,10 @@ pub(crate) struct DroppedFieldLoan {
 }
 
 impl RowLayout {
+    pub(crate) fn let_else_span(&self, rap: &crate::svg_generator::data::ResourceAccessPoint) -> Option<Span> {
+        self.let_else_bindings.get(&(rap.get_owner(), rap.scope_local()?)).copied()
+    }
+
     pub fn append(&mut self, other: &mut Self) {
         self.stack_points.append(&mut other.stack_points);
         self.uncertain_store_ends.append(&mut other.uncertain_store_ends);
@@ -1693,6 +1756,12 @@ impl RowLayout {
         self.result_lend_titles.append(&mut other.result_lend_titles);
         self.temp_drop_flags.append(&mut other.temp_drop_flags);
         self.temp_moves.append(&mut other.temp_moves);
+        self.unreachable_scope_ends.append(&mut other.unreachable_scope_ends);
+        self.unreachable_bindings.append(&mut other.unreachable_bindings);
+        self.unreachable_arms.append(&mut other.unreachable_arms);
+        self.unreachable_events.append(&mut other.unreachable_events);
+        self.let_else_bindings.append(&mut other.let_else_bindings);
+        self.let_else_success_events.append(&mut other.let_else_success_events);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.aggregate_transfer_continuations.append(&mut other.aggregate_transfer_continuations);
         self.temporary_staged_moves.append(&mut other.temporary_staged_moves);

@@ -156,7 +156,7 @@ const BOOK: &[Snippet] = &[
         id: "c4_07_first_word_loop",
         must_contain: &[
             "s is an immutable borrow from the caller",
-            "L2 Immutable borrow from s to bytes: as_bytes's signature gives the reference it returns the same lifetime as the value it was called on",
+            "L2 Immutable borrow from s to bytes: as_bytes's signature gives the reference it returns the same lifetime as the reference passed as its receiver",
             // The loop's iterator reads through bytes until the loop's
             // `}` (#1081).
             "L3 the value bytes points to is immutably borrowed by the `for` loop's iterator, through a copy of bytes, until the loop ends",
@@ -556,12 +556,21 @@ const BOOK: &[Snippet] = &[
             // ElaborateDrops emits only discriminant checks for s at these exits.
             "L3 s goes out of scope. No value inside s remains to drop here. No resource is dropped. None carries no payload.",
             "L6 s goes out of scope. A value inside s was moved out earlier. No value inside s remains to drop here. No resource is dropped. For Some, the String payload was moved out.",
-            "Move from s to x",
+            "The following applies only if the pattern matches. Move from s to x",
+            "The following applies only if the pattern matches. x acquires ownership of a resource",
+            "x is the owner of the resource",
             "x's resource is moved to the caller",
+            "x goes out of scope. No resource is dropped.",
             "Move from describe to d",
             "d goes out of scope. Its resource is dropped.",
         ],
-        must_not_contain: &["L3 s goes out of scope. Its resource is dropped", "runtime drop flag"],
+        must_not_contain: &[
+            "L3 s goes out of scope. Its resource is dropped",
+            "runtime drop flag",
+            "The following applies only if the pattern matches. x is the owner of the resource",
+            "The following applies only if the pattern matches. x's resource is moved to the caller",
+            "The following applies only if the pattern matches. x goes out of scope",
+        ],
         ..E
     },
     Snippet {
@@ -630,7 +639,7 @@ const BOOK: &[Snippet] = &[
         status: Correct,
         must_contain: &[
             "get takes a shared reference (as self, implicitly borrowed). It may read through that reference",
-            "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the value it was called on; third's value can hold a reference (third isn't a reference itself)",
+            "L3 Immutable borrow from v to third: get's signature gives the value it returns the same lifetime as the reference passed as its receiver; third's value can hold a reference (third isn't a reference itself)",
             "L5 third₂ is initialized with a copy of a value inside third",
             "L5 a value inside third is copied",
             "L5 Immutable borrow from v to third₂: third₂ is a reference copied out of third",
@@ -777,7 +786,7 @@ const BOOK: &[Snippet] = &[
             "L9 text's borrow of the string literal ends (string literals live for the whole program)",
             // #1266: the borrow of map comes from `entry`; `or_insert`
             // passes it on (it named `or_insert` before).
-            "L7 Mutable borrow from map to count: entry's signature gives the value it returns the same lifetime as the value it was called on and its argument (the other is a value with no column here), so map stays borrowed while count is in use; or_insert passes the borrow on",
+            "L7 Mutable borrow from map to count: entry's signature gives the value it returns the same lifetime as the reference passed as its receiver and its argument (the other is a value with no column here), so map stays borrowed while count is in use; or_insert passes the borrow on",
             "the value count points to is modified through *count",
             "If count holds a mutable borrow affecting map, that borrow ends here. It no longer restricts access to map",
             "map goes out of scope. Its resource is dropped.",
@@ -809,7 +818,7 @@ const BOOK: &[Snippet] = &[
         id: "c8_16_as_str",
         must_contain: &[
             "s is passed to as_str by shared reference (as self, implicitly borrowed). as_str may read it",
-            "Immutable borrow from s to t: as_str's signature gives the reference it returns the same lifetime as the value it was called on",
+            "Immutable borrow from s to t: as_str's signature gives the reference it returns the same lifetime as the reference passed as its receiver",
             "If t holds a shared borrow affecting s, that borrow ends here. It no longer restricts access to s",
         ],
         must_not_contain: &["t is the owner of the resource", "L3 s's resource is no longer immutably borrowed"],
@@ -858,7 +867,7 @@ const BOOK: &[Snippet] = &[
             "v is an immutable borrow from the caller",
             "first takes a shared reference (as self). It may read through that reference",
             "x holds an immutable reference; it can read the borrowed value",
-            "L2 Immutable borrow from v to x: first's signature gives the value it returns the same lifetime as the value it was called on; the `?` passes the borrow on",
+            "L2 Immutable borrow from v to x: first's signature gives the value it returns the same lifetime as the reference passed as its receiver; the `?` passes the borrow on",
             "L3 If x holds a shared borrow affecting the data behind v, that borrow ends here. It no longer restricts access to the data behind v",
             "L3 v's immutable borrow ends",
             "v is passed to first_plus_one by shared reference. first_plus_one may read it",
@@ -1140,7 +1149,7 @@ const BOOK: &[Snippet] = &[
         must_contain: &[
             "iter takes a shared reference (as self, implicitly borrowed). It may read through that reference",
             "v1_iter is passed to next by mutable reference (as self, implicitly borrowed). next may read or write it",
-            "L3 Immutable borrow from v1 to v1_iter: iter's signature gives the value it returns the same lifetime as the value it was called on; v1_iter isn't a reference, but its value holds one",
+            "L3 Immutable borrow from v1 to v1_iter: iter's signature gives the value it returns the same lifetime as the reference passed as its receiver; v1_iter isn't a reference, but its value holds one",
             "L5 If v1_iter holds a shared borrow affecting v1, that borrow ends here. It no longer restricts access to v1",
         ],
         must_not_contain: &["L3 v1's resource is no longer immutably borrowed"],
