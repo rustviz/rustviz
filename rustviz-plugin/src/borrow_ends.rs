@@ -26,6 +26,7 @@ pub struct BodyEnds<'a> {
   pub facts: &'a BodyFacts,
   /// Each loop as (head row, closing row).
   pub loops: Vec<(usize, usize)>,
+  pub exhaustion: std::collections::BTreeMap<rustc_middle::mir::Location, IteratorExhaustion>,
 }
 
 /// What the facts say about one holder's borrow of some loans.
@@ -62,7 +63,7 @@ pub fn root(place: &str) -> &str {
 }
 
 impl<'a> BodyEnds<'a> {
-  pub fn new<'tcx>(tcx: TyCtxt<'tcx>, facts: &'a BodyFacts, hir_body: &rustc_hir::Body<'tcx>) -> Self {
+  pub fn new<'tcx>(tcx: TyCtxt<'tcx>, facts: &'a BodyFacts, hir_body: &rustc_hir::Body<'tcx>, body: &rustc_middle::mir::Body<'tcx>) -> Self {
     struct Loops<'tcx> {
       tcx: TyCtxt<'tcx>,
       out: Vec<(usize, usize)>,
@@ -79,26 +80,32 @@ impl<'a> BodyEnds<'a> {
     }
     let mut v = Loops { tcx, out: Vec::new() };
     v.visit_expr(hir_body.value);
-    BodyEnds { facts, loops: v.out }
+    use rustc_utils::BodyExt;
+    let exhaustion = facts.rows.iter().flat_map(|r| &r.facts).filter_map(|ev| {
+      let Fact::BorrowEnd { .. } = ev.fact else { return None };
+      let dest = ev.occurrence.successor?;
+      let rustc_hir::Node::Expr(e) = tcx.hir_node(body.location_to_hir_id(dest)) else { return None };
+      if !e.span.is_desugaring(rustc_span::DesugaringKind::ForLoop) { return None; }
+      let rustc_hir::ExprKind::Break(d, None) = e.kind else { return None };
+      let target = d.target_id.ok()?;
+      let closing_row = tcx.sess.source_map().lookup_char_pos(tcx.hir_span(target).hi()).line;
+      Some((dest, IteratorExhaustion { target, closing_row }))
+    }).collect();
+    BodyEnds { facts, loops: v.out, exhaustion }
   }
 
   /// Ends reached when next() yields None. The real MIR successor runs
   /// the desugaring's break, whose target identifies the loop even when
   /// loops nest. Exclude an item binding absent on the exhaustion arm
   /// (the fact's list of possible holders can also name that binding).
-  pub fn exhaustion_edges<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &rustc_middle::mir::Body<'tcx>)
+  pub fn exhaustion_edges(&self)
     -> std::collections::BTreeMap<(usize, &'a str), Vec<IteratorExhaustion>> {
-    use rustc_utils::BodyExt;
     let mut out = std::collections::BTreeMap::new();
     for row in &self.facts.rows {
       for ev in &row.facts {
         let Fact::BorrowEnd { loan, holder, .. } = &ev.fact else { continue };
         let Some(dest) = ev.occurrence.successor else { continue };
-        let rustc_hir::Node::Expr(e) = tcx.hir_node(body.location_to_hir_id(dest)) else { continue };
-        if e.span.desugaring_kind() != Some(rustc_span::DesugaringKind::ForLoop) { continue }
-        let rustc_hir::ExprKind::Break(d, None) = e.kind else { continue };
-        let Ok(target) = d.target_id else { continue };
-        let closing_row = tcx.sess.source_map().lookup_char_pos(tcx.hir_span(target).hi()).line;
+        let Some(edge) = self.exhaustion.get(&dest) else { continue };
         let arm = ev.arm.and_then(|i| row.arms.get(i));
         for h in holder.split('|').filter(|h| match arm {
           Some(arm) => arm.after.state.get(*h) == Some(&"own"),
@@ -106,9 +113,8 @@ impl<'a> BodyEnds<'a> {
           None => *h == holder && !h.is_empty(),
         }) {
           let edges = out.entry((*loan, h)).or_insert_with(Vec::new);
-          let edge = IteratorExhaustion { target, closing_row };
-          if !edges.contains(&edge) {
-            edges.push(edge);
+          if !edges.contains(edge) {
+            edges.push(edge.clone());
           }
         }
       }
@@ -383,7 +389,12 @@ impl<'a> BodyEnds<'a> {
       for e in &r.facts {
         match &e.fact {
           Fact::BorrowEnd { loan, holder, to_line, .. } if loans.contains(loan) => {
-            let (row, exit) = self.drawn_row(r.line, *to_line);
+            let (row, exit) = if let Some(edge) = e.occurrence.successor.and_then(|d| self.exhaustion.get(&d)) {
+              (edge.closing_row, true)
+            } else if self.facts.iterators.iter().any(|it| it.loans.contains(loan)
+              && e.end_places.iter().any(|p| p.local == it.storage.index())) {
+              (r.line, false)
+            } else { self.drawn_row(r.line, *to_line) };
             out.last_end = Some(out.last_end.map_or(row, |g| g.max(row)));
             if mine && holder.split('|').any(|h| names_match(k, h)) {
               out.gives_back = Some(out.gives_back.map_or(row, |g| g.max(row)));

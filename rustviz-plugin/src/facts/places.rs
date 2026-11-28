@@ -284,7 +284,7 @@ fn place_ty_prefix<'tcx>(_tcx: TyCtxt<'tcx>, body: &Body<'tcx>, place: Place<'tc
     ty
 }
 
-fn project_ty<'tcx>(ty: Ty<'tcx>, e: &PlaceElem<'tcx>) -> Ty<'tcx> {
+pub(super) fn project_ty<'tcx>(ty: Ty<'tcx>, e: &PlaceElem<'tcx>) -> Ty<'tcx> {
     match e {
         ProjectionElem::Field(_, fty) => *fty,
         ProjectionElem::Deref => ty.builtin_deref(true).unwrap_or(ty),

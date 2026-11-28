@@ -2436,10 +2436,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let pol = pfacts.map(|f| Output::compute(f, Algorithm::Naive, true));
     // The hidden iterator of a `for` loop (`let mut iter =
     // IntoIterator::into_iter(<head>)` in the desugaring).
-    let for_iter = |l: Local| {
-        let decl = &body.local_decls[l];
-        decl.is_user_variable() && decl.source_info.span.desugaring_kind() == Some(rustc_span::DesugaringKind::ForLoop)
-    };
+    let mut for_loops = super::iterators::collect(tcx, body, |p| cx.name(p));
+    let for_iter = |l: Local| for_loops.iter().any(|it| it.storage == l);
     let mut iterator_origins = Vec::new();
     let mut origins_of: BTreeMap<Local, Vec<Origin>> = BTreeMap::new();
     // Every local's (temporaries' and the return place's too).
@@ -2709,18 +2707,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     // ---- loans ------------------------------------------------------------------
     let mut inline_holder_ends = Vec::new();
     let mut loans: Vec<LoanInfo> = Vec::new();
-    // for-loop lowering calls Iterator::next into a fresh Option temporary.
-    // Only its Some payload is the slice element reference for this iteration.
-    let slice_next: BTreeSet<_> = body.basic_blocks.iter().filter_map(|bb| {
-        let term = bb.terminator();
-        let TerminatorKind::Call { func, destination, .. } = &term.kind else { return None };
-        let (def, args) = func.const_fn_def()?;
-        (tcx.is_lang_item(def, rustc_hir::LangItem::IteratorNext)
-            && term.source_info.span.desugaring_kind() == Some(rustc_span::DesugaringKind::ForLoop)
-            && args.type_at(0).ty_adt_def().is_some_and(|d| tcx.is_diagnostic_item(rustc_span::Symbol::intern("SliceIter"), d.did())))
-            .then_some(destination.as_local()?)
-    }).collect();
-    let mut slice_items = BTreeSet::new();
     // Classify each capture field as we would the captured value. Following
     // moves between bindings would count a restored closure more than once.
     let owner = tcx.local_def_id_to_hir_id(def_id.expect_local()).owner;
@@ -5033,12 +5019,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             }
                         }
                         if !reassign && lhs.projection.is_empty() {
-                            if body.local_decls[lhs.local].mutability.is_not()
-                                && matches!(rv, Rvalue::Use(Operand::Copy(p) | Operand::Move(p))
-                                    if slice_next.contains(&p.local)
-                                        && matches!(p.projection.as_slice(), [ProjectionElem::Downcast(..), ProjectionElem::Field(..)])) {
-                                slice_items.insert(lhs.local);
-                            }
                             if let Some(t) = table {
                                 let ids: Vec<_> = held_by(lhs.local, t.mid_index(loc)).into_iter()
                                     .filter(|l| published.contains(l)).collect();
@@ -7201,6 +7181,110 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         Fact::BorrowEnd { loan, .. } if taken_at(loan).is_some_and(|issue| !ldom(issue, e.location)) => Some(loan),
         _ => None,
     }).collect();
+    if let Some(t) = table {
+        let loan_parents: BTreeMap<_, _> = loans.iter().map(|l| (l.loan, l.made_through.as_slice())).collect();
+        for it in &mut for_loops {
+            let storage = Place::from(it.storage);
+            let term = body[it.next.block].terminator();
+            if let TerminatorKind::Call { args, .. } = &term.kind {
+                if let Some(receiver) = args[0].node.place() {
+                    it.loans = held_by_place(receiver, t.start_index(it.next)).intersection(&published).copied().collect();
+                }
+            }
+            let TerminatorKind::Call { args: head, .. } = &body[it.constructor.block].terminator().kind else { continue };
+            it.head_loan_retained = it.head.as_ref().and_then(|h| h.borrow_at)
+                .is_some_and(|at| it.loans.iter().any(|id| taken_at(*id) == Some(at)));
+            // A custom conversion can return an unrelated referent even if its
+            // signature ties the item's lifetime to the input.
+            if !it.identity && !it.collection {
+                it.opaque_item_loans.extend(&it.loans);
+            }
+            let head_span = head[0].span;
+            // A unique normal call-return edge can end an intermediate
+            // result's loan before the loop starts (iter().copied().collect()).
+            let mut ends = BTreeMap::<usize, BTreeSet<Option<Location>>>::new();
+            for ev in out_rows.iter().flat_map(|r| &r.facts) {
+                let Fact::BorrowEnd { loan, .. } = ev.fact else { continue };
+                let at = ev.occurrence.at;
+                let term = body[at.block].terminator();
+                let normal = at == body.terminator_loc(at.block) && head_span.contains(term.source_info.span)
+                    && matches!(term.kind, TerminatorKind::Call { target: Some(target), .. }
+                        if ev.occurrence.successor == Some(Location { block: target, statement_index: 0 }));
+                ends.entry(loan).or_default().insert(normal.then_some(at));
+            }
+            for (bb, data) in body.basic_blocks.iter_enumerated() {
+                let term = data.terminator();
+                let site = term.source_info.span;
+                if !head_span.contains(site) || site.desugaring_kind().is_some() { continue; }
+                let TerminatorKind::Call { func, args, destination, target: Some(target), .. } = &term.kind else { continue };
+                let ret = held_by_place(*destination, t.start_index(Location { block: *target, statement_index: 0 }));
+                let carried: BTreeSet<_> = ret.intersection(&published).copied().collect();
+                if carried.is_empty() { continue; }
+                let callee = func.const_fn_def();
+                if !callee.is_some_and(|(def, types)| super::iterators::preserves_items(tcx, typing_env, def, types)) {
+                    it.opaque_item_loans.extend(it.loans.intersection(&carried));
+                }
+                let Some((callee, _)) = callee else { continue };
+                let at = body.terminator_loc(bb);
+                for arg in args {
+                    let Some(p) = arg.node.place() else { continue };
+                    let held = held_by_place(p, t.start_index(at));
+                    let loans: BTreeSet<_> = carried.intersection(&held).copied().collect();
+                    if loans.is_empty() { continue; }
+                    // Parent loans can reach the loop through a different
+                    // field. Only the immediate loans describe this operand.
+                    let parents: BTreeSet<_> = loans.iter().flat_map(|id|
+                        loan_parents.get(id).copied().into_iter().flatten().copied()).collect();
+                    let loans: BTreeSet<_> = loans.difference(&parents).copied().collect();
+                    let reaches_storage = !loans.is_disjoint(&it.loans);
+                    let ends_after_call = (!reaches_storage).then(|| {
+                        let mut sites = loans.iter().map(|id| {
+                            let choices = ends.get(id)?;
+                            if choices.len() != 1 { return None; }
+                            *choices.first()?
+                        });
+                        let end = sites.next()??;
+                        if !sites.all(|other| other == Some(end)) { return None; }
+                        let TerminatorKind::Call { func, .. } = &body[end.block].terminator().kind else { return None };
+                        Some(tcx.item_name(func.const_fn_def()?.0).to_string())
+                    }).flatten();
+                    it.arguments.push(IteratorArgument {
+                        reaches_storage, ends_after_call,
+                        site, operand: arg.span, call: tcx.item_name(callee).to_string(), loans,
+                        input: super::iterators::head_input(tcx, body, at, &arg.node, |p| cx.name(p), &mut None),
+                    });
+                }
+            }
+            for binding in &mut it.bindings {
+                binding.loans = held_by(binding.local, t.mid_index(binding.at)).intersection(&published).copied().collect();
+                if body.local_decls[binding.local].ty.ref_mutability().is_some_and(|m| m.is_mut()) {
+                    binding.consumed = super::iterators::consumed_item(body, binding, it.next).filter(|at| {
+                        let live = held_by_place(storage, t.mid_index(*at));
+                        binding.loans.intersection(&it.loans).any(|id| live.contains(id))
+                    });
+                }
+            }
+        }
+    }
+    for it in &mut for_loops {
+        for row in &out_rows {
+            for ev in row.facts.iter().filter(|ev| ev.place_local == Some(it.storage) && matches!(ev.fact, Fact::TempDrop { .. })) {
+                let exit = ev.occurrence.exit;
+                let after_item = exit.and_then(|exit| {
+                    let mut items = row.facts.iter().filter_map(|item| {
+                        let Fact::Drop { path, how: "drops", .. } = &item.fact else { return None };
+                        let local = item.place_local?;
+                        (cx.names.locals.get(&local) == Some(path) && item.occurrence.exit == Some(exit)
+                            && it.bindings.iter().any(|b| b.local == local)
+                            && super::iterators::drops_before(body, item.occurrence.at.block, ev.occurrence.at.block)).then_some(path)
+                    });
+                    let item = items.next()?;
+                    items.next().is_none().then(|| item.clone())
+                });
+                it.drops.push(IteratorDrop { occurrence: ev.occurrence, exit_span: exit.map(|at| cx.r.exit_span(at)), after_item });
+            }
+        }
+    }
     scope_ends.terminal_calls = terminal_calls;
     let value_flow = super::value_flow::collect(tcx, body, &cx.names, &runs, &checked, &cx.rows.event_row);
     BodyFacts {
@@ -7249,8 +7333,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         columns: column_info,
         uniform_option_refs,
         loans,
-        slice_items,
         closure_captures,
+        iterators: for_loops,
         binding_loans,
         rows: out_rows,
         promoted_operands,

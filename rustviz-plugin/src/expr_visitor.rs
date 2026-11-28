@@ -95,10 +95,6 @@ pub struct PatternElem {
   /// No binding has drawn an arrow from the head yet (the head's move
   /// is then drawn on its own).
   pub source_pending: bool,
-  /// A head holding references (`Vec<(&mut String, i32)>`, #1389): its
-  /// name and what its references borrow, which a reference binding
-  /// moved out of it borrows.
-  pub holder: Option<(String, Vec<ResourceTy>)>,
   /// The copies out of a borrowed head, drawn after its loan (line,
   /// binding, part).
   pub deferred: Vec<(usize, ResourceTy, LoopHead)>,
@@ -697,10 +693,6 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // While the pattern of `for (s, k) in names` / `for &(a, b) in &pairs`
   // is registered: where each binding's value comes from (#1390).
   pub pattern_elem: Option<PatternElem>,
-  // While the pattern of `for (x, y) in [(&e, &g)]` is registered: the
-  // elements of the literal head, whose references a reference binding
-  // copies (#1433).
-  pub pattern_literal: Option<&'tcx [Expr<'tcx>]>,
   // Temporaries given a column of their own in this fn body because a
   // `let` borrows them (`let r = &String::from("a");`, #400); numbers
   // the next one's label.
@@ -732,7 +724,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `return` inside drops each loop's iterator (#482), and so does a
   // `break 'outer` out of the loops inside `'outer` (#592). Each is
   // paired with its loop's id (the desugared `loop` expression).
-  pub loop_iterators: Vec<(rustc_hir::HirId, ResourceAccessPoint)>,
+  pub iterator_temps: BTreeMap<u64, Local>,
+  pub loop_iterators: Vec<(rustc_hir::HirId, Local, ResourceAccessPoint)>,
   // The `return`s directly in a loop body (#1020): see `LoopReturn`.
   pub loop_returns: Vec<LoopReturn>,
   // The lines of the closing braces that a `loop` nothing breaks out of
@@ -953,11 +946,8 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // `&v`). A call on the lender in the body leaves it shared by the
   // iterator (#900).
   pub for_loop_iter_loans: Vec<(String, usize, usize, bool)>,
-  // A `for` loop's `&mut` binding its body moves away on every pass
-  // (`for e in v.iter_mut() { drop(e); }`, #1511): the binding, the line
-  // of the move, and the loop's closing line. Its borrow ends at the
-  // move; the loop's iterator holds the loan on to the loop's end.
-  pub for_loop_moved_bindings: Vec<(String, usize, usize)>,
+  // MIR identity of the yielded value and the row where it is consumed.
+  pub for_loop_moved_bindings: BTreeMap<Local, (BTreeSet<usize>, usize)>,
   // `let r = loop { … break k; };` (#431): the loop's id, what its
   // `break` values go to (`r`) and how (move or copy). A `break` with a
   // value, in that loop, pairs the value with `r` the way `let r = k;`
@@ -1310,13 +1300,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       deref_ref_pats: HashSet::new(),
       pattern_lender: None,
       pattern_elem: None,
-      pattern_literal: None,
       temp_count: 0,
       param_value_count: 0,
       pending_param_borrows: Vec::new(),
       temp_drops_noted: HashSet::new(),
       unbranched_temps: HashSet::new(),
       matched_block_temps: HashSet::new(),
+      iterator_temps: BTreeMap::new(),
       loop_iterators: Vec::new(),
       loop_returns: Vec::new(),
       dead_ends: HashMap::new(),
@@ -1364,7 +1354,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       for_moved_holders: HashSet::new(),
       let_else_branches: BTreeSet::new(),
       for_loop_iter_loans: Vec::new(),
-      for_loop_moved_bindings: Vec::new(),
+      for_loop_moved_bindings: BTreeMap::new(),
       in_scope: Vec::new(),
       try_block: None,
       exit_frames: Vec::new(),
@@ -2029,7 +2019,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       ResourceAccessPoint::StaticRef(r) => {
         r.binding.scope_owner = scope_owner;
         r.binding.local = local;
-        r.binding.slice_item = local.is_some_and(|l| self.body_facts.is_some_and(|f| f.slice_items.contains(&l)));
+        r.binding.slice_item = local.is_some_and(|l| self.body_facts.is_some_and(|f| self.mir_body.local_decls[l].mutability.is_not() && f.iterators.iter().any(|it| it.slice_iter && it.bindings.iter().any(|b| b.local == l && b.part.as_deref() == Some("") && b.derefs == 0 && matches!(b.access, crate::facts::IteratorInput::Move | crate::facts::IteratorInput::Copy)))));
       }
       ResourceAccessPoint::Owner(o) => o.local = local,
       ResourceAccessPoint::Struct(s) => {
@@ -4710,115 +4700,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some(ResourceTy::Index(rap, place, write))
   }
 
-  /// `v.iter_mut()`, `v.iter_mut().rev()`, `self.items.iter_mut()`: the
-  /// variable a method chain starts from, when the chain's first call
-  /// takes it by `&mut` (so what the chain hands out points into its
-  /// resource, or into the resource it points to). For a field reached
-  /// through a reference (`self.items` with `self: &mut Self`), the
-  /// reference (#1060).
-  pub(crate) fn mut_call_chain_root(&self, e: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
-    match self.call_chain_root(e)? {
-      (ResourceTy::Value(r) | ResourceTy::DerefField(r, _, _, _), Mutability::Mut) => Some(r),
-      _ => None,
-    }
-  }
-
-  /// The place a method chain starts from and how its first call takes
-  /// it (`&self` or `&mut self`): `Value(v)` for a variable v (`v.iter()`),
-  /// `DerefField(self, "self.items")` for a field reached through a
-  /// reference (`self.items.iter_mut()`; #1060). None when the first
-  /// call takes its receiver by value.
-  pub(crate) fn call_chain_root(&self, e: &'tcx Expr<'tcx>) -> Option<(ResourceTy, Mutability)> {
-    let ExprKind::MethodCall(_, mut rcvr, _, _) = e.kind else { return None };
-    let mut first_call = e;
-    while let ExprKind::MethodCall(_, inner, _, _) = rcvr.kind {
-      first_call = rcvr;
-      rcvr = inner;
-    }
-    let def_id = self.tcx.typeck(e.hir_id.owner).type_dependent_def_id(first_call.hir_id)?;
-    let sig = self.tcx.fn_sig(def_id).instantiate_identity().skip_norm_wip();
-    let m = sig.skip_binder().inputs().first()?.ref_mutability()?;
-    match get_rap(rcvr, &self.tcx, &self.raps) {
-      ResourceTy::Value(r) if !r.is_fn() => Some((ResourceTy::Value(r), m)),
-      _ => match self.field_access_through_ref(rcvr)? {
-        f @ ResourceTy::DerefField(..) => Some((f, m)),
-        _ => None,
-      },
-    }
-  }
-
-  /// The places a `for` loop's head borrows through method chains (each
-  /// `call_chain_root`): the head's own chain (`a.iter_mut()` in
-  /// `a.iter_mut().zip(b.iter())`), and the chains passed to its calls
-  /// whose value can hold a borrow (`b.iter()`, `self.b.iter()`; #1066),
-  /// not those that can't (`b.len()` in `.take(b.len())`).
-  pub(crate) fn loop_head_chain_roots(&self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, Mutability)> {
-    let typeck = self.tcx.typeck(head.hir_id.owner);
-    let holds = |e: &'tcx Expr<'tcx>| typeck.expr_ty(e).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
-    let mut out: Vec<(ResourceTy, Mutability)> = Vec::new();
-    let mut todo: Vec<&'tcx Expr<'tcx>> = vec![head];
-    while let Some(e) = todo.pop() {
-      if let Some(root) = self.call_chain_root(e) {
-        if !out.contains(&root) {
-          out.push(root);
-        }
-      }
-      let mut call = e;
-      loop {
-        match call.kind {
-          ExprKind::MethodCall(_, rcvr, args, _) => {
-            todo.extend(args.iter().filter(|a| holds(a)));
-            call = rcvr;
-          }
-          ExprKind::Call(_, args) => {
-            todo.extend(args.iter().filter(|a| holds(a)));
-            break;
-          }
-          _ => break,
-        }
-      }
-    }
-    out
-  }
-
-  /// The reference variables a `for` loop's head passes as they are to
-  /// its calls (`b` in `a.iter_mut().zip(b)` with `b: &Vec<_>` or `b:
-  /// &mut Vec<_>`, also in a chain passed to one: `.zip(c.iter().chain(b))`;
-  /// #1076). The loop's iterator holds a copy of a `&T` (or the moved
-  /// `&mut T`) and reads or writes through it until the loop ends.
-  /// Only the arguments of calls whose value can hold a borrow: not
-  /// `make(b)` returning a `Vec<i32>`.
-  pub(crate) fn loop_head_ref_args(&self, head: &'tcx Expr<'tcx>) -> Vec<ResourceAccessPoint> {
-    let typeck = self.tcx.typeck(head.hir_id.owner);
-    let holds = |e: &'tcx Expr<'tcx>| typeck.expr_ty(e).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
-    let mut out: Vec<ResourceAccessPoint> = Vec::new();
-    let mut todo: Vec<&'tcx Expr<'tcx>> = vec![head];
-    while let Some(e) = todo.pop() {
-      let args = match e.kind {
-        ExprKind::MethodCall(_, rcvr, args, _) if holds(e) => {
-          todo.push(rcvr);
-          args
-        }
-        ExprKind::Call(_, args) if holds(e) => args,
-        _ => continue,
-      };
-      for a in args.iter() {
-        match a.kind {
-          ExprKind::Path(_) if typeck.expr_ty(a).is_ref() && typeck.expr_adjustments(a).is_empty() => {
-            if let ResourceTy::Value(r) = get_rap(a, &self.tcx, &self.raps) {
-              if r.is_ref() && !out.contains(&r) {
-                out.push(r);
-              }
-            }
-          }
-          ExprKind::MethodCall(..) | ExprKind::Call(..) => todo.push(a),
-          _ => {}
-        }
-      }
-    }
-    out
-  }
-
   /// The fields a call's result borrows when `lenders` (from
   /// `call_lenders`) is just the reference r and the call mentions r
   /// only through fields of what it points to, each with whether it is
@@ -4919,21 +4800,21 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   /// what the reference r points to is passed to (`map` for
   /// `self.items.iter().map(|x| x + self.n)` and `self.n`), and
   /// whether the capture is mutable.
-  fn closure_capturing_field(&self, call: &'tcx Expr<'tcx>, r: &ResourceAccessPoint, place: &str) -> Option<(String, bool)> {
+  fn closure_capturing_field(&self, call: &'tcx Expr<'tcx>, r: &ResourceAccessPoint, place: &str) -> Option<(String, ResourceTy, bool)> {
     locals_in(call, ClosureLocals::Captures(self.tcx)).into_iter().find_map(|m| {
       let closure = m.closure?;
       if binding_name(&self.tcx, m.id) != *r.name() {
         return None;
       }
-      let is_mut = self.closure_field_captures(call, closure, m.id, r)?.into_iter()
-        .find_map(|(l, is_mut)| matches!(&l, ResourceTy::DerefField(_, p, _, _) if p == place).then_some(is_mut))?;
+      let (field, is_mut) = self.closure_field_captures(call, closure, m.id, r)?.into_iter()
+        .find(|(l, _)| matches!(l, ResourceTy::DerefField(_, p, _, _) if p == place))?;
       let rustc_hir::Node::Expr(callee) = self.tcx.parent_hir_node(closure.hir_id) else { return None };
       let name = match callee.kind {
         ExprKind::MethodCall(seg, ..) => seg.ident.as_str().to_owned(),
         ExprKind::Call(f, _) => hirid_to_var_name(f.hir_id, &self.tcx)?,
         _ => return None,
       };
-      Some((name, is_mut))
+      Some((name, field, is_mut))
     })
   }
 
@@ -10271,166 +10152,105 @@ fn mark_kept_on_lines_at(&mut self, lo: usize, hi: usize, hashes: &[u64], place:
   ids
 }
 
-/// `for x in <head>` with `head` a call (`v.iter()`,
-/// `v.iter().enumerate()`, `s.chars()`): the loop's iterator is
-/// `head`'s value, and it keeps the loans that value holds until the
-/// loop ends, since `next()` runs again at the top of every iteration.
-/// Mark the argument-passing events of those lenders as kept by the
-/// result, so the `for` line doesn't say the lender got its resource
-/// back (#868), and return each lender (a variable that owns what it
-/// lends) with whether its loan is mutable and the call that lent it. Only the calls in `head`
-/// whose result can hold a borrow keep one: `v.len()` in
-/// `v.iter().take(v.len())` borrows `v` just for the call. A `&mut`
-/// reference the head's first call reborrows (`v.iter_mut()` with `v:
-/// &mut Vec<_>` a parameter, or `let v = &mut s;`) is a lender too:
-/// the iterator holds that reborrow of `*v` until the loop ends, so v
-/// can't be used until then (#1046).
-pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>) -> Vec<(ResourceTy, bool, String)> {
-  if !matches!(head.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)) {
-    return Vec::new();
-  }
-  let typeck = self.tcx.typeck(head.hir_id.owner);
-  let mut fns: Vec<String> = Vec::new();
-  self.borrow_holding_call_names(head, typeck, &mut fns);
+/// A call's reference argument can reach the iterator only if the same
+/// loan is in the operand, its return value and the receiver of next.
+/// Event IDs select the glyph for that MIR call and source place.
+pub fn keep_loop_head_loans(&mut self, head: &'tcx Expr<'tcx>, storage: Option<&crate::facts::IteratorStorage>) -> Vec<(ResourceTy, bool, String)> {
+  let (Some(it), Some(facts)) = (storage, self.body_facts) else { return Vec::new() };
   let lo = span_to_line(&head.span, &self.tcx);
-  let hi = span_end_line(&head.span, &self.tcx);
-  let mut out: Vec<(ResourceTy, bool, String)> = Vec::new();
-  for l in self.value_lenders(head) {
-    let owner = matches!(&l, ResourceTy::Value(r) if !r.is_ref() && !r.is_fn());
-    if !owner || out.iter().any(|(o, _, _)| *o == l) {
-      continue;
-    }
-    let Some(hash) = l.extract_rap().map(|r| *r.hash()) else { continue };
-    let ids = self.mark_kept_on_lines(lo, hi, &[hash], &fns);
-    if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
-      out.push((l, is_mut, call));
-    }
-  }
-  // Several fields reached through a `&mut` (`self.items.iter()
-  // .zip(self.other.iter_mut())`, #1080): each is lent until the loop
-  // ends, as one is below.
-  let lenders = self.call_lenders(head);
-  if let Some(fields) = self.field_call_lenders(head, &lenders).filter(|f| f.len() > 1) {
-    for (field, _) in fields {
-      let ResourceTy::DerefField(r, place, _, _) = &field else { continue };
-      if !r.is_mutref() {
-        continue;
-      }
-      let ids = self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], Some(place.as_str()), &fns);
-      if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
-        out.push((field, is_mut, call));
-      } else if let Some((call, is_mut)) = self.closure_capturing_field(head, r, place) {
-        // Captured by a closure the loop's iterator holds (`map(|x| x +
-        // self.n)`, #1093): no call was passed the field, so its borrow
-        // starts here, lent to the closure, which the iterator keeps
-        // (the loop's end matches it by that name).
-        let target_name = format!("the closure passed to {}", call);
-        if !self.raps.contains_key(&fn_key(&target_name)) {
-          self.add_fn(target_name.clone());
-        }
-        let target = ResourceTy::Value(self.raps.get(&fn_key(&target_name)).unwrap().rap.to_owned());
-        let id = *self.unique_id;
-        *self.unique_id += 1;
-        let (from, to) = (field.clone(), target);
-        let implicit = ImplicitRef::Capture { place: from.name(), unique: false, interior_mut: false };
-        let ev = if is_mut {
-          ExternalEvent::PassByMutableReference {
-            manually_takes: false, terminal: None, from, to, id, is_reborrow: false, ends_at_call: false, implicit,
-            result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None,
-            of_ref_var: false, deep: None,
-          }
-        } else {
-          ExternalEvent::PassByStaticReference {
-            from, to, id, implicit, refcell_borrow_mut: false, pointee_interior_mut: false,
-            result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(),
-            of_ref_var: false, deep: None,
-          }
-        };
-        self.update_rap(r, lo);
-        self.add_external_event(lo, ev);
-        out.push((field, is_mut, target_name));
-      }
-    }
-    return out;
-  }
-  // `v.iter()` reborrows `*v` too, shared, when v is a `&mut` (#1059):
-  // v is read-only until the loop ends. A field reached through a
-  // `&mut` (`self.items.iter_mut()`, #1060) is lent the same way.
-  // So is each chain passed to the head's calls (`b.iter()` in
-  // `a.iter_mut().zip(b.iter())`, #1066): the zipped iterator holds both.
-  // With a `&T` v (`v: &Vec<_>`, `list: &[T]`; #1081) the iterator reads
-  // through a copy of v until the loop ends, and v stays usable.
-  // Nothing is kept when the head's value can't hold a borrow
-  // (`v.iter().map(..).collect::<Vec<i32>>()`): the loop iterates
-  // over a new Vec, and `v.push(..)` in the body compiles.
-  if !typeck.expr_ty(head).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_))) {
-    return out;
-  }
-  for (root, _) in self.loop_head_chain_roots(head) {
-    let through = match &root {
-      ResourceTy::Value(r) if r.is_ref() => Some((r.clone(), None)),
-      ResourceTy::DerefField(r, place, _, _) => Some((r.clone(), Some(place.clone()))),
-      _ => None,
+  let mut out = Vec::new();
+  let mut mark = |_: usize, ev: &mut ExternalEvent| {
+    let (from, call, mutable) = match ev {
+      ExternalEvent::PassByStaticReference { from, to, .. } => (from.clone(), to.name(), false),
+      ExternalEvent::PassByMutableReference { from, to, .. } => (from.clone(), to.name(), true),
+      _ => return,
     };
-    if let Some((r, place)) = through {
-      let ids = self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], place.as_deref(), &fns);
-      if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
-        out.push((root, is_mut, call));
+    let Some(&span) = self.event_spans.get(&ev.get_id()) else { return };
+    let Some(rap) = from.extract_rap() else { return };
+    let Some(local) = self.raps.get(rap.name()).and_then(|r| r.local.or(r.rap.owner_local())) else { return };
+    let matched = it.arguments.iter().find(|arg| {
+      if call != arg.call || !(arg.site.source_equal(span) || arg.operand.source_equal(span)) { return false; }
+      arg.input.as_ref().is_some_and(|h| h.place.local == local.index() && h.place.name == from.name())
+        || facts.loans.iter().any(|l| arg.loans.contains(&l.loan) && l.lender_local == Some(local)
+          && (l.lender == from.name() || (rap.is_ref() && matches!(from, ResourceTy::Value(_))
+              && facts.bindings.locals.get(&local) == Some(rap.name()))))
+    });
+    if let Some(arg) = matched {
+      set_kept(ev);
+      if arg.reaches_storage {
+        if !out.iter().any(|(r, _, _)| r == &from) { out.push((from, mutable, call)); }
+      } else {
+        let call = crate::svg_generator::hover_messages::styled_name_html(&call);
+        let mut note = match &arg.ends_after_call {
+          Some(end) => format!("The result of {call} keeps this borrow until {} returns.", crate::svg_generator::hover_messages::styled_name_html(end)),
+          None => format!("The result of {call} keeps this borrow after the call."),
+        };
+        if matches!(&from, ResourceTy::Value(ResourceAccessPoint::StaticRef(_))) {
+          let name = crate::svg_generator::hover_messages::styled_name_html(rap.name());
+          note.push_str(&format!(" {name} is a shared reference and can still be used or copied."));
+        }
+        self.row_layout.iterator_end_notes.insert(ev.get_id(), note);
+      }
+    }
+  };
+  crate::visitor::walk(self.preprocessed_events, &mut mark);
+  crate::visitor::walk_map(self.event_line_map, &mut mark);
+  // A `&T` passed as it is to a std adapter (`.zip(b)`, `.chain(b)`; #1076)
+  // is copied into the loop's iterator, which reads through the copy until
+  // the loop ends. No loan names it, so the copy into the call is the glyph.
+  if let Some(call_site) = self.mir_call(head).filter(|c| c.std_ref_adapter).and_then(|c| c.site) {
+    let found = self.preprocessed_events.iter().find_map(|(_, e)| match e {
+      ExternalEvent::Copy { from: ResourceTy::Value(from), to: ResourceTy::Value(call), id, .. }
+        if from.is_ref() && !from.is_mutref() && call.is_fn()
+          && self.argument_slots.get(id) == Some(&(call_site.at, 1)) =>
+        Some((*id, from.clone(), call.name().clone())),
+      _ => None,
+    });
+    if let Some((id, r, call)) = found {
+      if !out.iter().any(|(o, _, _)| matches!(o, ResourceTy::Value(x) if *x == r)) {
+        self.row_layout.aggregate_titles.insert(id,
+          crate::svg_generator::hover_messages::event_dot_lend_through_ref_to_loop_iterator(
+            r.name(), false, false, r.points_to_copy()));
+        out.push((ResourceTy::Value(r), false, call));
       }
     }
   }
-  // A `&T` passed as it is to the head's calls (`.zip(b)`, #1076) is
-  // copied into the loop's iterator, which reads through the copy
-  // until the loop ends. (A `&mut` is moved in: see the `for` lowering.)
-  for r in self.loop_head_ref_args(head) {
-    if r.is_mutref() || out.iter().any(|(o, _, _)| matches!(o, ResourceTy::Value(x) if *x == r)) {
-      continue;
+  // A captured field has no call-argument glyph. Its loan is in the
+  // closure operand itself. HIR supplies the display form of the field.
+  for loan in facts.loans.iter().filter(|l| it.loans.contains(&l.loan)) {
+    let Some(local) = loan.lender_local else { continue };
+    let Some(root) = facts.bindings.locals.get(&local).and_then(|n| self.raps.place(local, n)) else { continue };
+    let r = root.rap.clone();
+    if !r.is_mutref() || out.iter().any(|(p, _, _)| p.name() == loan.lender) { continue; }
+    let Some((call, field, is_mut)) = self.closure_capturing_field(head, &r, &loan.lender) else { continue };
+    if !it.arguments.iter().any(|a| a.call == call && a.loans.contains(&loan.loan)) { continue; }
+    let target_name = format!("the closure passed to {}", call);
+    if !self.raps.contains_key(&fn_key(&target_name)) {
+      self.add_fn(target_name.clone());
     }
-    let ids = self.mark_kept_on_lines_at(lo, hi, &[*r.hash()], None, &fns);
-    if let Some((is_mut, call)) = ids.iter().find_map(|id| pass_ref_kind(&self.preprocessed_events, *id)) {
-      out.push((ResourceTy::Value(r), is_mut, call));
-    }
-    else if let Some((id, call)) = self.mir_call(head).filter(|c| c.std_ref_adapter).and_then(|c| c.site)
-      .and_then(|call_site| self.preprocessed_events.iter().find_map(|(_, e)| match e {
-      ExternalEvent::Copy { from: ResourceTy::Value(from), to: ResourceTy::Value(call), id, .. }
-        if from.hash() == r.hash() && call.is_fn()
-          && self.argument_slots.get(id) == Some(&(call_site.at, 1)) =>
-          Some((*id, call.name().clone())),
-      _ => None,
-    })) {
-      self.row_layout.aggregate_titles.insert(id,
-        crate::svg_generator::hover_messages::event_dot_lend_through_ref_to_loop_iterator(
-          r.name(), false, false, r.points_to_copy()));
-      out.push((ResourceTy::Value(r), false, call));
-    }
+    let target = ResourceTy::Value(self.raps.get(&fn_key(&target_name)).unwrap().rap.to_owned());
+    let id = *self.unique_id;
+    *self.unique_id += 1;
+    let (from, to) = (field.clone(), target);
+    let implicit = ImplicitRef::Capture { place: from.name(), unique: false, interior_mut: false };
+    let ev = if is_mut {
+      ExternalEvent::PassByMutableReference {
+        manually_takes: false, terminal: None, from, to, id, is_reborrow: false, ends_at_call: false, implicit,
+        result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None,
+        of_ref_var: false, deep: None,
+      }
+    } else {
+      ExternalEvent::PassByStaticReference {
+        from, to, id, implicit, refcell_borrow_mut: false, pointee_interior_mut: false,
+        result_keeps_borrow: true, stored_in: StoredIn::default(), break_alt: None, still_borrowed_by: Vec::new(),
+        of_ref_var: false, deep: None,
+      }
+    };
+    self.update_rap(&r, lo);
+    self.add_external_event(lo, ev);
+    out.push((field, is_mut, target_name));
   }
   out
-}
-
-/// `call_names`, keeping only the calls whose result type can hold a
-/// borrow (`iter`, `enumerate`, not `len`).
-fn borrow_holding_call_names(&self, e: &'tcx Expr<'tcx>, typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>, out: &mut Vec<String>) {
-  let holds = |e: &'tcx Expr<'tcx>| typeck.expr_ty(e).walk().any(|g| matches!(g.kind(), GenericArgKind::Lifetime(_)));
-  match e.kind {
-    ExprKind::Call(f, args) => {
-      if holds(e) {
-        if let Some(n) = hirid_to_var_name(f.hir_id, &self.tcx) {
-          out.push(n);
-        }
-      }
-      for a in args.iter() { self.borrow_holding_call_names(a, typeck, out); }
-    }
-    ExprKind::MethodCall(seg, rcvr, args, _) => {
-      if holds(e) {
-        out.push(seg.ident.as_str().to_owned());
-      }
-      self.borrow_holding_call_names(rcvr, typeck, out);
-      for a in args.iter() { self.borrow_holding_call_names(a, typeck, out); }
-    }
-    ExprKind::AddrOf(_, _, inner) | ExprKind::Unary(_, inner) | ExprKind::Field(inner, _)
-    | ExprKind::DropTemps(inner) | ExprKind::Cast(inner, _) | ExprKind::Index(inner, _, _) => self.borrow_holding_call_names(inner, typeck, out),
-    _ => {}
-  }
 }
 
 /// The names of the calls in `e` (the Function RAPs their arguments
@@ -12909,7 +12729,7 @@ pub fn print_out_of_scope(&mut self){
       LoopExit { own: usize, back: usize },
       None,
     }
-    let ix = facts.map(|f| crate::borrow_ends::BodyEnds::new(self.tcx, f, self.hir_body));
+    let ix = facts.map(|f| crate::borrow_ends::BodyEnds::new(self.tcx, f, self.hir_body, self.mir_body));
     let mut slots: Vec<Slot> = Vec::new();
     // The loans an earlier slot of the same name took (per name).
     let mut claimed: HashMap<String, BTreeSet<usize>> = HashMap::new();
@@ -13439,7 +13259,7 @@ pub fn print_out_of_scope(&mut self){
         .then_with(|| sa.key.cmp(&sb.key))
     });
 
-    let exhaustion_edges = ix.as_ref().map(|ix| ix.exhaustion_edges(self.tcx, self.mir_body)).unwrap_or_default();
+    let exhaustion_edges = ix.as_ref().map(|ix| ix.exhaustion_edges()).unwrap_or_default();
     for i in order {
       let slot = &slots[i];
       let k = &slot.key;
@@ -13480,26 +13300,51 @@ pub fn print_out_of_scope(&mut self){
         let co = lender != rd.lender;
         // A reference no one lent to (#1095) gives nothing back.
         let unlent = matches!(rd.lender, ResourceTy::Anonymous) && self.unlent_refs.contains(k);
-        // Q6 (the binding's own end each time round, the iterator's arrow
-        // where the loop ends) needs the renderer to keep the binding's
-        // column after its end: until then the binding gives the lender
-        // back where the loop ends, as 2.x draws it.
-        // (A binding with no lender of its own to give back to, `for (a, b)
-        // in self.items.iter().zip(..)`, draws no arrow: its own end at its
-        // last use each time round, as rustc has it.)
+        // When a pass stops using the item and only hidden iterator storage
+        // reaches exhaustion, the two endpoints are different. Check the
+        // actual slots on every ending edge before splitting a drawn end.
+        let item_end = rd.local.and_then(|local| {
+          let facts = facts?;
+          let it = facts.iterators.iter().find(|it| it.bindings.iter().any(|b| b.local == local))?;
+          if loans.is_empty() || !loans.iter().all(|l| it.loans.contains(l)) { return None; }
+          // A shared column reached through another iteration or an enclosing
+          // decision keeps its path-specific end on that leg.
+          if facts.loans.iter().any(|l| loans.contains(&l.loan) && !l.issuance_path.is_empty())
+            || facts.iterators.iter().any(|other| other.storage != it.storage && loans.iter().any(|l| other.loans.contains(l))) { return None; }
+          let mut own = None;
+          let mut back = false;
+          for row in &facts.rows {
+            for ev in &row.facts {
+              match &ev.fact {
+                crate::facts::Fact::BorrowEnd { loan, .. } if loans.contains(loan) => {
+                  if ev.end_places.iter().any(|p| p.local != it.storage.index()) || ev.end_places.is_empty() { return None; }
+                  ix.as_ref()?.exhaustion.get(&ev.occurrence.successor?)?;
+                  back = true;
+                }
+                crate::facts::Fact::HoldEnd { loan, .. } if loans.contains(loan)
+                  && ev.end_places.iter().any(|p| p.local == local.index()) => {
+                  if own.replace((row.line, ev.occurrence)).is_some_and(|(_, prev)| prev != ev.occurrence) { return None; }
+                }
+                _ => {}
+              }
+            }
+          }
+          own.filter(|_| back).map(|(line, _)| line)
+        });
         let end = match end {
           End::LoopExit { own, .. } if matches!(lender, ResourceTy::Anonymous) => End::Own(own),
+          End::LoopExit { back, .. } | End::Arrow(back) if item_end.is_some_and(|own| own < back) =>
+            End::LoopExit { own: item_end.unwrap(), back },
           End::LoopExit { back, .. } => End::Arrow(back),
-          e => e,
+          other => other,
         };
-        // A `for` binding its body moves away (#1511) ends its borrow at
-        // the move; the loop's iterator holds the loan on (see
-        // `note_loop_iterator_keeps_moved`). (This binding's loop: a
-        // later loop's binding of the same name isn't moved by an earlier
-        // loop's body.)
-        let end = match (end, self.for_loop_moved_bindings.iter().find(|(n, mv, close)| n == k && *mv >= rd.assigned_at && rd.assigned_at <= *close && *mv <= *close)) {
-          (End::Arrow(_) | End::Own(_), Some((_, mv, _))) => End::Arrow(*mv),
-          (e, _) => e,
+        let item_storage = facts.and_then(|f| f.iterators.iter().find(|it|
+          it.bindings.iter().any(|b| Some(b.local) == rd.local && loans.iter().any(|id| b.loans.contains(id)))));
+        let consumed_item = rd.local.and_then(|local| self.for_loop_moved_bindings.get(&local))
+          .filter(|(yielded, _)| loans.iter().any(|id| yielded.contains(id))).map(|(_, row)| *row);
+        let end = match (end, consumed_item) {
+          (End::Arrow(_) | End::Own(_) | End::LoopExit { .. }, Some(line)) => End::Arrow(line),
+          (other, _) => other,
         };
         // An end past the reference's scope end (a copy of it outlives it,
         // #913): its own end there, before the scope end.
@@ -13547,7 +13392,15 @@ pub fn print_out_of_scope(&mut self){
                   .filter(|loan| loan.projected.is_some()).map(|loan| matches!(loan.kind, "mut" | "unique")),
               _ => None,
             };
-            if let Some(mutable) = projected_kind {
+            if consumed_item == Some(line) {
+              self.add_borrow_end_ev(line, to_ro.clone(), end_from, &rd,
+                vec![crate::svg_generator::hover_messages::LOOP_ITERATOR_HOLDER.to_owned()]);
+              if item_storage.is_some_and(|it| it.moves_references) {
+                self.row_layout.yielded_reference_ends.insert(id);
+              } else if item_storage.is_some_and(|it| it.borrows_collection && loans.iter().all(|l| !it.opaque_item_loans.contains(l))) {
+                self.row_layout.collection_reborrow_ends.insert(id);
+              }
+            } else if let Some(mutable) = projected_kind {
               self.add_ev(line, if mutable { Evt::MDie } else { Evt::SDie }, lender.clone(), end_from, false);
             } else if co && !self.stored_ref_var_lends.contains(&(k.clone(), lender.real_name())) {
               let evt = if rd.mut_of(&lender) { Evt::MDie } else { Evt::SDie };
@@ -13567,9 +13420,26 @@ pub fn print_out_of_scope(&mut self){
             }
           }
           End::LoopExit { own, back } => {
+            let item = *self.unique_id;
             self.add_own_end(own, &from_ro, to_ro.clone(), k, &[]);
+            if matches!(&from_ro, ResourceAccessPoint::StaticRef(r) if r.binding.slice_item)
+              && to_ro.extract_rap().is_some_and(|r| r.is_ref()) {
+              let name = crate::svg_generator::hover_messages::styled_name_html(from_ro.name());
+              self.row_layout.iterator_end_notes.insert(item, format!("The borrow of this slice element through {name} ends here"));
+            }
             let evt = if rd.mut_of(&lender) { Evt::MDie } else { Evt::SDie };
+            let id = *self.unique_id;
+            let place = if to_ro.extract_rap().is_some_and(|r| r.is_ref()) {
+              format!("the data behind {}", crate::svg_generator::hover_messages::styled_name_html(&to_ro.real_name()))
+            } else { crate::svg_generator::hover_messages::styled_name_html(&to_ro.name()) };
+            let kind = if rd.mut_of(&lender) { "mutable" } else { "shared" };
             self.add_ev(back, evt, to_ro, ResourceTy::Anonymous, false);
+            let note = if rd.co_lenders.is_empty() && !item_storage.is_some_and(|it| it.moves_references) {
+              format!("When the iterator runs out of items, its {kind} borrow of {place} ends. This borrow no longer restricts access to {place}")
+            } else {
+              format!("When the iterator runs out of items, the borrow checker no longer restricts access to {place} through this iterator.")
+            };
+            self.row_layout.iterator_end_notes.insert(id, note);
           }
           End::Own(_) if co => {}
           End::Own(line) if exact_array_loan.is_some() => {
@@ -13715,44 +13585,6 @@ pub fn print_out_of_scope(&mut self){
     for key in keys {
       self.raps.remove(&key);
       self.borrow_map.remove(&key);
-    }
-    self.note_loop_iterator_keeps_moved();
-  }
-
-  /// The end of a moved `for` binding's borrow (#1511) gives nothing back
-  /// to its lender: the loop's iterator still holds the loan, until the
-  /// loop ends. Say so on the end, which leaves the lender borrowed.
-  fn note_loop_iterator_keeps_moved(&mut self) {
-    fn note(events: &mut [(usize, ExternalEvent)], name: &str, line: usize, ids: &mut Vec<usize>) {
-      for (l, ev) in events.iter_mut() {
-        match ev {
-          ExternalEvent::MutableDie { from: ResourceTy::Value(r), to: ResourceTy::Value(_), still_borrowed_by, id, .. }
-            if *l == line && r.name() == name && still_borrowed_by.is_empty() =>
-          {
-            *still_borrowed_by = vec![crate::svg_generator::hover_messages::LOOP_ITERATOR_HOLDER.to_owned()];
-            ids.push(*id);
-          }
-          ExternalEvent::Branch { branches, .. } => {
-            for b in branches.iter_mut() {
-              note(&mut b.e_data, name, line, ids);
-            }
-          }
-          _ => {}
-        }
-      }
-    }
-    let mut ids = Vec::new();
-    for (name, line, _) in self.for_loop_moved_bindings.iter() {
-      note(self.preprocessed_events, name, *line, &mut ids);
-    }
-    for evs in self.event_line_map.values_mut() {
-      for e in evs.iter_mut() {
-        if let ExternalEvent::MutableDie { id, still_borrowed_by, .. } = e {
-          if ids.contains(id) {
-            *still_borrowed_by = vec![crate::svg_generator::hover_messages::LOOP_ITERATOR_HOLDER.to_owned()];
-          }
-        }
-      }
     }
   }
 
@@ -15302,18 +15134,6 @@ pub fn branch_value_expr<'tcx>(body: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx
       _ => return Some(e),
     }
   }
-}
-
-/// Whether the pass-by-reference event `id` (looked up in `events`,
-/// branches included) passes a mutable reference, and the function it
-/// passes it to.
-fn pass_ref_kind(events: &[(usize, ExternalEvent)], id: usize) -> Option<(bool, String)> {
-  events.iter().find_map(|(_, ev)| match ev {
-    ExternalEvent::PassByStaticReference { id: i, to, .. } if *i == id => Some((false, to.name())),
-    ExternalEvent::PassByMutableReference { id: i, to, .. } if *i == id => Some((true, to.name())),
-    ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|b| pass_ref_kind(&b.e_data, id)),
-    _ => None,
-  })
 }
 
 fn set_kept(ev: &mut ExternalEvent) {

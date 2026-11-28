@@ -251,9 +251,9 @@ pub struct BodyFacts {
     pub uniform_option_refs: BTreeMap<String, bool>,
     pub switches: Vec<SwitchExit>,
     pub loans: Vec<LoanInfo>,
-    /// Immutable bindings initialized from the Some payload of a slice iterator in a for loop.
-    #[serde(skip)]
-    pub slice_items: BTreeSet<rustc_middle::mir::Local>,
+    /// Storage and item transfers of compiler-lowered for loops.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub iterators: Vec<IteratorStorage>,
     /// Borrowck loans at MIR assignments to pattern bindings.
     #[serde(skip)]
     pub binding_loans: BTreeMap<rustc_middle::mir::Local, BTreeMap<rustc_middle::mir::Location, Vec<usize>>>,
@@ -288,6 +288,96 @@ pub struct BodyFacts {
     /// States at the normal entry and continuing edges of drawn arms.
     #[serde(skip)]
     pub arm_boundaries: rustc_data_structures::fx::FxIndexMap<rustc_hir::HirId, BTreeMap<usize, ArmBoundaries>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IteratorInput { Move, Copy, Shared, Mutable }
+
+#[derive(Serialize)]
+pub struct IteratorHead {
+    #[serde(skip)]
+    pub borrow_at: Option<Location>,
+    pub place: EndPlace,
+    pub access: IteratorInput,
+}
+
+#[derive(Serialize)]
+pub struct IteratorBinding {
+    #[serde(serialize_with = "local")]
+    pub local: rustc_middle::mir::Local,
+    #[serde(serialize_with = "location")]
+    pub at: Location,
+    pub access: IteratorInput,
+    /// Displayable projection relative to the yielded payload.
+    pub part: Option<String>,
+    pub derefs: usize,
+    pub loans: BTreeSet<usize>,
+    /// The move into a call, while iterator storage continues carrying the loan.
+    #[serde(serialize_with = "optional_location", skip_serializing_if = "Option::is_none")]
+    pub consumed: Option<Location>,
+}
+
+#[derive(Serialize)]
+pub struct IteratorStorage {
+    #[serde(serialize_with = "location")]
+    pub constructor: Location,
+    #[serde(skip)]
+    pub site: rustc_span::Span,
+    #[serde(serialize_with = "local")]
+    pub storage: rustc_middle::mir::Local,
+    #[serde(serialize_with = "location")]
+    pub next: Location,
+    #[serde(serialize_with = "local")]
+    pub result: rustc_middle::mir::Local,
+    pub head: Option<IteratorHead>,
+    pub head_loan_retained: bool,
+    /// The standard traversal borrows its collection while yielding items.
+    pub borrows_collection: bool,
+    /// The owned collection hands out its stored mutable references by move.
+    pub moves_references: bool,
+    pub identity: bool,
+    pub collection: bool,
+    pub slice_iter: bool,
+    /// A standard slice traversal or an explicit library collection conversion.
+    pub direct_items: bool,
+    pub consumed_collection: Option<EndPlace>,
+    #[serde(skip)]
+    pub arguments: Vec<IteratorArgument>,
+    /// Calls with unknown item provenance, even when their signature carries a loan.
+    pub opaque_item_loans: BTreeSet<usize>,
+    pub loans: BTreeSet<usize>,
+    pub bindings: Vec<IteratorBinding>,
+    pub drops: Vec<IteratorDrop>,
+}
+
+impl IteratorStorage {
+    pub(crate) fn after_item_on_exit(&self, span: rustc_span::Span) -> Option<&str> {
+        let mut paths = self.drops.iter().filter(|d| d.exit_span.is_some_and(|s| s.source_equal(span)));
+        let name = paths.next()?.after_item.as_deref()?;
+        paths.all(|d| d.after_item.as_deref() == Some(name)).then_some(name)
+    }
+}
+
+/// A head call operand whose loan reaches that call's result.
+pub struct IteratorArgument {
+    pub reaches_storage: bool,
+    pub ends_after_call: Option<String>,
+    pub site: rustc_span::Span,
+    pub operand: rustc_span::Span,
+    pub call: String,
+    pub input: Option<IteratorHead>,
+    pub loans: BTreeSet<usize>,
+}
+
+#[derive(Serialize)]
+pub struct IteratorDrop {
+    pub occurrence: Occurrence,
+    #[serde(skip)]
+    pub exit_span: Option<rustc_span::Span>,
+    /// A definite item destructor on this same cleanup path, before storage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_item: Option<String>,
 }
 
 pub(crate) struct DropMove {
