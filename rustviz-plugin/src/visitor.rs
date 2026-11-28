@@ -2658,6 +2658,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         let id = *self.unique_id;
         *self.unique_id += 1;
         self.transfer_sites.insert(id, *site);
+        self.note_try_box_drop(try_expr, source, id);
         self.add_external_event(site.row, ExternalEvent::Move {
           from: source.clone(),
           to: ResourceTy::Anonymous,

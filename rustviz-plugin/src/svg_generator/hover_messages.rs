@@ -163,6 +163,10 @@ pub fn event_dot_box_drop_if_try_returns(my_name: &str) -> String {
     format!("If the `?` here returns early, whatever {} still holds (if anything) is dropped here.", styled_name_html(my_name))
 }
 
+pub fn event_dot_box_remainder_drop_if_try_returns(my_name: &str) -> String {
+    format!("If the `?` here returns early, the Box in {} is dropped, freeing its heap allocation if it has one.", styled_name_html(my_name))
+}
+
 // A struct whose fields were partly moved out goes out of scope. Rust
 // drops only the fields that still hold a value (`dropped`); the
 // moved-out ones (`moved`) are already gone, and the struct as a whole
@@ -1116,11 +1120,12 @@ pub fn arrow_rc_call(fn_name: &String, to_name: &String, call: RcCall) -> String
 // expression `r?` itself); on failure the function returns early and
 // the error (converted with `From`) or the `None` goes to the caller.
 // `value`: what `r` holds needs no drop (#484).
-pub fn event_dot_move_into_try(my_name: &String, target: Option<&String>, kind: TryMove, value: bool) -> String {
+pub fn event_dot_move_into_try(my_name: &str, target: Option<&str>, kind: TryMove, value: bool, projected: bool) -> String {
     let name = styled_name_html(my_name);
     let gets = match target {
         Some(t) => format!("{} gets the value inside it", styled_name_html(t)),
-        None => format!("`{}?` gives the value inside it", my_name),
+        None if projected => format!("`({my_name})?` gives the value inside it"),
+        None => format!("`{my_name}?` gives the value inside it"),
     };
     let what = if value { "value" } else { "resource" };
     match kind {
@@ -1161,7 +1166,7 @@ pub(crate) fn returned_call_value(f: &crate::svg_generator::data::Function, path
     if f.result_try.is_some() {
         return callable_result_at("the caller", f, path, None);
     }
-    let value = function_result_value(f);
+    let value = function_result_in_path(f, path);
     let returned = returned_value_containing(path, value);
     format!("The caller receives {returned}")
 }
@@ -1187,8 +1192,8 @@ fn callable_result_at(receiver: &str, f: &Function, path: &[crate::facts::value_
         Some("") => return format!("{receiver} {verb} a {what} from the call to {callee}"),
         Some(wrapper) => format!("a {what} inside the {wrapper} that {callee}() returns"),
         None if acquired.is_some() && path.is_empty() && f.cast_to.is_none() =>
-            format!("the {what} {callee}() returns"),
-        None => function_result_value(f),
+            function_result(f, held(!f.result_is_resource)),
+        None => function_result_in_path(f, path),
     };
     format!("{receiver} {verb} {}", returned_value_containing(path, value))
 }
@@ -2765,21 +2770,23 @@ pub fn ctor_value_phrase(ctor: &str) -> String {
     format!("{} {} value", article, last)
 }
 
-// `let x = Some(one());`: x holds a Some value built around the value the
-// call returns, not that value itself (#1183).
-fn call_result_value(callee: &str, cast_to: Option<&str>) -> String {
-    match cast_to {
-        Some(ty) => format!("the value {callee}() returns, converted to {}", styled_name_html(ty)),
-        None => format!("the value {callee}() returns"),
-    }
+pub(crate) fn function_result_value(f: &Function) -> String {
+    function_result(f, "value")
 }
 
-pub(crate) fn function_result_value(f: &Function) -> String {
+fn function_result_in_path(f: &Function, path: &[crate::facts::value_flow::ReturnPart]) -> String {
+    function_result(f, held(path.is_empty() || !f.result_is_resource))
+}
+
+fn function_result(f: &Function, what: &str) -> String {
     let name = styled_name_html(&f.name);
     if f.operator {
         return format!("the result of the {name} expression");
     }
-    call_result_value(&name, f.cast_to.as_deref())
+    match f.cast_to.as_deref() {
+        Some(ty) => format!("the value {name}() returns, converted to {}", styled_name_html(ty)),
+        None => format!("the {what} {name}() returns"),
+    }
 }
 
 pub(crate) fn function_logo_title(f: &Function) -> String {

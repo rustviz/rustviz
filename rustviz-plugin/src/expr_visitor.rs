@@ -1437,6 +1437,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     Some((from, *kind, read.site))
   }
 
+  /// A projected move into `?` can leave the Box itself for the residual
+  /// edge to drop. Describe this on the move dot while keeping the
+  /// continuing path's partially moved state.
+  pub(crate) fn note_try_box_drop(&mut self, try_expr: &Expr<'_>, source: &ResourceTy, id: usize) {
+    let Some(rap) = source.extract_rap() else { return };
+    let Some((body, local)) = self.body_facts.zip(rap.owner_local()) else { return };
+    if !body.columns.iter().any(|column| column.local == local && column.name == *rap.name() && column.is_box) {
+      return;
+    }
+    let span = try_expr.span.source_callsite();
+    let mut drops = body.residual_drops.iter().filter(|drop| drop.staged.is_none() && drop.local == local
+      && drop.site.lo() == span.lo() && drop.site.hi() == span.hi()
+      && drop.path.as_ref() == Some(rap.name()));
+    if drops.next().is_some_and(|drop| drop.how == "drops_rest") && drops.all(|drop| drop.how == "drops_rest") {
+      self.row_layout.try_box_drops.insert(id);
+    }
+  }
+
   fn mir_callee(&self, expr: &Expr<'_>) -> Option<rustc_hir::def_id::DefId> {
     let typeck = self.tcx.typeck(expr.hir_id.owner);
     typeck.type_dependent_def_id(expr.hir_id).or_else(|| {
@@ -1976,7 +1994,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
   fn add_function(&mut self, name: String, operator: bool) {
     self.add_rap(ResourceAccessPoint::Function(Function {
       mir_result: false, mir_constructor: false, operator, mutable_call_receiver: false,
-      callable_result: false, result_path: Vec::new(), result_try: None, name, hash: self.rap_hashes as u64,
+      callable_result: false, result_path: Vec::new(), result_is_resource: false, result_try: None, name, hash: self.rap_hashes as u64,
       drops_arg: Default::default(), rc_call: None, cast_to: None, inside: None,
     }), self.current_scope, true);
   }
@@ -2629,7 +2647,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
           if let Some(kind) = via_try.filter(|_| returned) {
             let title = self.try_result_titles.get(id).cloned().unwrap_or_else(|| {
               crate::svg_generator::hover_messages::event_dot_move_into_try(
-                &from.name(), None, kind, from.extract_rap().is_some_and(|r| r.holds_value()))
+                &from.name(), None, kind, from.extract_rap().is_some_and(|r| r.holds_value()),
+                matches!(from, ResourceTy::Deref(..) | ResourceTy::DerefField(..) | ResourceTy::Index(..)))
             });
             self.row_layout.aggregate_titles.insert(*id, title);
           }
@@ -5847,14 +5866,18 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
     let outgoing = matches!(to, ResourceTy::Caller) || to.extract_rap().is_some_and(|r| r.is_fn());
     if let ResourceTy::Value(ResourceAccessPoint::Function(f)) = &mut from {
       f.callable_result = call.callable_result;
+      f.result_is_resource = call.result_is_resource;
       if call.callable_result {
         f.result_try = self.body_facts.and_then(|b| b.value_flow.result_used_by_try(call));
       }
     }
     self.set_call_result_path(&mut from, call.site, &to);
     if let ResourceTy::Value(ResourceAccessPoint::Function(f)) = &from {
+      let named_resource = f.result_is_resource && call.callee.is_some_and(|callee|
+        self.tcx.def_kind(callee) == rustc_hir::def::DefKind::Fn);
       if let Some(path) = self.body_facts.and_then(|b| b.value_flow.returned_result(call))
-        .filter(|path| matches!(event, Evt::Copy) || (f.callable_result && (!path.is_empty() || f.result_try.is_some())))
+        .filter(|path| matches!(event, Evt::Copy) || f.result_try.is_some()
+          || (!path.is_empty() && (f.callable_result || named_resource)))
       {
         let title = crate::svg_generator::hover_messages::returned_call_value(f, path);
         self.row_layout.returned_call_titles.insert(*self.unique_id, title);
@@ -11623,6 +11646,7 @@ pub fn match_rhs(&mut self, lhs: ResourceTy, rhs:&'tcx Expr, evt: Evt){
                   self.preprocessed_events.retain(|(_, event)| event.get_id() != id);
                 }
                 self.transfer_sites.insert(id, site);
+                self.note_try_box_drop(rhs, &from, id);
                 if let Some(path) = self.body_facts.and_then(|b| b.value_flow.returned_try(rhs.span)).filter(|p| !p.is_empty()) {
                   let title = crate::svg_generator::hover_messages::event_dot_try_into_returned_ctor(
                     &from.name(), kind, path, from.extract_rap().is_some_and(|r| r.holds_value()) && matches!(from, ResourceTy::Value(_)));
@@ -15240,10 +15264,7 @@ fn ty_has_std_sync_primitive<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
     match ty.kind() {
       rustc_middle::ty::Adt(def, args) => {
         let did = def.did();
-        if !did.is_local()
-          && matches!(tcx.crate_name(did.krate).as_str(), "std" | "alloc" | "core")
-          && matches!(tcx.item_name(did).as_str(), "Mutex" | "RwLock" | "Condvar" | "Barrier")
-        {
+        if crate::facts::value_flow::is_std_sync_primitive(tcx, *def) {
           return true;
         }
         args.types().any(|t| go(tcx, t, depth + 1, seen))

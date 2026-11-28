@@ -9,7 +9,7 @@ use rustc_middle::mir::{
     AggregateKind, BasicBlock, Body, BorrowKind, Local, LocalInfo, Location, Operand, Place, ProjectionElem, Rvalue,
     StatementKind, TerminatorKind, RETURN_PLACE,
 };
-use rustc_middle::ty::TyCtxt;
+use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_span::{sym, Span};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -101,6 +101,7 @@ pub(crate) struct Call {
     pub returns_reference: bool,
     pub returns_unit: bool,
     pub copyable: bool,
+    pub result_is_resource: bool,
     pub drops_arg: bool,
     pub try_branch: bool,
     pub callable_result: bool,
@@ -297,6 +298,38 @@ impl ValueFlow {
     pub fn own_parameter_borrow(&self, binding: Local, parameter: Local) -> Option<bool> {
         let &(argument, whole) = self.owned_parameter_borrows.get(&binding)?;
         (argument == parameter).then_some(whole)
+    }
+}
+
+/// std's synchronization types are resources even on targets where their
+/// implementations do not need drop glue.
+pub(crate) fn is_std_sync_primitive<'tcx>(
+    tcx: TyCtxt<'tcx>, def: rustc_middle::ty::AdtDef<'tcx>,
+) -> bool {
+    let did = def.did();
+    !did.is_local()
+        && matches!(tcx.crate_name(did.krate).as_str(), "std" | "alloc" | "core")
+        && matches!(tcx.item_name(did).as_str(), "Mutex" | "RwLock" | "Condvar" | "Barrier")
+}
+
+/// A call's destination type can prove cleanup only if every value of
+/// that type owns a resource. `needs_drop` alone also admits an empty
+/// variant and unknown generic payloads.
+fn result_owns_resource<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    use rustc_middle::ty::TyKind;
+    match *ty.kind() {
+        TyKind::Adt(def, args) => {
+            is_std_sync_primitive(tcx, def) || def.has_dtor(tcx)
+                || (!def.is_manually_drop() && !def.is_union() && !def.variants().is_empty()
+                    && def.variants().iter().all(|variant| {
+                        variant.fields.iter().any(|field| result_owns_resource(tcx, field.ty(tcx, args)))
+                    }))
+        }
+        TyKind::Tuple(fields) => fields.iter().any(|field| result_owns_resource(tcx, field)),
+        TyKind::Array(elem, len) => len.try_to_target_usize(tcx).is_some_and(|n| n != 0)
+            && result_owns_resource(tcx, elem),
+        TyKind::Closure(_, args) => result_owns_resource(tcx, args.as_closure().tupled_upvars_ty()),
+        _ => false,
     }
 }
 
@@ -797,6 +830,7 @@ fn collect_blocks<'tcx>(
             returns_reference: ty.is_ref(),
             returns_unit: ty.is_unit(),
             copyable,
+            result_is_resource: result_owns_resource(tcx, ty),
             drops_arg: def.is_some_and(|id| tcx.is_diagnostic_item(sym::mem_drop, id)),
             try_branch,
             callable_result,

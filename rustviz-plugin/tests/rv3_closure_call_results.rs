@@ -124,3 +124,18 @@ fn shared_call(s: String) {
     let second = c();
     drop((first, second));
 }
+
+fn returned_record(s: String) -> Record {
+    let c = move || s;
+    Record { value: c() }
+}
+
+struct Plain(u32);
+
+fn wrapped_plain(s: String) -> Result<Plain, String> {
+    let c = move || {
+        drop(s);
+        Plain(7)
+    };
+    Ok(c())
+}

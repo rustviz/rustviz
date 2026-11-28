@@ -536,6 +536,7 @@ pub struct Function {
     pub(crate) mutable_call_receiver: bool,
     pub callable_result: bool,
     pub(crate) result_path: Vec<crate::facts::value_flow::ReturnPart>,
+    pub(crate) result_is_resource: bool,
     pub(crate) result_try: Option<TryMove>,
     pub name: String,
     pub hash: u64,
@@ -4347,7 +4348,8 @@ impl Event {
                     ResourceTy::Caller => Some("the caller".to_owned()),
                     _ => None,
                 };
-                hover_messages::event_dot_move_into_try(&is.name(), target.as_ref(), *kind, is_plain(is))
+                hover_messages::event_dot_move_into_try(&is.name(), target.as_deref(), *kind, is_plain(is),
+                    matches!(is, ResourceTy::Deref(..) | ResourceTy::DerefField(..) | ResourceTy::Index(..)))
             }
             // Moving a `&mut` moves the reference, not its referent; so
             // does moving a struct with a `&T` field (#637).
