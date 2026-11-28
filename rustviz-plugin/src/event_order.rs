@@ -1508,6 +1508,8 @@ pub(crate) enum StoredLoan {
 /// Coincident effects on one column can include a dot without an arrow.
 #[derive(Default, Debug)]
 pub struct RowLayout {
+    pub(crate) temp_drop_flags: BTreeSet<usize>,
+    pub(crate) temp_moves: BTreeMap<usize, crate::svg_generator::data::TempMoveDisplay>,
     /// The scope-ending MIR occurrence selected before rows are shifted or
     /// stacked. Two exits on the same printed line can have different drops.
     pub(crate) scope_ends: BTreeMap<usize, crate::facts::ScopeEnd>,
@@ -1588,6 +1590,8 @@ impl RowLayout {
         self.scope_end_ids.append(&mut other.scope_end_ids);
         self.holder_handoff_titles.append(&mut other.holder_handoff_titles);
         self.result_lend_titles.append(&mut other.result_lend_titles);
+        self.temp_drop_flags.append(&mut other.temp_drop_flags);
+        self.temp_moves.append(&mut other.temp_moves);
         self.aggregate_titles.append(&mut other.aggregate_titles);
         self.temporary_staged_moves.append(&mut other.temporary_staged_moves);
         self.shadowed_borrow_lenders.append(&mut other.shadowed_borrow_lenders);

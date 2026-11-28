@@ -2362,6 +2362,25 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         }
       }
     }
+    // A for head can own a remainder outside the iteration frame. The
+    // same MIR drop receives both the break and the exhaustion edge.
+    // A staged value already moved into a different temporary does not
+    // identify that containing place's destructor.
+    if let Some(body) = self.body_facts.filter(|_| ordinary_exit) {
+      let mut ends = Vec::new();
+      for (idx, name) in self.scope_names(0, end) {
+        let Some(rap) = self.raps.get(name).map(|r| &r.rap) else { continue };
+        if !rap.is_temporary() || self.skip_raps.contains(name) { continue; }
+        let anchor = Some(site.source_callsite().with_parent(None));
+        let Some(temp) = rap.owner_local().and_then(|l| body.temporary(l))
+          .filter(|t| t.has_root_drop || t.root_flags.contains_key(&anchor)) else { continue };
+        droppable.retain(|(_, r)| r.hash() != rap.hash());
+        if temp.root_flags.contains_key(&anchor) && !ends.iter().any(|(_, r)| r == rap) {
+          ends.push((idx, rap.clone()));
+        }
+      }
+      droppable.extend(ends);
+    }
     droppable.sort_by_cached_key(|(i, rap)| {
       let field_order = exit_facts.iter().find(|(local, name, _)|
         Some(*local) == rap.owner_local() && *name == rap.name()).map(|(_, _, e)| e.field_order.clone());
@@ -2408,8 +2427,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     };
     // `process::exit` ends the process: nothing is dropped, and each
     // local's column ends here with a dot that says so (#1172). (A
-    // temporary or a tuple scrutinee isn't dropped either; they have
-    // no column to end.)
+    // temporary that still owns a value also has a column to end.)
     // (So does a call to a function of the user's that never returns and
     // doesn't always panic, `no_drop_exit`: it says how, #1553.)
     let process_exit = no_drop_exit.or_else(|| match how {
@@ -2417,6 +2435,24 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       _ => None,
     });
     if process_exit.is_some() {
+      // The callee may abort, loop, or unwind. A terminal dot describes
+      // the end of the picture without promising a destructor ran.
+      if let Some(body) = self.body_facts {
+        let mut ends: Vec<_> = order.iter().filter_map(|(&name, &idx)| {
+          let ro = &self.raps.get(name)?.rap;
+          let calls = body.scope_ends.terminal_calls.get(&ro.owner_local()?)?;
+          (ro.is_temporary() && calls.iter().any(|(span, _)| span.with_parent(None) == site.source_callsite().with_parent(None)))
+            .then(|| (idx, ro.clone()))
+        }).collect();
+        ends.sort_by_key(|(idx, _)| std::cmp::Reverse(*idx));
+        for (_, ro) in ends {
+            let id = *self.unique_id;
+            *self.unique_id += 1;
+            self.row_layout.terminal_calls.insert(id);
+            self.exit_drops.insert(id);
+            self.add_external_event(line, ExternalEvent::GoOutOfScope { ro, id, exit_site: Some(site.source_callsite()), early: None });
+        }
+      }
       for (_, rap) in droppable {
         if rap.is_temporary() {
           continue;
@@ -2468,6 +2504,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       } else {
         format!("here, where `{}` leaves early", how)
       };
+      if rap.owner_local().and_then(|l| self.body_facts?.temporary(l))
+        .and_then(|t| t.root_flags.get(&Some(site.source_callsite().with_parent(None)))) == Some(&true) {
+        self.row_layout.temp_drop_flags.insert(id);
+      }
       match temp_ty {
         Some((ty, literal, part)) => {
           let early = self.unbranched_temps.contains(&rap);
@@ -3565,52 +3605,104 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
   }
 
-  /// The id of the move among `events` (one arm's, not inside a
-  /// conditional nested in it) that leaves nothing that needs drop in
-  /// the split scrutinee temporary `t`: the last of the moves out of it
-  /// into the bindings of a pattern that takes all of it
-  /// (`temp_emptiers`, #1386). None when the arm leaves something in it.
-  fn emptying_move(&self, events: &[(usize, ExternalEvent)], t: &ResourceAccessPoint) -> Option<usize> {
-    let groups = self.temp_emptiers.get(t.hash())?;
-    let moves: Vec<(String, usize)> = events.iter().filter_map(|(_, e)| match e {
-      ExternalEvent::Move { from: ResourceTy::Value(f), to, id, .. } if f == t => to.extract_rap().map(|r| (r.name().to_owned(), *id)),
-      _ => None,
-    }).collect();
-    groups.iter()
-      .filter(|g| g.iter().all(|n| moves.iter().any(|(m, _)| m == n)))
-      .filter_map(|g| moves.iter().filter(|(m, _)| g.contains(m)).map(|(_, id)| *id).max())
-      .max()
-  }
-
-  /// Every arm's move that empties a split scrutinee temporary
-  /// (`emptying_move`), into `temp_emptying_moves`: the temporary's leg
-  /// in that arm ends there (#1386). When every arm that reaches the
-  /// join emptied it (the others leave the conditional), nothing is left
-  /// to drop where the conditional ends: that drop goes (it would be a
-  /// dot on no line).
-  pub fn mark_temp_emptying_moves(&mut self, from: usize) {
-    fn walk(this: &ExprVisitor<'_, '_>, events: &[(usize, ExternalEvent)], temps: &[ResourceAccessPoint], out: &mut Vec<usize>, dead: &mut HashSet<usize>) {
-      for (_, e) in events {
-        let ExternalEvent::Branch { branches, live_vars, merge_point, .. } = e else { continue };
-        for t in temps {
-          let mut all = branches.iter().any(|b| !b.diverges) && live_vars.contains(t);
-          for b in branches {
-            let m = this.emptying_move(&b.e_data, t);
-            out.extend(m);
-            all &= b.diverges || m.is_some();
+  fn temp_move(&self, event: &ExternalEvent) -> Option<(u64, TempMoveDisplay)> {
+    use crate::facts::{TransientPlace, TempValue};
+    let ExternalEvent::Move { from: ResourceTy::Value(from), to, .. } = event else { return None };
+    if !from.is_split_scrutinee_temporary() { return None; }
+    let facts = self.body_facts?;
+    let source = from.owner_local()?;
+    let dest = to.extract_rap()?;
+    let local = dest.owner_local().or_else(|| dest.ref_local())?;
+    let mut work = vec![TransientPlace { local: source, projection: Vec::new() }];
+    let mut seen = BTreeSet::new();
+    let mut effects = Vec::new();
+    while let Some(pictured) = work.pop() {
+      if !seen.insert(pictured.clone()) { continue; }
+      let Some(temp) = facts.temporary(pictured.local) else { continue };
+      for transfer in &temp.moves {
+        let Some(into) = &transfer.into else { continue };
+        if into.local == local && into.projection.is_empty() {
+          let value = if pictured.projection.is_empty() { transfer.after }
+            else if transfer.from == pictured { TempValue::Empty }
+            else if let Some((_, value)) = transfer.enclosing.iter().find(|(p, _)| p == &pictured) { *value }
+            else { continue };
+          let field = if transfer.from == pictured { Some(String::new()) }
+            else if pictured.projection.is_empty() { transfer.field.clone() }
+            else { None };
+          effects.push(TempMoveDisplay { value, field });
+        } else if let Some(suffix) = pictured.projection.strip_prefix(transfer.from.projection.as_slice()) {
+          // The enclosing aggregate is itself moved into the next stage.
+          // Preserve the position of the pictured value inside it.
+          if facts.temporary(into.local).is_some_and(|c| c.created_at.as_slice() == [transfer.at])
+              && into.local != pictured.local {
+            let mut nested = into.clone();
+            nested.projection.extend_from_slice(suffix);
+            work.push(nested);
           }
-          if all {
-            // (The drop was recorded with the temporary, before the arms.)
-            if let Some((_, ExternalEvent::TemporaryDrop { id, .. })) = events.iter()
-              .find(|(l, x)| *l >= *merge_point && matches!(x, ExternalEvent::TemporaryDrop { ro, id, .. } if ro == t && !this.exit_drops.contains(id))) {
-              dead.insert(*id);
-            }
-          }
-        }
-        for b in branches {
-          walk(this, &b.e_data, temps, out, dead);
         }
       }
+    }
+    let mut effect = effects.first()?.clone();
+    if effects.iter().any(|e| e.field != effect.field) { effect.field = None; }
+    if effects.iter().any(|e| e.value != effect.value) {
+      effect.value = if effects.iter().any(|e| matches!(e.value, TempValue::Empty | TempValue::Conditional)) {
+        TempValue::Conditional
+      } else { TempValue::Remaining };
+    }
+    Some((*from.hash(), effect))
+  }
+
+  /// Carry the remainder of each MIR transfer to its dot. If all the
+  /// continuing arms consumed the last owned part, suppress the common
+  /// end dot. A divergent arm doesn't reach it.
+  pub fn mark_temp_moves(&mut self, from: usize) {
+    use crate::facts::TempValue;
+    fn walk(this: &ExprVisitor<'_, '_>, events: &[(usize, ExternalEvent)],
+            roots: &BTreeMap<u64, rustc_middle::mir::Local>, out: &mut BTreeMap<usize, TempMoveDisplay>, flags: &mut BTreeSet<usize>, dead: &mut HashSet<usize>) -> BTreeSet<u64> {
+      let mut empty = BTreeSet::new();
+      for (_, e) in events {
+        let drop = match e {
+          ExternalEvent::TemporaryDrop { ro, id, .. } if !this.exit_drops.contains(id) => Some((ro, *id, None)),
+          ExternalEvent::GoOutOfScope { ro, id, exit_site, .. } => Some((ro, *id, *exit_site)),
+          ExternalEvent::OwnerDropIfTryReturns { ro, id, span } => Some((ro, *id, Some(*span))),
+          _ => None,
+        };
+        if let Some((ro, id, site)) = drop {
+          let anchor = site.map(|s| s.source_callsite().with_parent(None));
+          let group = if ro.is_member() { ro.get_owner() } else { *ro.hash() };
+          if roots.get(&group).and_then(|&l| this.body_facts?.temporary(l))
+            .and_then(|t| t.root_flags.get(&anchor)) == Some(&true) {
+            flags.insert(id);
+          }
+        }
+        if let Some((column, effect)) = this.temp_move(e) {
+          if effect.value == TempValue::Empty { empty.insert(column); }
+          out.insert(e.get_id(), effect);
+        }
+        if let ExternalEvent::Branch { branches, live_vars, .. } = e {
+          let mut common: Option<BTreeSet<u64>> = None;
+          for arm in branches {
+            let ended = walk(this, &arm.e_data, roots, out, flags, dead);
+            if !arm.diverges {
+              if let Some(common) = &mut common {
+                common.retain(|k| ended.contains(k));
+              } else {
+                common = Some(ended);
+              }
+            }
+          }
+          for hash in common.into_iter().flatten() {
+            let mut ends = events.iter().filter_map(|(_, e)| match e {
+              ExternalEvent::TemporaryDrop { ro, id, .. } if *ro.hash() == hash && live_vars.contains(ro)
+                && !this.exit_drops.contains(id) => Some(*id),
+              _ => None,
+            });
+            if let Some(id) = ends.next().filter(|_| ends.next().is_none()) { dead.insert(id); }
+            empty.insert(hash);
+          }
+        }
+      }
+      empty
     }
     fn prune(events: &mut Vec<(usize, ExternalEvent)>, dead: &HashSet<usize>) {
       events.retain(|(_, e)| !(matches!(e, ExternalEvent::TemporaryDrop { .. }) && dead.contains(&e.get_id())));
@@ -3677,27 +3769,17 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     }
     self.event_line_map.values_mut().flatten().for_each(part_copy);
-    if self.temp_emptiers.is_empty() {
-      return;
-    }
-    #[expect(clippy::disallowed_methods, reason = "sorted by hash below")]
-    let mut temps: Vec<ResourceAccessPoint> = self.raps.values()
-      .map(|rd| rd.rap.clone())
-      .filter(|r| self.temp_emptiers.contains_key(r.hash()))
-      .collect();
-    temps.sort_by_key(|r| *r.hash());
-    let mut out = Vec::new();
-    // A `while let` body (also a `while` let chain's) is drawn inline, one
-    // pass, on which the pattern matched (#382): its moves are on the
-    // function's own timeline.
-    for t in &temps {
-      out.extend(self.emptying_move(&self.preprocessed_events[from..], t));
-    }
+    let mut out = BTreeMap::new();
     let mut dead = HashSet::new();
-    walk(self, &self.preprocessed_events[from..], &temps, &mut out, &mut dead);
-    out.sort_unstable();
-    out.dedup();
-    self.temp_emptying_moves.extend(out);
+    let mut flags = BTreeSet::new();
+    // A root drop also controls its pictured fields. The group owner
+    // identifies the column, including extended temporary struct fields.
+    #[expect(clippy::disallowed_methods, reason = "collected by unique column hash into a BTreeMap")]
+    let roots = self.raps.values().filter(|rd| rd.rap.is_temporary())
+      .filter_map(|rd| Some((*rd.rap.hash(), rd.rap.owner_local()?))).collect();
+    walk(self, &self.preprocessed_events[from..], &roots, &mut out, &mut flags, &mut dead);
+    self.row_layout.temp_drop_flags.extend(flags);
+    self.row_layout.temp_moves.extend(out);
     if !dead.is_empty() {
       let mut tail = self.preprocessed_events.split_off(from);
       prune(&mut tail, &dead);
@@ -3783,7 +3865,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
       // (Not when the matched block's pattern took all of it: that
       // leg ends at the move, #1386.)
-      if !if_diverges && self.emptying_move(if_ev, &ro).is_none() {
+      if !if_diverges && !if_ev.iter().any(|(_, e)| self.temp_move(e).is_some_and(|(col, effect)| col == *ro.hash() && effect.value == crate::facts::TempValue::Empty)) {
         if_ev.push((line, ExternalEvent::TemporaryDrop { ro, ty, when: then_when, literal, early: false, part, id: *self.unique_id }));
         *self.unique_id += 1;
       }
@@ -4812,24 +4894,6 @@ fn same_place(a: &Expr, b: &Expr) -> bool {
       matches!((pa.res, pb.res), (Res::Local(x), Res::Local(y)) if x == y),
     (ExprKind::Field(ra, fa), ExprKind::Field(rb, fb)) => fa.name == fb.name && same_place(ra, rb),
     _ => false,
-  }
-}
-
-/// The temporary an extending `&` borrows (part of): `operand` itself
-/// when it's a value expression (`&String::from("a")`), or the value
-/// expression a field or index projection is applied to
-/// (`&make_user().name`, `&String::from("a")[1..]`, `&mk()[0].name`),
-/// which Rust's temporary lifetime extension reaches too (#1165). None
-/// when the `&` borrows a place (`&x`, `&v[0]`, `&p.f`, `&*r`) or
-/// another borrow (`&&x`).
-pub(crate) fn extended_temp_operand<'a, 'tcx>(operand: &'a Expr<'tcx>) -> Option<&'a Expr<'tcx>> {
-  let mut base = operand;
-  while let ExprKind::Field(b, _) | ExprKind::Index(b, _, _) = base.kind {
-    base = b;
-  }
-  match base.kind {
-    ExprKind::Path(_) | ExprKind::Unary(UnOp::Deref, _) | ExprKind::AddrOf(..) => None,
-    _ => Some(base),
   }
 }
 
@@ -9462,7 +9526,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         })
       {
         let head_from = self.in_scope.len();
-        let head_temp = self.note_for_head_temporary(head_arg, guard_expr, expr);
+        let head_temp = self.note_for_head_temporary(head_arg, guard_expr, expr, arms[0].pat.span);
         // Iterand event: shape of head_arg dictates the arrow.
         //   &v       ⇒ SBorrow from v
         //   &mut v   ⇒ MBorrow from v
@@ -10774,7 +10838,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     }
     let let_else_literal = matches!(part, Some(TempPart::LetElse(None)))
       && matches!(expr.kind, ExprKind::Tup(_) | ExprKind::Struct(..) | ExprKind::Array(_));
-    let tmp = self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into, part, false);
+    let tmp = self.record_temporary_drop(expr, strip_module_paths(&ty.to_string()), fn_name, when, end_line, owner, into, part, None);
     if let (true, Some(t)) = (let_else_literal, &tmp) {
       self.note_let_else_literal_temp(expr, t.clone());
     }
@@ -11165,11 +11229,11 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     owner: Option<HirId>,
     into: Vec<(ResourceAccessPoint, usize)>,
     part: Option<TempPart>,
-    iterator_elements: bool,
+    iterator_binding: Option<rustc_span::Span>,
   ) -> Option<ResourceAccessPoint> {
     // Branch events are sliced out by line, so a one-line `match` / `if`
     // can't hold a column of its own (the same limit as #354 / #459).
-    if self.inside_one_line_branch(expr) {
+    if self.inside_one_line_branch(expr) || self.body_facts.is_some_and(|b| b.promoted_operands.contains(&expr.hir_id)) {
       return None;
     }
     self.temp_drops_noted.insert(expr.hir_id);
@@ -11207,13 +11271,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     });
     self.add_owner(tmp_name.clone(), ref_mut, false, false, InteriorMut::No, end_line, !self.inside_branch);
     if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
-      // A temporary column can use residual drop facts only when
-      // rustc identifies one local for its creation expression.
-      let mut locals = self.mir_body.local_decls.iter_enumerated().filter(|(local, decl)|
-        local.index() > self.mir_body.arg_count && !decl.is_user_variable()
-          && decl.source_info.span.source_callsite().with_parent(None) == expr.span.source_callsite().with_parent(None)
-          && decl.ty == self.tcx.typeck(expr.hir_id.owner).expr_ty(expr));
-      o.local = locals.next().map(|(local, _)| local).filter(|_| locals.next().is_none());
+      o.local = self.body_facts.and_then(|b| match iterator_binding {
+        Some(span) => {
+          let mut bindings = b.temps.iter().filter(|t| t.iterator_binding == Some(span.with_parent(None)));
+          bindings.next().filter(|_| bindings.next().is_none())
+        }
+        None => b.expression_temp(expr.hir_id),
+      }).map(|t| t.local);
       o.unbound_temp = true;
       o.temp_part = part.clone();
       o.ctor_temp = (part.is_none() || ctor_literal) && !expr.span.from_expansion()
@@ -11238,7 +11302,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // Variables moved into the temporary (`vec![s];`, #570; the fields
     // `P { n: 1, ..p }` takes from p, #574).
     for (src, src_line) in into {
-      if iterator_elements { self.approx_notes.push(ApproxNote::IteratorElement { id: *self.unique_id }); }
+      if iterator_binding.is_some() { self.approx_notes.push(ApproxNote::IteratorElement { id: *self.unique_id }); }
       self.update_rap(&src, line);
       self.add_ev(src_line, Evt::Move, ResourceTy::Value(tmp.clone()), ResourceTy::Value(src), false);
     }
@@ -11268,10 +11332,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // drawn moving out of it, what it binds by reference borrowing from
     // it (#1386).
     if tmp.is_split_scrutinee_temporary() {
-      let emptiers = self.scrutinee_temp_emptiers(expr);
-      if !emptiers.is_empty() {
-        self.temp_emptiers.insert(*tmp.hash(), emptiers);
-      }
       // A tuple literal or a constructor a pattern takes apart element
       // by element (`literal_pat_parents`): each element it is built
       // from (`make()` in `((make(), 1), make())`, `Some(make())`).
@@ -11299,7 +11359,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// say so on one like a call's result. Nothing is stated for a head
   /// that is a reference or whose iterator owns nothing (`&v`, `0..n`,
   /// `v.iter()`, `s.chars()`).
-  fn note_for_head_temporary(&mut self, head: &'tcx Expr<'tcx>, iter_call: &'tcx Expr<'tcx>, for_expr: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
+  fn note_for_head_temporary(&mut self, head: &'tcx Expr<'tcx>, iter_call: &'tcx Expr<'tcx>, for_expr: &'tcx Expr<'tcx>, binding: rustc_span::Span) -> Option<ResourceAccessPoint> {
     let typeck = self.tcx.typeck(iter_call.hir_id.owner);
     let ty = typeck.expr_ty(iter_call);
     if ty.is_ref() || !self.needs_drop(ty, iter_call.hir_id.owner) || self.temp_drops_noted.contains(&head.hir_id) {
@@ -11319,7 +11379,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     let shown = strip_module_paths(&ty.to_string());
     let shown = if shown.contains('{') { "iterator".to_owned() } else { shown };
     let elements = vec_macro_elems(self.tcx, head).and_then(|_| self.literal_moved_places(head)).unwrap_or_default();
-    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, elements, None, true)
+    self.record_temporary_drop(head, shown, "into_iter".to_owned(), "when the `for` loop ends", end_line, None, elements, None, Some(binding))
   }
 
   /// True iff `expr` sits inside an `if` / `match` that starts and ends
@@ -11486,42 +11546,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       }
     };
     Some((path, pats, kept))
-  }
-
-  /// For the temporary of `expr`, a `match` / `if let` / `while let` /
-  /// let-chain scrutinee: the by-value bindings of each of its patterns
-  /// that, when it matches, takes everything in it that needs drop (one
-  /// group per pattern; #1386). The last of a group's moves out of it ends
-  /// the temporary's leg in that arm (`temp_emptying_moves`).
-  fn scrutinee_temp_emptiers(&self, expr: &'tcx Expr<'tcx>) -> Vec<Vec<String>> {
-    let Some((path, pats, kept)) = self.scrutinee_temp_pats(expr) else { return Vec::new() };
-    let typeck = self.tcx.typeck(expr.hir_id.owner);
-    let env = typing_env(self.tcx, expr.hir_id.owner);
-    if kept {
-      return Vec::new();
-    }
-    let mut out = Vec::new();
-    for p in &pats {
-      let Some(sub) = self.pat_at_path(p, &path, typeck) else { continue };
-      // Moves out everything that needs drop.
-      if self.path_left(p, &path, typeck, env).is_some() {
-        continue;
-      }
-      let mut names: Vec<String> = Vec::new();
-      sub.walk_always(|b| {
-        if let PatKind::Binding(_, _, ident, _) = b.kind {
-          let by_ref = matches!(typeck.pat_binding_modes().get(b.hir_id).map(|m| m.0), Some(rustc_hir::ByRef::Yes(..)));
-          let name = ident.to_string();
-          if !by_ref && !self.ty_is_copy(typeck.node_type(b.hir_id), b.hir_id.owner) && !names.contains(&name) {
-            names.push(name);
-          }
-        }
-      });
-      if !names.is_empty() {
-        out.push(names);
-      }
-    }
-    out
   }
 
   /// True iff `elem` is a `tuple_scrutinee_elem` that no pattern binds
@@ -12792,13 +12816,8 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if annotation.0 != rustc_hir::ByRef::No || init.span.from_expansion() {
       return false;
     }
-    let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, borrow_mut, operand) = init.kind else { return false };
-    // `&x`, `&v[0]`, `&p.f`, `&*r` borrow a place, not a temporary.
-    // `&make_user().name` / `&String::from("a")[1..]` borrow part of
-    // the temporary `make_user()` / `String::from("a")`, which is
-    // extended the same way (#1165).
-    let place = operand;
-    let Some(operand) = extended_temp_operand(operand) else { return false };
+    let ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, borrow_mut, _) = init.kind else { return false };
+    let Some(operand) = self.borrowed_temporary(init.hir_id) else { return false };
     let typeck = self.tcx.typeck(hirid.owner);
     let lhs_ty = typeck.node_type(hirid);
     let tmp_ty = typeck.expr_ty(operand);
@@ -12809,14 +12828,13 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
 
     // `&P { name: &make() }`: the temporaries the operand borrows are
     // extended too (#856).
-    let mut nested = Vec::new();
-    self.walk_extending(operand, &mut nested);
+    let nested = self.nested_temporary_columns(init);
     let line_num = expr_to_line(init, &self.tcx);
     let tmp = self.extended_temp_column(operand, borrow_mut, tmp_ty, line_num);
     let tmp_name = tmp.name().to_owned();
     // `&make_user().name`: the borrow is of the temporary's field
     // column, when it has one.
-    let tmp = self.temp_field_column(&tmp, place, operand).unwrap_or(tmp);
+    let tmp = self.temp_field_column(&tmp, operand).unwrap_or(tmp);
 
     let name = self.raps.declare(hirid, &self.tcx);
     self.add_ref(name.clone(), bool_of_mut(lhs_ty.ref_mutability().unwrap()), bool_of_mut(annotation.1),
@@ -12834,22 +12852,26 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     true
   }
 
-  /// The column of the field `place` (`make_user().name`) of the
-  /// temporary `base` (`make_user()`) whose column is `tmp`, if it has
-  /// one: `(temporary).name`. None through an index.
-  fn temp_field_column(&self, tmp: &ResourceAccessPoint, place: &'tcx Expr<'tcx>, base: &'tcx Expr<'tcx>) -> Option<ResourceAccessPoint> {
-    let mut fields = Vec::new();
-    let mut e = place;
-    while e.hir_id != base.hir_id {
-      let ExprKind::Field(b, ident) = e.kind else { return None };
-      fields.push(ident.as_str().to_owned());
-      e = b;
+  fn borrowed_temporary(&self, borrow: HirId) -> Option<&'tcx Expr<'tcx>> {
+    let mut temps = self.body_facts?.temps.iter().filter(|t| !t.created_at.is_empty()
+      && t.extension.as_ref().is_some_and(|e| e.borrow == Some(borrow)));
+    let id = temps.next()?.expression?;
+    temps.next().is_none().then(|| self.tcx.hir_expect_expr(id))
+  }
+
+  /// A projected MIR borrow may have its own field column.
+  fn temp_field_column(&self, tmp: &ResourceAccessPoint, base: &Expr<'_>) -> Option<ResourceAccessPoint> {
+    let ext = self.body_facts?.expression_temp(base.hir_id)?.extension.as_ref()?;
+    self.raps.get(&format!("{}{}", tmp.name(), ext.fields)).map(|r| r.rap.clone())
+  }
+
+  fn identify_extended_temp(&mut self, name: &str, expr: &Expr<'_>) {
+    let local = self.body_facts.and_then(|b| b.expression_temp(expr.hir_id)).map(|t| t.local);
+    match self.raps.get_mut(name).map(|r| &mut r.rap) {
+      Some(ResourceAccessPoint::Owner(o)) => o.local = local,
+      Some(ResourceAccessPoint::Struct(s)) => s.local = local,
+      _ => {}
     }
-    if fields.is_empty() {
-      return None;
-    }
-    fields.reverse();
-    self.raps.get(&format!("{}.{}", tmp.name(), fields.join("."))).map(|rd| rd.rap.to_owned())
   }
 
   /// The `(temporary N)` column of a temporary that a `let` extends:
@@ -12860,6 +12882,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
     self.define_lhs(tmp_name.clone(), borrow_mut == Mutability::Mut, operand, tmp_ty);
+    self.identify_extended_temp(&tmp_name, operand);
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let n_events = self.preprocessed_events.len();
     self.match_rhs(ResourceTy::Value(tmp.clone()), operand, Evt::Move);
@@ -12887,9 +12910,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     if matches!(init.kind, ExprKind::AddrOf(..)) && !matches!(pat.kind, PatKind::Binding(..)) {
       return Vec::new();
     }
-    let mut out = Vec::new();
-    self.walk_extending(init, &mut out);
-    out
+    self.nested_temporary_columns(init)
   }
 
   /// `let r = if c { &String::from("x") } else { &s };` (also `else
@@ -12908,12 +12929,10 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// of the block.
   fn declare_branch_temps(&mut self, init: &'tcx Expr<'tcx>) -> Vec<String> {
     let mut names = Vec::new();
-    let mut borrows = Vec::new();
-    self.branch_extended_temps(init, false, &mut borrows);
+    let borrows = self.branch_extended_temps(init);
     let (scope, inside_branch, frames_at) = (self.current_scope, self.inside_branch, self.exit_frames.len());
-    for b in borrows {
-      let ExprKind::AddrOf(_, borrow_mut, operand) = b.kind else { continue };
-      let Some(tmp) = extended_temp_operand(operand) else { continue };
+    for (tmp, b, _) in borrows {
+      let ExprKind::AddrOf(_, borrow_mut, _) = b.kind else { continue };
       if self.branch_temp_names.contains_key(&tmp.hir_id) {
         continue;
       }
@@ -12945,8 +12964,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
   /// (`nested_ext_temps`). The `let`'s binding is paired with the
   /// branch's value after the branch is visited (`arm_value_uses_local_in`).
   fn make_branch_temp(&mut self, addr: &'tcx Expr<'tcx>) {
-    let ExprKind::AddrOf(_, _, place) = addr.kind else { return };
-    let Some(tmp) = extended_temp_operand(place) else { return };
+    let Some(tmp) = self.borrowed_temporary(addr.hir_id) else { return };
     let Some(name) = self.branch_temp_names.get(&tmp.hir_id).cloned() else { return };
     let Some(decl) = self.uninit_locals.remove(&tmp.hir_id) else { return };
     let tmp_ty = self.tcx.typeck(tmp.hir_id.owner).expr_ty(tmp);
@@ -12955,6 +12973,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.deferred_decl_at.insert(name.clone(), decl.frames_at);
     let names_at = self.in_scope.len();
     self.define_lhs(name.clone(), bool_of_mut(decl.annotation.1), tmp, tmp_ty);
+    self.identify_extended_temp(&name, tmp);
     self.fill_deferred_slot(tmp.hir_id, names_at);
     (self.current_scope, self.inside_branch) = saved;
     let rap = self.raps.get(&name).unwrap().rap.to_owned();
@@ -12970,67 +12989,31 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       self.add_ev(expr_to_line(tmp, &self.tcx), Evt::Bind, ResourceTy::Value(rap.clone()), ResourceTy::Anonymous, false);
     }
     // `&make_user().name`: the borrow is of the temporary's field column.
-    let col = self.temp_field_column(&rap, place, tmp).unwrap_or(rap);
+    let col = self.temp_field_column(&rap, tmp).unwrap_or(rap);
     self.nested_ext_temps.insert(addr.hir_id, col);
   }
 
-  /// `bind_nested_extended_temps`'s walk over the extending expression `e`.
-  fn walk_extending(&mut self, e: &'tcx Expr<'tcx>, out: &mut Vec<String>) {
-    if e.span.from_expansion() {
-      return;
+  /// The same remainder scope may extend several nested operands.
+  /// Visit inner borrows before the enclosing aggregate which holds them.
+  fn nested_temporary_columns(&mut self, init: &Expr<'_>) -> Vec<String> {
+    let mut borrows: Vec<_> = self.body_facts.into_iter().flat_map(|b| &b.temps).filter_map(|t| {
+      let ext = t.extension.as_ref()?;
+      let borrow = ext.borrow?;
+      if ext.initializer != init.hir_id || t.conditional || borrow == init.hir_id { return None; }
+      let addr = self.tcx.hir_expect_expr(borrow);
+      let ExprKind::AddrOf(_, mutability, _) = addr.kind else { return None };
+      Some((addr, self.borrowed_temporary(borrow)?, mutability))
+    }).collect();
+    borrows.sort_by_key(|(b, _, _)| (b.span.hi(), std::cmp::Reverse(b.span.lo())));
+    let mut names = Vec::new();
+    for (addr, operand, mutability) in borrows {
+      let ty = self.tcx.typeck(operand.hir_id.owner).expr_ty(operand);
+      let tmp = self.extended_temp_column(operand, mutability, ty, expr_to_line(operand, &self.tcx));
+      names.push(tmp.name().to_owned());
+      let col = self.temp_field_column(&tmp, operand).unwrap_or(tmp);
+      self.nested_ext_temps.insert(addr.hir_id, col);
     }
-    let typeck = self.tcx.typeck(e.hir_id.owner);
-    match e.kind {
-      ExprKind::AddrOf(rustc_hir::BorrowKind::Ref, borrow_mut, operand) => {
-        // `&x`, `&v[0]`, `&p.f`, `&*r` borrow a place, not a temporary;
-        // `&make().name` borrows part of the temporary `make()` (#1165).
-        let place = operand;
-        let operand = match extended_temp_operand(operand) {
-          Some(o) => o,
-          None if matches!(operand.kind, ExprKind::AddrOf(..)) => operand,
-          None => return,
-        };
-        // Temporaries borrowed inside the operand are extended too, and
-        // are made first: the operand's value borrows from them.
-        self.walk_extending(operand, out);
-        let tmp_ty = typeck.expr_ty(operand);
-        if matches!(operand.kind, ExprKind::AddrOf(..)) || operand.span.from_expansion()
-          || !self.needs_drop(tmp_ty, e.hir_id.owner) {
-          return;
-        }
-        let tmp = self.extended_temp_column(operand, borrow_mut, tmp_ty, expr_to_line(operand, &self.tcx));
-        out.push(tmp.name().to_owned());
-        // `H { r: &make_user().name }`: what holds the reference borrows
-        // the temporary's field column, as `let name = &make_user().name;`
-        // does (#1346).
-        let tmp = self.temp_field_column(&tmp, place, operand).unwrap_or(tmp);
-        self.nested_ext_temps.insert(e.hir_id, tmp);
-      }
-      ExprKind::Struct(_, fields, _) => {
-        for f in fields {
-          self.walk_extending(f.expr, out);
-        }
-      }
-      ExprKind::Tup(elems) | ExprKind::Array(elems) => {
-        for el in elems {
-          self.walk_extending(el, out);
-        }
-      }
-      ExprKind::Call(callee, args) if is_ctor_path(callee, typeck) => {
-        for a in args {
-          self.walk_extending(a, out);
-        }
-      }
-      ExprKind::Cast(inner, _) => self.walk_extending(inner, out),
-      // `let r = { &String::from("x") };`: a block's last expression
-      // is extending too (#1383).
-      ExprKind::Block(b, None) if b.rules == rustc_hir::BlockCheckMode::DefaultBlock => {
-        if let Some(tail) = b.expr {
-          self.walk_extending(tail, out);
-        }
-      }
-      _ => {}
-    }
+    names
   }
 
   /// Structural pat-against-init decomposition. When the pattern's
@@ -15278,6 +15261,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     self.temp_count += 1;
     let tmp_name = temporary_label(self.temp_count);
     self.add_owner(tmp_name.clone(), mutable, false, false, InteriorMut::No, self.current_scope, !self.inside_branch);
+    self.identify_extended_temp(&tmp_name, init);
     let tmp = self.raps.get(&tmp_name).unwrap().rap.to_owned();
     let n_events = self.preprocessed_events.len();
     self.match_rhs(ResourceTy::Value(tmp.clone()), init, Evt::Move);
@@ -15348,6 +15332,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
       let tmp_name = temporary_label(self.temp_count);
       let end_line = span_end_line(&literal.span, &self.tcx);
       self.add_owner(tmp_name.clone(), false, false, false, InteriorMut::No, end_line, false);
+      self.identify_extended_temp(&tmp_name, literal);
       if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
         o.unbound_temp = true;
         o.let_literal_temp = true;
@@ -15370,12 +15355,14 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
     // the right of the `let`, not into one nothing binds (#570).
     if extended {
       self.add_owner(tmp_name.clone(), mutable, false, plain_borrowed, InteriorMut::No, self.current_scope, !self.inside_branch);
+      self.identify_extended_temp(&tmp_name, literal);
       if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
         o.let_literal_temp = true;
       }
     } else {
       let (when, end_line, owner) = self.temporary_scope_end(e)?;
       self.add_owner(tmp_name.clone(), false, false, false, InteriorMut::No, end_line, !self.inside_branch);
+      self.identify_extended_temp(&tmp_name, literal);
       if let Some(ResourceAccessPoint::Owner(o)) = self.raps.get_mut(&tmp_name).map(|rd| &mut rd.rap) {
         o.unbound_temp = true;
         o.let_literal_temp = true;

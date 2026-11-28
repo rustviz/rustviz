@@ -2098,7 +2098,7 @@ fn scope_end_message(
             // started (#1036).
             return (if is_branch_temp_col(ro) {
                     // A temporary a `let` extends through a branch (#1397).
-                    hover_messages::event_dot_go_out_of_scope_temp_made(&name, made_on_line(history, &visualization_data.row_lines))
+                    hover_messages::event_dot_go_out_of_scope_temp_made(&name, made_on_line(history, &visualization_data.row_lines), visualization_data.row_layout.temp_drop_flags.contains(id))
                 } else if end.is_some_and(|e| e.moved && e.unassigned) || init_by_maybe_held(exit_path.as_deref().unwrap_or(history)) {
                     hover_messages::event_dot_go_out_of_scope_maybe_kept(&name, &ro.drop_note())
                 } else {
@@ -2481,7 +2481,7 @@ fn render_dot(
                     let cx = timeline_data.x_val;
                     let cy = event_y;
                     let try_drop = match event {
-                        Event::OwnerDropIfTryReturns { local: Some(local), span } =>
+                        Event::OwnerDropIfTryReturns { local: Some(local), span, .. } =>
                             visualization_data.fn_source_lines.get(hash).and_then(|&function|
                                 visualization_data.state_table.try_drop(function, &name, *local, *span)),
                         _ => None,
@@ -2490,7 +2490,7 @@ fn render_dot(
                         continue;
                     }
                     let try_variant_drop = (|| {
-                        let Event::OwnerDropIfTryReturns { local: Some(local), span } = event else { return None; };
+                        let Event::OwnerDropIfTryReturns { local: Some(local), span, .. } = event else { return None; };
                         let function = *visualization_data.fn_source_lines.get(hash)?;
                         let row = rv_attrs::line_of(*line_number, &visualization_data.row_lines)?;
                         visualization_data.state_table.partial_drop(function, &name, row, *local, Some(*span))
@@ -2627,13 +2627,13 @@ fn render_dot(
                         } else {
                             hover_messages::event_dot_owner_drop_at_reassign_maybe_moved(&name, &note, *by_cond)
                         }
-                    } else if let (Event::TemporaryDrop { ty: None, when, .. }, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
+                    } else if let (Event::TemporaryDrop { ty: None, when, flag, .. }, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
                         // A temporary a `let` extends through a branch,
                         // dropped by an exit after the join (#1436): only
                         // if the branch that made it ran.
-                        hover_messages::event_dot_extended_temporary_drop_made(&name, when, made_at)
-                    } else if let (Event::OwnerDropIfTryReturns { .. }, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
-                        hover_messages::event_dot_temp_drop_if_try_returns_made(&name, made_at)
+                        hover_messages::event_dot_extended_temporary_drop_made(&name, when, made_at, *flag)
+                    } else if let (Event::OwnerDropIfTryReturns { flag, .. }, Some(made_at)) = (event, branch_temp_maybe_made(visualization_data, hash, history, i)) {
+                        hover_messages::event_dot_temp_drop_if_try_returns_made(&name, made_at, *flag)
                     } else if let Some(split) = try_variant_drop {
                         let boxed = matches!(visualization_data.timelines[hash].resource_access_point, ResourceAccessPoint::Struct(Struct { is_box: true, .. }));
                         let scope_end = hover_messages::event_dot_partial_scope_drop(&name, split, false, boxed);
@@ -4501,7 +4501,7 @@ fn timeline_segment_title(
     visualization_data: &VisualizationData,
     line: Option<usize>,
 ) -> String {
-    if let State::FullPrivilege { s: LineState::Uninit } = state {
+    if let State::FullPrivilege { s: LineState::Uninit | LineState::ConditionalRemainder } = state {
         return state.print_message_with_name(rap.name());
     }
     if matches!(state, State::PartialPrivilege { .. } | State::RevokedPrivilege { .. }) && !rap.is_ref() {
@@ -11857,7 +11857,7 @@ fn owner_value_title(rap: &ResourceAccessPoint, vd: &VisualizationData, fn_line:
         return hover_messages::state_full_privilege_copyable(name);
     } else if rap.holds_borrow() && !cell.borrowed_from.is_empty() {
         // An iterator can borrow data through raw pointers.
-        let from = display_places(vd, fn_line, name, &cell.borrowed_from);
+        let from = display_loan_sources(vd, fn_line, name, &cell.borrowed_from);
         if cell.holds.iter().any(|&id| vd.row_layout.uncertain_projected_stores.contains(&(*rap.hash(), id))) {
             let mut title = hover_messages::state_holder_starts_empty(name);
             title.push_str(&hover_messages::state_holder_tracks(name, &from));
@@ -11912,31 +11912,30 @@ fn display_place(vd: &VisualizationData, fn_line: FunctionStart, column: &str, p
         }
         None
     })?;
-    let (inner, rest) = (&place[1..close], &place[close + 1..]);
+    let inner = &place[1..close];
     if let Some((base, _variant)) = inner.rsplit_once(" as ") {
         return display_place(vd, fn_line, column, base);
     }
-    let head = &place[..=close];
-    let lines = vd.state_table.lender_lines(fn_line, head);
-    let temps: BTreeSet<&str> = vd.timelines.values()
-        .filter(|t| {
-            let r = &t.resource_access_point;
-            r.name().starts_with("(temporary") && !r.name().contains('.')
-                && vd.fn_source_lines.get(r.hash()).is_some_and(|start| start.body == fn_line.body)
-                && {
-                    // (Its events in a branch's arms too: a temporary made
-                    // in one arm.)
-                    let mut events = Vec::new();
-                    flat_history(&t.history, &[], &mut events);
-                    events.iter().any(|(row, _)| rv_attrs::line_of(*row, &vd.row_lines).is_some_and(|l| lines.contains(&l)))
-                }
-        })
-        .map(|t| t.resource_access_point.name().as_str())
-        .collect();
-    match temps.into_iter().collect::<Vec<_>>().as_slice() {
-        [one] => Some(format!("{one}{rest}")),
-        _ => None,
-    }
+    None
+}
+
+/// Keep loan identities until the column lookup. Two borrows of the
+/// same source expression on one row can belong to different places.
+fn display_loan_sources(vd: &VisualizationData, function: FunctionStart, column: &str, ids: &BTreeSet<usize>) -> Vec<Option<String>> {
+    ids.iter().map(|&id| {
+        let loan = vd.state_table.loan(function, id)?;
+        if loan.source == "temporary" {
+            let local = loan.lender_local?;
+            let suffix = loan.temp_fields.as_deref()?;
+            let mut roots = vd.timelines.values().map(|t| &t.resource_access_point).filter(|r|
+                r.is_temporary() && r.owner_local() == Some(local)
+                    && vd.fn_source_lines.get(r.hash()).is_some_and(|f| f.body == function.body));
+            let root = roots.next()?;
+            return roots.next().is_none().then(|| styled_name_html(&format!("{}{suffix}", root.name())));
+        }
+        loan.projected.as_ref().map(hover_messages::projected_place_html)
+            .or_else(|| display_place(vd, function, column, &loan.lender).map(|p| styled_name_html(&p)))
+    }).collect::<BTreeSet<_>>().into_iter().collect()
 }
 
 /// `display_place` of each, sorted, without repeats.
@@ -12000,7 +11999,7 @@ fn owner_loan_title(
             return true;
         }
         let sources = cell.holder_sources.get(h);
-        sources.is_some_and(|s| !s.is_empty() && s.iter().all(|x| borrowed.contains(x.as_str())))
+        sources.is_some_and(|s| !s.is_empty() && s.iter().all(|&id| table.loan(fn_line, id).is_some_and(|l| borrowed.contains(l.lender.as_str()))))
             && loans.iter().all(|l| table.loan(fn_line, l.loan).is_some_and(|i| i.direct_holder.as_deref() == Some(h)))
             // (A `&T` downgraded from a `&mut` keeps a mutable loan live
             // but can't write: it isn't said to hold it.)
@@ -12099,7 +12098,7 @@ fn owner_loan_title(
         // they keep borrowed. The shared line alone doesn't name the
         // container. Keep its duration clause for those places (#1888).
         let borrows_slots = holder.and_then(holder_rap).is_some_and(|r| r.holds_borrow())
-            && possible_sources.is_some_and(|sources| sources.iter().any(|p| holder_rap(p).is_some_and(|r| r.is_ref())));
+            && possible_sources.is_some_and(|sources| sources.iter().filter_map(|&id| table.loan(fn_line, id)).any(|l| holder_rap(&l.lender).is_some_and(|r| r.is_ref())));
         let stored = vd.row_layout.stored_lender_loans.get(rap.hash())
             .is_some_and(|ids| loans.iter().any(|l| ids.contains(&l.loan)));
         if let Some(h) = kept_by.filter(|h| exclusive && whole && possible_sources.is_some_and(|s| s.len() > 1)
@@ -12123,7 +12122,7 @@ fn owner_loan_title(
         title.push_str(&hover_messages::state_kept_borrowed_by(name, h));
     }
     if let Some((h, sources)) = shown_holder.as_deref().zip(possible_sources).filter(|(_, s)| cell.may_lend && s.len() > 1) {
-        let sources = display_places(vd, fn_line, name, sources);
+        let sources = display_loan_sources(vd, fn_line, name, sources);
         if sources.len() > 1 {
             title.push_str(&hover_messages::state_loan_sources(h, &sources));
         }
@@ -12234,7 +12233,7 @@ fn part_loan_state(
         // `r = &other` on some path, not a `&T` keeping a `&mut` live).
         let exact = holder.is_some_and(|h| {
             loan.runs && loan.direct_holders.iter().any(|d| d == h)
-                && cell.holder_sources.get(h).is_some_and(|src| !src.is_empty() && src.iter().all(|x| lenders.contains(x.as_str())))
+                && cell.holder_sources.get(h).is_some_and(|src| !src.is_empty() && src.iter().all(|&id| table.loan(fn_line, id).is_some_and(|l| lenders.contains(l.lender.as_str()))))
                 && !(rank(lent.kind) == 2 && data.timelines.values().map(|t| &t.resource_access_point)
                     .any(|r| r.name() == h && r.is_ref() && !r.is_mutref() && data.fn_source_lines.get(r.hash()).is_some_and(|start| start.body == fn_line.body)))
         });

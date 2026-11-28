@@ -1042,12 +1042,6 @@ pub struct ExprVisitor<'a, 'tcx:'a> {
   // pass, #853); handed to the renderer's
   // `VisualizationData::approx_notes`.
   pub approx_notes: Vec<ApproxNote>,
-  // For each split scrutinee temporary (by hash), the by-value
-  // bindings of each pattern that takes everything in it that needs drop
-  // (#1386): the last of their moves out of it ends its leg in the arm.
-  pub temp_emptiers: HashMap<u64, Vec<Vec<String>>>,
-  // The ids of those moves (`VisualizationData::temp_emptying_moves`).
-  pub temp_emptying_moves: Vec<usize>,
 
   // `r?` with `r` a non-`Copy` place moves `r` (#652). Set while
   // `match_rhs` draws that move into the variable `r?` is bound to;
@@ -1380,8 +1374,6 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx>{
       binding_columns: Vec::new(),
       moves_out_first: Vec::new(),
       approx_notes: Vec::new(),
-      temp_emptiers: HashMap::new(),
-      temp_emptying_moves: Vec::new(),
       break_binds: Vec::new(),
       deferred_breaks: Vec::new(),
       line_override: None,

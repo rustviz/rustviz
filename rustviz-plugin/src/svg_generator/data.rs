@@ -2970,8 +2970,8 @@ pub enum Event {
         break_alt: Option<BreakAlt>,
         break_out: bool,
         // A move out of a split scrutinee temporary that leaves nothing
-        // that needs drop in it (`temp_emptying_moves`, #1386).
-        empties_temp: bool,
+        // that needs drop in it (#1386).
+        temp_after: Option<TempMoveDisplay>,
     },
 
     // Mirrors the ExternalEvent Branch
@@ -3087,7 +3087,7 @@ pub enum Event {
     // hand. The owner is left in a moved-out-like state.
     ManuallyDropByHand,
     // An unbound temporary is dropped (see ExternalEvent).
-    TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool, part: Option<TempPart>, assign: bool },
+    TemporaryDrop { ty: Option<String>, when: String, literal: bool, early: bool, part: Option<TempPart>, assign: bool, flag: bool },
     // See ExternalEvent::LoopIteratorDrop.
     LoopIteratorDrop { left: LoopLeft, early: Vec<usize> },
     // See ExternalEvent::LoopMaybeInit.
@@ -3098,7 +3098,7 @@ pub enum Event {
     LoopExitMove { definite: bool, at: MaybeMovedAt },
     // The owner's resource is dropped here only if the `?` returns
     // early (#430). The owner's state is unchanged.
-    OwnerDropIfTryReturns { local: Option<rustc_middle::mir::Local>, span: rustc_span::Span },
+    OwnerDropIfTryReturns { local: Option<rustc_middle::mir::Local>, span: rustc_span::Span, flag: bool },
     // See ExternalEvent::OwnerDropUnlessReturned.
     OwnerDropUnlessReturned { is_break: bool },
     // See ExternalEvent::TupleTempDrop.
@@ -3193,7 +3193,15 @@ pub struct OwnParam {
 
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TempMoveDisplay {
+    pub value: crate::facts::TempValue,
+    /// Empty for the whole pictured place, absent for mixed or unknown fields.
+    pub field: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LineState {
+    ConditionalRemainder,
     Full,
     Gray,
     // Dashed segment of a variable that has no value yet on this
@@ -3381,6 +3389,7 @@ impl State {
             State::ResourceMoved{ move_at_line: _, .. } => {
                 hover_messages::state_resource_moved(my_name)
             }
+            State::FullPrivilege { s: LineState::ConditionalRemainder } => hover_messages::temporary_alternative_remainder(my_name),
             State::FullPrivilege { s: LineState::Uninit } => {
                 hover_messages::state_uninitialized(my_name)
             }
@@ -3566,6 +3575,7 @@ pub fn init_join<'a>(maybe_init: bool, ends: impl IntoIterator<Item = &'a State>
 
 pub fn convert_back(s: &State) -> State {
     match s {
+        State::FullPrivilege { s: LineState::ConditionalRemainder } => s.clone(),
         State::FullPrivilege { s: LineState::Uninit } => State::OutOfScope,
         State::FullPrivilege { .. } => State::FullPrivilege { s: LineState::Full },
         State::PartialPrivilege { .. } => State::PartialPrivilege { s: LineState::Full },
@@ -4158,17 +4168,23 @@ impl Event {
             Event::InitRefParam{ param, in_pattern: Some(bound), .. } => {
                 hover_messages::event_dot_ref_init_in_pattern(my_name, bound, matches!(param, ResourceAccessPoint::MutRef(_)))
             }
-            Event::TemporaryDrop { ty: Some(ty), when, literal, part: None, assign, .. } => {
-                hover_messages::event_dot_temporary_drop(ty, when, *literal, *assign)
+            Event::TemporaryDrop { ty, when, literal, part, assign, flag, .. } => {
+                let mut title = match (ty, part) {
+                    (Some(ty), Some(part)) => hover_messages::event_dot_temporary_part_drop(ty, when, part, *flag),
+                    (Some(ty), None) => hover_messages::event_dot_temporary_drop(ty, when, *literal, *assign),
+                    (None, _) => hover_messages::event_dot_extended_temporary_drop(my_name, when),
+                };
+                if *flag {
+                    if !title.ends_with('.') { title.push('.'); }
+                    title.push_str(" Rust checks a runtime drop flag to determine what still needs dropping.");
+                }
+                title
             }
             Event::OwnerDropIfTryReturns { .. } => {
                 hover_messages::event_dot_owner_drop_if_try_returns(my_name, "")
             }
             Event::OwnerDropUnlessReturned { is_break } => {
                 hover_messages::event_dot_owner_drop_unless_returned(my_name, false, "", *is_break)
-            }
-            Event::TemporaryDrop { ty: None, when, .. } => {
-                hover_messages::event_dot_extended_temporary_drop(my_name, when)
             }
             Event::TupleTempDrop { tuple, at, with } => {
                 hover_messages::event_dot_tuple_temp_drop(tuple, *at, with)
@@ -4186,9 +4202,6 @@ impl Event {
             }
             Event::LoopMaybeInit { before_loop, prior_assignment, .. } => {
                 hover_messages::event_dot_loop_maybe_init(my_name, true, true, None, *before_loop, *prior_assignment)
-            }
-            Event::TemporaryDrop { ty: Some(ty), when, part: Some(part), .. } => {
-                hover_messages::event_dot_temporary_part_drop(ty, when, part)
             }
             // A `static` the function uses (#690): it was there before
             // the function ran.
@@ -4350,8 +4363,8 @@ impl Event {
             }
             // A field or a pattern's binding moved out of an unbound
             // temporary, which keeps the rest (#469).
-            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::Owner(Owner { temp_part: Some(part), .. })), empties_temp, ..} => {
-                hover_messages::event_dot_move_out_of_temporary(&self.deref_name(my_name), &to.name(), part, *empties_temp)
+            Event::Move{ to, is: ResourceTy::Value(ResourceAccessPoint::Owner(Owner { temp_part: Some(part), .. })), temp_after, ..} => {
+                hover_messages::event_dot_move_out_of_temporary(&self.deref_name(my_name), &to.name(), part, temp_after.as_ref())
             }
             Event::Move { is: ResourceTy::Index(ResourceAccessPoint::Struct(s), place, PlaceWrite::Update), .. } if s.is_member => {
                 format!("The pattern moves part of {} ({})", hover_messages::styled_name_html(my_name), hover_messages::styled_name_html(place))
@@ -4923,11 +4936,6 @@ pub struct VisualizationData {
     /// drawn.
     pub moves_out_first: HashSet<usize>,
 
-    /// Ids of the moves out of a split scrutinee temporary that leave
-    /// nothing in it that needs drop: its leg in that arm ends there
-    /// (#1386). Other moves out of an unbound temporary leave it
-    /// holding the rest.
-    pub temp_emptying_moves: HashSet<usize>,
 
     /// Arrows of a struct write that share a track (#624): event id ->
     /// the id of its track's first arrow. Filled in by `render_svg` (see
@@ -5370,7 +5378,9 @@ impl Visualizable for VisualizationData {
 
             // A field or a pattern's binding moved out of an unbound
             // temporary: it still holds the rest, until its drop (#469).
-            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Value(r), empties_temp: false, ..}) if r.temp_part().is_some() =>
+            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Value(r), temp_after, ..}) if r.temp_part().is_some() && temp_after.as_ref().is_some_and(|e| e.value == crate::facts::TempValue::Conditional) =>
+                State::FullPrivilege { s: LineState::ConditionalRemainder },
+            (State::FullPrivilege{..}, Event::Move{is: ResourceTy::Value(r), temp_after, ..}) if r.temp_part().is_some() && temp_after.as_ref().is_none_or(|e| e.value != crate::facts::TempValue::Empty) =>
                 (*previous_state).clone(),
             // `x => …` on `match *b` / `let x = *b;`, with b a Box
             // drawn as its payload's part columns: the payload moves
@@ -6171,7 +6181,7 @@ impl Visualizable for VisualizationData {
           // A destructuring `for` head borrowed by the loop: a value
           // inside it is copied (#1390).
           else if matches!(loop_head, LoopHead::Part { moved: false, .. }) { vec![(line_num, Event::Duplicate{to : to_ro.to_owned(), is: from_ro.clone(), into_closure: false, of: CopyOf::Inside, id: *id, break_alt: break_alt.clone()})] }
-          else { vec![(line_num, Event::Move{carried_with: carried_with.clone(), to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: loop_head.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out, empties_temp: self.temp_emptying_moves.contains(id)})] }
+          else { vec![(line_num, Event::Move{carried_with: carried_with.clone(), to : to_ro.to_owned(), is: from_ro.clone(), into_closure: *into_closure, loop_head: loop_head.clone(), via_try: *via_try, id: *id, break_alt: break_alt.clone(), break_out: *break_out, temp_after: self.row_layout.temp_moves.get(id).cloned()})] }
         },
         ExternalEvent::StaticBorrow{from: from_ro, to: to_ro, id, of_ref_var, ..} => {
           if to_o { vec![(line_num,  Event::StaticBorrow{from : from_ro.to_owned(), is: to_ro.clone(), id: *id, of_ref_var: *of_ref_var})] }
@@ -6260,8 +6270,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::ManuallyDropByHand{..} => {
           vec![(line_num, Event::ManuallyDropByHand)]
         },
-        ExternalEvent::TemporaryDrop{ ro, ty, when, literal, early, part, .. } => {
-          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early, part: part.clone(), assign: ro.is_assign_literal_temporary() })]
+        ExternalEvent::TemporaryDrop{ ro, ty, when, literal, early, part, id } => {
+          vec![(line_num, Event::TemporaryDrop { ty: ty.clone(), when: when.clone(), literal: *literal, early: *early, part: part.clone(), assign: ro.is_assign_literal_temporary(), flag: self.row_layout.temp_drop_flags.contains(id) })]
         },
         ExternalEvent::LoopIteratorDrop{ left, early, .. } => {
           vec![(line_num, Event::LoopIteratorDrop { left: *left, early: early.clone() })]
@@ -6275,8 +6285,8 @@ impl Visualizable for VisualizationData {
         ExternalEvent::LoopExitMove{definite, at, ..} => {
           vec![(line_num, Event::LoopExitMove { definite: *definite, at: at.clone() })]
         },
-        ExternalEvent::OwnerDropIfTryReturns { ro, span, .. } => {
-          vec![(line_num, Event::OwnerDropIfTryReturns { local: ro.owner_local(), span: *span })]
+        ExternalEvent::OwnerDropIfTryReturns { ro, span, id } => {
+          vec![(line_num, Event::OwnerDropIfTryReturns { local: ro.owner_local(), span: *span, flag: self.row_layout.temp_drop_flags.contains(id) })]
         },
         ExternalEvent::OwnerDropUnlessReturned{is_break, ..} => {
           vec![(line_num, Event::OwnerDropUnlessReturned { is_break: *is_break })]
@@ -6553,7 +6563,7 @@ impl Visualizable for VisualizationData {
                 if matches!(loop_head, LoopHead::Part { moved: false, .. }) {
                     maybe_append_event(self, &from_ro.clone(), Event::Duplicate{to : to_ro.to_owned(), is: from_ro, into_closure: false, of: CopyOf::Inside, id: id, break_alt}, line_number);
                 } else {
-                    maybe_append_event(self, &from_ro.clone(), Event::Move{carried_with, to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out, empties_temp: self.temp_emptying_moves.contains(&id)}, line_number);
+                    maybe_append_event(self, &from_ro.clone(), Event::Move{carried_with, to : to_ro.to_owned(), is: from_ro, into_closure, loop_head, via_try, id: id, break_alt, break_out, temp_after: self.row_layout.temp_moves.get(&id).cloned()}, line_number);
                 }
                 // A destructuring assignment's cycle (#1343): the source's
                 // move goes before the new value it got on this line.
@@ -6787,9 +6797,9 @@ impl Visualizable for VisualizationData {
             ExternalEvent::ManuallyDropByHand{ro, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::ManuallyDropByHand, line_number);
             },
-            ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, part, ..} => {
+            ExternalEvent::TemporaryDrop{ro, ty, when, literal, early, part, id} => {
                 let assign = ro.is_assign_literal_temporary();
-                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early, part, assign }, line_number);
+                maybe_append_event(self, &ResourceTy::Value(ro), Event::TemporaryDrop { ty, when, literal, early, part, assign, flag: self.row_layout.temp_drop_flags.contains(&id) }, line_number);
             },
             ExternalEvent::LoopIteratorDrop{ro, left, early, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopIteratorDrop { left, early }, line_number);
@@ -6803,8 +6813,8 @@ impl Visualizable for VisualizationData {
             ExternalEvent::LoopExitMove{ro, definite, at, ..} => {
                 maybe_append_event(self, &ResourceTy::Value(ro), Event::LoopExitMove { definite, at }, line_number);
             },
-            ExternalEvent::OwnerDropIfTryReturns { ro, span, .. } => {
-                let event = Event::OwnerDropIfTryReturns { local: ro.owner_local(), span };
+            ExternalEvent::OwnerDropIfTryReturns { ro, span, id } => {
+                let event = Event::OwnerDropIfTryReturns { local: ro.owner_local(), span, flag: self.row_layout.temp_drop_flags.contains(&id) };
                 maybe_append_event(self, &ResourceTy::Value(ro), event, line_number);
             },
             ExternalEvent::OwnerDropUnlessReturned{ro, is_break, ..} => {

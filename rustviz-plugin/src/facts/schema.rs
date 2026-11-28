@@ -261,6 +261,9 @@ pub struct BodyFacts {
     pub residual_drops: Vec<ResidualDrop>,
     /// Temporaries that hold a value needing drop.
     pub temps: Vec<TempInfo>,
+    /// Source anchors of typed operands rustc lifted into promoted MIR.
+    #[serde(skip)]
+    pub(crate) promoted_operands: rustc_data_structures::fx::FxHashSet<rustc_hir::HirId>,
     pub notes: Vec<String>,
     /// Source lines whose code borrowck checks but that never runs: reached
     /// only by borrowck's imaginary edges (the dead `else` of an irrefutable
@@ -584,6 +587,14 @@ pub struct LoanInfo {
     /// The borrowed place as the source writes it (`s`, `p.a`, `v[_]`,
     /// `*b`, `(o as Some).0`).
     pub lender: String,
+    /// Field suffix of a temporary lender, resolved on its MIR type.
+    /// The root is identified by lender_local even with identical source text.
+    #[serde(skip)]
+    pub(crate) temp_fields: Option<String>,
+    /// Direct binding of a borrow of the whole temporary and whether
+    /// that borrowed type has drop glue.
+    #[serde(skip)]
+    pub(crate) temp_borrow: Option<(rustc_middle::mir::Local, bool)>,
     #[serde(skip)]
     pub(crate) projected: Option<ProjectedPlace>,
     #[serde(skip)]
@@ -869,7 +880,7 @@ pub struct State {
     pub maybe_empty_box: BTreeSet<String>,
     /// Named values whose origins contain a live loan at this boundary.
     #[serde(skip)]
-    pub holder_sources: BTreeMap<String, BTreeSet<String>>,
+    pub holder_sources: BTreeMap<String, BTreeSet<usize>>,
 }
 
 #[derive(Serialize, Default)]
@@ -1130,8 +1141,8 @@ pub enum DropRoute {
 }
 
 impl DropRoute {
-    fn is_not_unwind(&self) -> bool {
-        *self != Self::Unwind
+    fn is_normal(&self) -> bool {
+        *self == Self::Normal
     }
 }
 
@@ -1160,8 +1171,16 @@ pub enum EndProjection {
     UnwrapUnsafeBinder(String),
 }
 
-impl EndPlace {
-    pub(crate) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>, name: String) -> Self {
+/// A place within this MIR body. No display name participates in equality.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TransientPlace {
+    #[serde(serialize_with = "local")]
+    pub local: rustc_middle::mir::Local,
+    pub projection: Vec<EndProjection>,
+}
+
+impl TransientPlace {
+    pub(super) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>) -> Self {
         use rustc_middle::mir::ProjectionElem::*;
         let projection = p.projection.iter().map(|step| match step {
             Deref => EndProjection::Deref,
@@ -1173,7 +1192,14 @@ impl EndPlace {
             OpaqueCast(ty) => EndProjection::OpaqueCast(format!("{:032x}", tcx.type_id_hash(ty))),
             UnwrapUnsafeBinder(ty) => EndProjection::UnwrapUnsafeBinder(format!("{:032x}", tcx.type_id_hash(ty))),
         }).collect();
-        Self { local: p.local.index(), projection, name }
+        Self { local: p.local, projection }
+    }
+}
+
+impl EndPlace {
+    pub(crate) fn new<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>, p: rustc_middle::mir::Place<'tcx>, name: String) -> Self {
+        let place = TransientPlace::new(tcx, p);
+        Self { local: place.local.index(), projection: place.projection, name }
     }
 }
 
@@ -1209,7 +1235,7 @@ pub struct Ev {
     #[serde(skip)]
     pub place_local: Option<rustc_middle::mir::Local>,
     /// An unwind drop is displayed at the call that can enter its cleanup.
-    #[serde(skip_serializing_if = "DropRoute::is_not_unwind")]
+    #[serde(skip_serializing_if = "DropRoute::is_normal")]
     pub drop_route: DropRoute,
     /// Actual instruction, including the exit or successor that distinguishes this occurrence.
     pub occurrence: Occurrence,
@@ -1346,11 +1372,78 @@ pub enum Fact {
     ScopeEnd { path: String, note: &'static str },
     /// A temporary holding a value that needs drop is dropped. `extended`:
     /// its lifetime was extended past its own row (`let r = &make();`).
-    TempDrop { what: String, created_line: usize, extended: bool, early_exit: Option<usize> },
+    TempDrop {
+        place: TransientPlace,
+        what: String,
+        created_line: usize,
+        extended: bool,
+        early_exit: Option<usize>,
+        remainder: TempRemainder,
+        /// The elaborated destructor actually tests a drop flag. An exit
+        /// supplying one known value can still pass through that test.
+        flag: bool,
+    },
+}
+
+/// What is still owned at this occurrence. `Remaining` covers a
+/// partially initialized aggregate, including a path-dependent remainder.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TempValue {
+    Whole,
+    Conditional,
+    Remaining,
+    Empty,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct TempRemainder {
+    pub value: TempValue,
+    /// Move paths known to be absent or possibly absent here. Keep their
+    /// variant / field / array identity even for parts with no column.
+    pub absent: Vec<TransientPlace>,
+    pub maybe_absent: Vec<TransientPlace>,
+}
+
+#[derive(Serialize)]
+pub struct TempMove {
+    /// Source field suffix for a projection consisting entirely of fields.
+    #[serde(skip)]
+    pub(crate) field: Option<String>,
+    #[serde(serialize_with = "location")]
+    pub at: Location,
+    pub from: TransientPlace,
+    /// Direct value transfers only. A call argument needn't produce the result.
+    pub into: Option<TransientPlace>,
+    pub after: TempValue,
+    /// The remainder of each enclosing field when the displayed value was staged there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub enclosing: Vec<(TransientPlace, TempValue)>,
 }
 
 #[derive(Serialize)]
 pub struct TempInfo {
+    #[serde(serialize_with = "local")]
+    pub local: rustc_middle::mir::Local,
+    /// Unique typed expression for this local, if the compiler gives one.
+    #[serde(skip)]
+    pub(crate) expression: Option<rustc_hir::HirId>,
+    #[serde(skip)]
+    pub(crate) extension: Option<TempExtension>,
+    #[serde(skip)]
+    pub(crate) scope: Option<rustc_span::Span>,
+    #[serde(skip)]
+    pub(crate) iterator_binding: Option<rustc_span::Span>,
+    /// Some normal paths through the extending initializer bypass creation.
+    pub conditional: bool,
+    #[serde(serialize_with = "locations")]
+    pub created_at: Vec<Location>,
+    pub moves: Vec<TempMove>,
+    /// For each exit (or normal continuation), do all executable root drops check a flag?
+    #[serde(skip)]
+    pub(crate) root_flags: BTreeMap<Option<rustc_span::Span>, bool>,
+    #[serde(skip)]
+    pub(crate) has_root_drop: bool,
     pub what: String,
     pub ty: String,
     pub created_line: usize,
@@ -1359,4 +1452,27 @@ pub struct TempInfo {
     pub extended: bool,
     /// User variables that hold a loan of it.
     pub held_by: Vec<String>,
+}
+
+/// The compiler's remainder scope identifies the very let that extends
+/// the temporary. Its borrow expression is a presentation anchor.
+pub(crate) struct TempExtension {
+    pub initializer: rustc_hir::HirId,
+    pub borrow: Option<rustc_hir::HirId>,
+    pub fields: String,
+    pub end: usize,
+}
+
+impl BodyFacts {
+    pub(crate) fn temporary(&self, local: rustc_middle::mir::Local) -> Option<&TempInfo> {
+        self.temps.binary_search_by_key(&local, |t| t.local).ok().map(|i| &self.temps[i])
+    }
+
+    pub(crate) fn expression_temp(&self, id: rustc_hir::HirId) -> Option<&TempInfo> {
+        self.temps.iter().find(|t| t.expression == Some(id))
+    }
+}
+
+fn locations<S: serde::Serializer>(sites: &[Location], s: S) -> Result<S::Ok, S::Error> {
+    s.collect_seq(sites.iter().map(|l| (l.block.index(), l.statement_index)))
 }

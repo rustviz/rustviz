@@ -279,6 +279,7 @@ pub fn state_name(s: &State) -> String {
         State::Invalid => ("invalid", None),
     };
     match ls {
+        Some(LineState::ConditionalRemainder) => "conditional_remainder".to_owned(),
         Some(LineState::Gray) => format!("{}_gray", name),
         Some(LineState::Uninit) => format!("{}_uninit", name),
         Some(LineState::Full) | None => name.to_owned(),

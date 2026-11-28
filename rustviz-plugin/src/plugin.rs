@@ -166,7 +166,6 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   // Moves of destructuring-assignment cycles drawn before the source's
   // new value (#1343).
   let mut moves_out_first: Vec<usize> = Vec::new();
-  let mut temp_emptying_moves: Vec<usize> = Vec::new();
   // RustViz 3 fact layer: computed first, since the borrow ends come from
   // it (`emit_borrow_ends`); it also feeds the state table and, if
   // `RV3_FACTS` asks for them, the JSON dump.
@@ -281,15 +280,14 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
             visitor.facts = body_facts(local_def_id);
             visitor.visit_body(hir_body);
             visitor.emit_borrow_ends();
+            visitor.mark_temp_moves(0);
             row_layout.append(&mut visitor.row_layout);
-            visitor.mark_temp_emptying_moves(0);
             visitor.collect_approx_notes(hir_body);
             approx_notes.append(&mut visitor.approx_notes);
             rap_hash_num = visitor.rap_hashes;
             state_table.end_loans.append(&mut visitor.end_loans);
             binding_columns.append(&mut visitor.binding_columns);
             moves_out_first.append(&mut visitor.moves_out_first);
-            temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
             columns.add_body(tcx, impl_item.owner_id, fn_start_line, visitor.raps);
             pre_events.append(&mut fn_events);
           }
@@ -342,15 +340,14 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
         visitor.facts = body_facts(def_id);
         visitor.visit_body(hir_body);
         visitor.emit_borrow_ends();
+        visitor.mark_temp_moves(0);
         row_layout.append(&mut visitor.row_layout);
-        visitor.mark_temp_emptying_moves(0);
         visitor.collect_approx_notes(hir_body);
         approx_notes.append(&mut visitor.approx_notes);
         rap_hash_num = visitor.rap_hashes;
         state_table.end_loans.append(&mut visitor.end_loans);
         binding_columns.append(&mut visitor.binding_columns);
         moves_out_first.append(&mut visitor.moves_out_first);
-        temp_emptying_moves.append(&mut visitor.temp_emptying_moves);
         columns.add_body(tcx, item.owner_id, fn_start_line, visitor.raps);
         pre_events.append(&mut fn_events);
       },
@@ -407,7 +404,7 @@ pub fn rv_visitor(tcx: TyCtxt, args: &RVPluginArgs) {
   let facts = crate::facts::dump(&crate_facts);
 
   // Pass information to svg-generator
-  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, num_raps, columns.start_lines, columns.shadow_notes, binding_columns, moves_out_first, temp_emptying_moves, hidden_source_lines, approx_notes, args.write_to_cwd, facts, state_table, row_layout) {
+  match testing_helper.generate_vis(line_map2, pre_events, & mut a_line_map, num_raps, columns.start_lines, columns.shadow_notes, binding_columns, moves_out_first, hidden_source_lines, approx_notes, args.write_to_cwd, facts, state_table, row_layout) {
     Ok(_) => {}
     Err(e) => {
       eprintln!("{}", e);

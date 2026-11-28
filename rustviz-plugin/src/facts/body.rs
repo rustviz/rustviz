@@ -5,6 +5,8 @@
 //! events happen). Then read at the row model's locations.
 
 use super::direct_holders::{self, DirectHolders, Installation};
+mod temporaries;
+
 use super::places::{borrows_part_of, column_projection, place_under, Capture, Names};
 use super::rows::{is_unreachable, real_successor_blocks, RowModel, Rows};
 use super::schema::*;
@@ -702,9 +704,9 @@ pub(crate) fn dropped_on_residual<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, fa
     let Some(st) = body.basic_blocks[assignment.block].statements.get(assignment.statement_index) else { return false };
     let StatementKind::Assign(a) = &st.kind else { return false };
     facts.rows.iter().flat_map(|row| &row.facts).any(|event| {
-        matches!(event.fact, Fact::TempDrop { .. }) &&
-            matches!(body.basic_blocks[event.location.block].terminator().kind, TerminatorKind::Drop { place, .. } if place == a.0) &&
-            after_call(body, event.location, |f| is_residual_conversion(tcx, f))
+        event.drop_route != DropRoute::Unwind
+            && matches!(&event.fact, Fact::TempDrop { place, .. } if *place == TransientPlace::new(tcx, a.0)) &&
+            after_call(body, event.occurrence.at, |f| is_residual_conversion(tcx, f))
     })
 }
 
@@ -892,7 +894,7 @@ fn scope_call_can_unwind<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, loc: Locati
     let ty = func.ty(&body.local_decls, tcx);
     let callee = match *ty.kind() { TyKind::FnDef(id, _) => Some(id), _ => None };
     if !rustc_middle::ty::layout::fn_can_unwind(tcx, callee, ty.fn_sig(tcx).abi()) { return false; }
-    let Some(id) = callee else { return target.is_some() };
+    let Some(id) = callee else { return true };
     if ["process_exit", "process_abort"].iter().any(|s| tcx.is_diagnostic_item(rustc_span::Symbol::intern(s), id)) { return false; }
     let closure = called_closure(tcx, func);
     // An opaque returning call can unwind. When looking for an unwind
@@ -925,12 +927,36 @@ fn scope_call_can_unwind<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, loc: Locati
         if escapes && match term.kind {
             TerminatorKind::Call { .. } => scope_call_can_unwind(tcx, inner, inner.terminator_loc(bb), visiting),
             TerminatorKind::Assert { .. } => true,
+            TerminatorKind::Drop { place, .. } => {
+                let env = rustc_middle::ty::TypingEnv::post_analysis(tcx, inner.source.def_id());
+                if !place.ty(inner, tcx).ty.needs_drop(tcx, env) { false } else {
+                    let md = MoveData::gather_moves(inner, tcx, |_| true);
+                    let mut init = MaybeInitializedPlaces::new(tcx, inner, &md)
+                        .iterate_to_fixpoint(tcx, inner, None).into_results_cursor(inner);
+                    init.seek_before_primary_effect(inner.terminator_loc(bb));
+                    match md.rev_lookup.find(place.as_ref()) {
+                        LookupResult::Exact(p) | LookupResult::Parent(Some(p)) => init.get().contains(p),
+                        LookupResult::Parent(None) => true,
+                    }
+                }
+            }
             _ => false,
         } { propagates = true; break; }
         work.extend(real_successor_blocks(inner, bb));
     }
     visiting.pop();
     propagates
+}
+
+/// If dropping the old referent unwinds, rustc still installs the
+/// replacement before continuing cleanup. Its staging local is empty
+/// from that assignment onward.
+fn cleanup_replacement<'tcx>(body: &Body<'tcx>, stmt: &rustc_middle::mir::Statement<'tcx>) -> Option<Local> {
+    let StatementKind::Assign(a) = &stmt.kind else { return None };
+    let Rvalue::Use(Operand::Move(source)) = a.1 else { return None };
+    (a.0.projection.as_slice() == [ProjectionElem::Deref]
+        && body.local_decls[a.0.local].ty.ref_mutability() == Some(rustc_hir::Mutability::Mut))
+        .then(|| source.as_local()).flatten()
 }
 
 /// Borrowck MIR records pending drops on the cleanup edge. Read its
@@ -942,7 +968,7 @@ fn cleanup_path<'a, 'tcx>(body: &'a Body<'tcx>, start: BasicBlock) -> impl Itera
         let bb = next.take()?;
         let data = &body.basic_blocks[bb];
         if !seen.insert(bb) || !data.is_cleanup || !data.statements.iter().all(|s|
-            matches!(s.kind, StatementKind::StorageDead(_) | StatementKind::Nop)) {
+            matches!(s.kind, StatementKind::StorageDead(_) | StatementKind::Nop) || cleanup_replacement(body, s).is_some()) {
             return None;
         }
         next = match data.terminator().kind {
@@ -954,15 +980,15 @@ fn cleanup_path<'a, 'tcx>(body: &'a Body<'tcx>, start: BasicBlock) -> impl Itera
 }
 
 fn cleanup_drops<'tcx>(body: &Body<'tcx>, start: BasicBlock) -> Vec<(Location, Place<'tcx>)> {
-    let mut storage_dead = BTreeSet::new();
+    let mut empty = BTreeSet::new();
     cleanup_path(body, start).filter_map(|bb| {
         let data = &body.basic_blocks[bb];
-        storage_dead.extend(data.statements.iter().filter_map(|s| match s.kind {
+        empty.extend(data.statements.iter().filter_map(|s| match s.kind {
             StatementKind::StorageDead(local) => Some(local),
-            _ => None,
+            _ => cleanup_replacement(body, s),
         }));
         match data.terminator().kind {
-            TerminatorKind::Drop { place, .. } if !storage_dead.contains(&place.local) => Some((body.terminator_loc(bb), place)),
+            TerminatorKind::Drop { place, .. } if !empty.contains(&place.local) => Some((body.terminator_loc(bb), place)),
             _ => None,
         }
     }).collect()
@@ -1568,39 +1594,6 @@ impl<'a, 'tcx> Cx<'a, 'tcx> {
         }
     }
 
-    /// The span of the statement whose evaluation first assigns `local`
-    /// (a temporary): its `let` / expression statement.
-    fn stmt_span_of_local(&self, local: Local) -> Option<Span> {
-        let body = self.body;
-        let at = body.basic_blocks.reverse_postorder().iter().find_map(|bb| {
-            let data = &body.basic_blocks[*bb];
-            if data.is_cleanup {
-                return None;
-            }
-            data.statements.iter().enumerate().find_map(|(i, st)| match &st.kind {
-                StatementKind::Assign(asg) if asg.0.local == local => Some(Location { block: *bb, statement_index: i }),
-                _ => None,
-            })
-            .or_else(|| match &data.terminator().kind {
-                TerminatorKind::Call { destination, .. } if destination.local == local => {
-                    Some(Location { block: *bb, statement_index: data.statements.len() })
-                }
-                _ => None,
-            })
-        })?;
-        let hir_id = rustc_utils::BodyExt::location_to_hir_id(body, at);
-        let nodes = std::iter::once(self.tcx.hir_node(hir_id)).chain(self.tcx.hir_parent_iter(hir_id).map(|(_, n)| n));
-        for n in nodes {
-            match n {
-                rustc_hir::Node::Stmt(st) => return Some(st.span),
-                rustc_hir::Node::LetStmt(ls) => return Some(ls.span),
-                rustc_hir::Node::Expr(_) => {}
-                _ => return None,
-            }
-        }
-        None
-    }
-
     /// The borrow at `l` is written in the source (`&x`, `&mut *r`, `ref
     /// x`), not inserted by the compiler (a method call's auto-ref, the
     /// reborrow of a reference passed on, a macro's).
@@ -1933,7 +1926,7 @@ impl Flow<'_, '_, '_> {
             // A call's destination is initialized on its return edge, which
             // "after the call" in the cursor doesn't include.
             let returned: Option<MovePathIndex> = match &self.body.basic_blocks[l.block].terminator().kind {
-                TerminatorKind::Call { destination, target: Some(_), .. } if after && self.unwind_from != Some(l) && l.statement_index == self.body.basic_blocks[l.block].statements.len() => {
+                TerminatorKind::Call { destination, target: Some(_), .. } if after && self.unwind_from.is_none() && l.statement_index == self.body.basic_blocks[l.block].statements.len() => {
                     match self.md.rev_lookup.find(destination.as_ref()) {
                         LookupResult::Exact(d) => Some(d),
                         LookupResult::Parent(_) => None,
@@ -2839,6 +2832,10 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             lender,
             projected: cx.names.projected(tcx, body, bp),
             payload: cx.names.payload(tcx, body, bp),
+            temp_borrow: bp.as_local().filter(|_| source == "temporary")
+                .and_then(|_| bd.assigned_place().as_local()).map(|l| (l, ty_info(bp.ty(body, tcx).ty).1)),
+            temp_fields: (source == "temporary" && bp.projection.iter().all(|p| matches!(p, ProjectionElem::Field(..))))
+                .then(|| cx.names.name_in_temp(body, bp, String::new())),
             columns: cols,
             whole,
             direct_holder: cx.name(bd.assigned_place()),
@@ -2907,6 +2904,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             line,
             col,
             lender: u.lender.clone(),
+            temp_fields: None, temp_borrow: None,
             projected: u.place.and_then(|p| cx.names.projected(tcx, body, p)),
             payload: u.place.and_then(|p| cx.names.payload(tcx, body, p)),
             columns: Vec::new(),
@@ -4659,6 +4657,18 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let executing: BTreeSet<_> = executes.iter().copied()
         .chain(executes.iter().filter_map(|bb| original_blocks.get(bb).copied())).collect();
     let mut folded = folded_scope_exits(tcx, &rt_body, &switches, &executing, body);
+    // A creation belongs to a branch when only that switch edge can reach
+    // its MIR location. Decisions outside the extending let do not count.
+    let conditional_creation = |init, sites: &[Location]| {
+        let Some((&first, rest)) = sites.split_first() else { return false };
+        issuance_path(first).iter().any(|edge| executed_successors(edge.switch).len() > 1
+            && switches.iter().find(|s| s.edge == *edge).and_then(|s| s.branch)
+                .is_some_and(|branch| branch == init || tcx.hir_parent_id_iter(branch).any(|p| p == init))
+            && rest.iter().all(|&at| issuance_path(at).contains(edge)))
+    };
+    let runtime_sites = |at| runtime_locations(at).collect::<Vec<_>>();
+    let (mut temps, promoted_operands) = temporaries::collect(&cx, &mut rt, runtime_sites,
+        &bwf.promoted.raw, conditional_creation, temp_holders, for_iter);
     folded.retain(|at, exits| {
         let block = &rt_body[at.block];
         let local = match block.statements.get(at.statement_index).map(|s| &s.kind) {
@@ -4668,7 +4678,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         };
         // An earlier nested scope may have its own drop on the way to
         // the jump. It is already dead when the jump executes.
-        exits.retain(|(site, _, _, _)| scope_ends.boundaries.get(&local).is_some_and(|span| span.contains(*site)));
+        let scope = scope_ends.boundaries.get(&local).copied().or_else(|| temps.get(&local)?.scope);
+        exits.retain(|(site, _, _, _)| scope.is_some_and(|s| s.contains(*site)));
         !exits.is_empty()
     });
     let dom = rt_body.basic_blocks.dominators();
@@ -4714,7 +4725,8 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             if rt.unwind_from.is_some() && !state.may_init { continue; }
             let mut end = ScopeEnd {
                 optional_unwind: rt.unwind_from.is_some_and(|at| matches!(&body[at.block].terminator().kind,
-                    TerminatorKind::Call { target: Some(_), func, .. } if !closure_has_no_return(tcx, func))),
+                    TerminatorKind::Call { target, func, .. } if func.const_fn_def().is_none()
+                        || target.is_some() && !closure_has_no_return(tcx, func))),
                 partial: parts.iter().position(|(l, col, _)| *l == local && col == name).map(|i| parts.swap_remove(i).2),
                 array: None, legs: legs.clone(), span: cx.r.span_of(loc), boundary, row, site, effect: ScopeDrop::Storage, flag: false, flag_on_some_paths: false,
                 field_order: place.projection.iter().filter_map(|e| match e {
@@ -4778,17 +4790,18 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let exit = cx.rows.exit_site.get(&loc).copied();
         let shared = cx.rows.shared_exits.get(&loc).map(Vec::as_slice).unwrap_or_default();
         let folded = folded.get(&loc).map(Vec::as_slice).unwrap_or_default();
-        for &(site, input, exclusive, _) in folded {
+        let source = |at| (scope_site(at), at, None);
+        for &(site, input, exclusive, (from, to)) in folded {
             if !shared.iter().any(|(_, at)| scope_site(*at) == site) && exit.map(scope_site) != Some(site) {
-                out.push((runtime_locations(input).collect(), !exclusive, Some(site)));
+                out.push((runtime_locations(input).collect(), !exclusive, Some((site, body.terminator_loc(from), Some(to.start_location())))));
             }
         }
         for &(_, at) in shared {
-            out.push((runtime_locations(at).collect(), true, Some(scope_site(at))));
+            out.push((runtime_locations(at).collect(), true, Some(source(at))));
         }
         if cx.rows.exit_only.contains(&loc) || folded.iter().any(|e| e.2) || drop_route(loc, shared) == DropRoute::ExitOnly { return out; }
         if shared.is_empty() && folded.is_empty() {
-            out.push((runtime_locations(loc).collect(), false, exit.map(scope_site)));
+            out.push((runtime_locations(loc).collect(), false, exit.map(source)));
         } else {
             let exits = shared.iter().flat_map(|(_, at)| runtime_locations(*at)).collect();
             let edges = folded.iter().map(|e| e.3).collect();
@@ -4796,7 +4809,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 .flat_map(|at| continuing_drop_inputs(&rt_body, local, at, &exits, &edges, &executes, &original_blocks)).collect();
             incoming.sort();
             incoming.dedup();
-            if !incoming.is_empty() { out.push((incoming, true, exit.map(scope_site))); }
+            if !incoming.is_empty() { out.push((incoming, true, exit.map(source))); }
         }
         out
     };
@@ -4804,7 +4817,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     let no_glue_args: Vec<_> = body.args_iter().filter(|arg| cx.names.locals.contains_key(arg)
         && !ty_info(body.local_decls[*arg].ty).1).collect();
     let mut terminal_calls = BTreeMap::<Local, Vec<(Span, usize)>>::new();
-    let mut temps: BTreeMap<Local, TempInfo> = BTreeMap::new();
     let vec_buffers: std::collections::HashSet<_> = body.basic_blocks.iter().filter_map(|b| cx.r.vec_buffer(b.terminator())).collect();
     for (&loc, _) in &cx.rows.row {
         let data = &body.basic_blocks[loc.block];
@@ -5021,7 +5033,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     let (copy, needs_drop, _) = ty_info(body.local_decls[*l].ty);
                     if !needs_drop {
                         for (inputs, after, site) in boundary_inputs(*l, loc) {
-                            record_scope(&mut rt, *l, loc, &inputs, after, site, true);
+                            record_scope(&mut rt, *l, loc, &inputs, after, site.map(|s| s.0), true);
                         }
                         let note = if copy { "copy: nothing to drop" } else { "no drop glue" };
                         let ev = cx.place_ev(loc, *l, Fact::ScopeEnd { path: cx.names.locals[l].clone(), note });
@@ -5037,11 +5049,38 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
             }
             continue;
         }
+        // The cleanup ladder is entered on an unwind edge, before a
+        // call's return destination is initialized. A Drop which owns
+        // nothing cannot panic. Aborting never enters these blocks.
+        let temp_cleanup = match &data.terminator().kind {
+            TerminatorKind::Call { unwind: UnwindAction::Cleanup(bb), .. } if !skipped_closure_returns.contains_key(&loc.block)
+                && scope_call_can_unwind(tcx, body, loc, &mut Vec::new()) => Some(*bb),
+            TerminatorKind::Assert { unwind: UnwindAction::Cleanup(bb), cond, expected, .. }
+                if cond.constant().and_then(|c| c.const_.try_to_bool()) != Some(*expected) => Some(*bb),
+            TerminatorKind::Drop { unwind: UnwindAction::Cleanup(bb), place, .. }
+                if ty_info(place.ty(body, tcx).ty).1 && match rt_md.rev_lookup.find(place.as_ref()) {
+                    LookupResult::Exact(path) => temporaries::remainder(tcx, &mut rt, &runtime_locations(loc).collect::<Vec<_>>(), false, path, None).value != TempValue::Empty,
+                    LookupResult::Parent(Some(path)) => rt.state(&runtime_locations(loc).collect::<Vec<_>>(), false, path).may_init,
+                    LookupResult::Parent(None) => true,
+                } => Some(*bb),
+            _ => None,
+        };
+        if let Some(start) = temp_cleanup.filter(|_| executes_at(loc.block) && !temps.is_empty() && tcx.sess.panic_strategy().unwinds()) {
+            rt.unwind_from = Some(loc);
+            for (at, place) in cleanup_drops(body, start) {
+                if let Some(temp) = temps.get_mut(&place.local) {
+                    let edge = Some((body.source_info(loc).span.source_callsite(), loc, Some(start.start_location())));
+                    if let Some(event) = temporaries::drop_event(&cx, &mut rt, temp, at, place, &runtime_sites(loc), true,
+                        edge, DropRoute::Unwind, tests_flag(at, place), &rt_moved_entry) { push(&mut evs, event); }
+                }
+            }
+            rt.unwind_from = None;
+        }
         match &data.terminator().kind {
             TerminatorKind::Return => {
                 for &arg in &no_glue_args {
                     for (inputs, after, site) in boundary_inputs(arg, loc) {
-                        record_scope(&mut rt, arg, loc, &inputs, after, site, true);
+                        record_scope(&mut rt, arg, loc, &inputs, after, site.map(|s| s.0), true);
                     }
                 }
             }
@@ -5078,6 +5117,15 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 if matches!(data.terminator().kind, TerminatorKind::Call { target: None, .. }) {
                     let site = body.source_info(loc).span.source_callsite();
                     storage.seek_before_primary_effect(loc);
+                    // An extended temporary can still hold its value on only
+                    // some incoming paths. Even an abort ends that column.
+                    for t in temps.values().filter(|t| t.extension.is_some()) {
+                        let LookupResult::Exact(path) = rt_md.rev_lookup.find(Place::from(t.local).as_ref()) else { continue };
+                        if !args.iter().any(|a| matches!(a.node, Operand::Move(p) if p == Place::from(t.local)))
+                            && rt.state(&runtime_locations(loc).collect::<Vec<_>>(), false, path).may_init {
+                            terminal_calls.entry(t.local).or_default().push((site, cx.r.line_lo(site)));
+                        }
+                    }
                     for &local in cx.names.locals.keys().filter(|l| storage.get().contains(**l)) {
                         terminal_calls.entry(local).or_default().push((site, cx.r.line_lo(site)));
                     }
@@ -5148,7 +5196,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                 if !at_reassign && matches!(data.terminator().kind, TerminatorKind::Drop { replace: false, .. })
                     && place.projection.is_empty() && cx.names.locals.contains_key(&place.local) {
                     for (inputs, after, site) in boundary_inputs(place.local, loc) {
-                        record_scope(&mut rt, place.local, loc, &inputs, after, site, false);
+                        record_scope(&mut rt, place.local, loc, &inputs, after, site.map(|s| s.0), false);
                     }
                 }
                 if !at_reassign {
@@ -5161,10 +5209,6 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                         }
                     }
                 }
-                let state = match rt_md.rev_lookup.find(place.as_ref()) {
-                    LookupResult::Exact(mpi) => Some(rt.state(&runtime, false, mpi).word()),
-                    LookupResult::Parent(_) => None,
-                };
                 if cx.is_user(*place) {
                     let path = cx.name(*place).unwrap_or_default();
                     let mut flagged_parts = Vec::new();
@@ -5281,86 +5325,32 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                             push(&mut evs, ev);
                         }
                     }
-                } else if place.local != RETURN_PLACE
-                    && place.local.index() > body.arg_count
-                    && place.projection.is_empty()
-                    // (A macro's own locals aren't the user's; a `for` loop's
-                    // hidden iterator is: it holds what the loop hasn't
-                    // taken yet.)
-                    && (!body.local_decls[place.local].source_info.span.from_expansion() || for_iter(place.local))
-                    && matches!(state, Some("own" | "maybe" | "partly"))
-                {
-                    let decl = &body.local_decls[place.local];
-                    let sp = decl.source_info.span;
-                    // (The iterator's span is the loop's head expression, in
-                    // the desugaring: not its call site, the whole loop.)
-                    let sm = tcx.sess.source_map();
-                    let what: String = if for_iter(place.local) {
-                        format!("into_iter({})", sm.span_to_snippet(sp).unwrap_or_else(|_| "?".into()).trim())
-                    } else {
-                        sm.span_to_snippet(sp.source_callsite()).unwrap_or_else(|_| "?".into())
+                } else if let Some(temp) = temps.get_mut(&place.local) {
+                    let inputs = boundary_inputs(place.local, loc);
+                    let ordinary = inputs.iter().any(|e| e.2.is_none());
+                    let exits = inputs.iter().any(|e| e.2.is_some());
+                    let route = match (ordinary, exits) {
+                        (true, true) => DropRoute::Shared,
+                        (_, true) => DropRoute::ExitOnly,
+                        _ => DropRoute::Normal,
                     };
-                    let what: String = what.chars().take(40).collect();
-                    let created_line = if for_iter(place.local) { sm.lookup_char_pos(sp.hi()).line } else { cx.r.line_hi(sp) };
-                    let drop_row = cx.rows.event_row.get(&loc).copied().unwrap_or(0);
-                    let held_by = temp_holders.get(&place.local).cloned().unwrap_or_default();
-                    // Extended: a variable holds a loan of it and it outlives the
-                    // statement that made it (by source position, not rows).
-                    // Extended: it outlives the statement that made it (by
-                    // source position, not rows; `let _ = &String::new();`
-                    // too, which no variable holds).
-                    let extended = cx.stmt_span_of_local(place.local).is_some_and(|st| cx.r.span_of(loc).lo() >= st.hi());
-                    let ti = temps.entry(place.local).or_insert_with(|| TempInfo {
-                        what: what.clone(),
-                        ty: format!("{}", tcx.erase_and_anonymize_regions(decl.ty)),
-                        created_line,
-                        drop_lines: Vec::new(),
-                        extended: false,
-                        held_by,
-                    });
-                    ti.extended |= extended;
-                    // Early exits that share the drop run it too (two
-                    // `return`s out of a `for` loop drop its iterator): one
-                    // event on each exit's row, if it holds a value there.
-                    let shared = cx.rows.shared_exits.get(&loc).cloned().unwrap_or_default();
-                    if let LookupResult::Exact(mpi) = rt_md.rev_lookup.find(place.as_ref()) {
-                        for (r, at) in &shared {
-                            let edge = runtime_locations(*at).collect::<Vec<_>>();
-                            if edge.is_empty() || rest_how(&mut rt, &edge, true, mpi) == "nothing_to_drop" {
-                                continue;
-                            }
-                            let mut ev = cx.ev(loc, Fact::TempDrop { what: what.clone(), created_line, extended, early_exit: Some(*r) });
-                            ev.0 = *r;
-                            ev.1.col = cx.rows.col.get(at).copied().unwrap_or(0);
-                            ev.1.arm = cx.rows.arm_of(*at);
-                            ev.1.display_location = *at;
-                            ev.1.occurrence.exit = Some(*at);
-                            if !ti.drop_lines.contains(r) {
-                                ti.drop_lines.push(*r);
-                            }
-                            push(&mut evs, ev);
+                    let flag = tests_flag(loc, *place);
+                    for (sites, after, exit) in inputs {
+                        if let Some(event) = temporaries::drop_event(&cx, &mut rt, temp, loc, *place,
+                            &sites, after, exit, route, flag, &rt_moved_entry) {
+                            push(&mut evs, event);
                         }
-                    }
-                    if !cx.rows.exit_only.contains(&loc) {
-                        if !ti.drop_lines.contains(&drop_row) {
-                            ti.drop_lines.push(drop_row);
-                        }
-                        push(&mut evs, cx.ev(loc, Fact::TempDrop { what, created_line, extended, early_exit }));
                     }
                 }
             }
             _ => {}
         }
     }
-    let temps: Vec<TempInfo> = temps
-        .into_values()
-        .map(|mut t| {
-            t.drop_lines.sort();
-            t.held_by.sort();
-            t.held_by.dedup();
-            t
-        })
-        .collect();
+    let temps = temps.into_values().map(|mut t| {
+        t.drop_lines.sort_unstable();
+        t.drop_lines.dedup();
+        t
+    }).collect();
 
     // ---- per-row state ------------------------------------------------------------
     let first_line = cx.r.line_lo(body.span);
@@ -5898,7 +5888,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
                     iterator |= iterator_origins.iter().any(carries);
                     for n in holders_at(point, id) {
                         if st.state.get(&n) != Some(&"own") { continue; }
-                        if l.runs { st.holder_sources.entry(n.clone()).or_default().insert(l.lender.clone()); }
+                        if l.runs { st.holder_sources.entry(n.clone()).or_default().insert(l.loan); }
                         let mut fields = Vec::new();
                         for (_, fp, field) in columns.iter().chain(&synth) {
                             if fp.projection.is_empty() || cx.names.locals.get(&fp.local) != Some(&n) || st.state.get(field) != Some(&"own") {
@@ -7165,6 +7155,7 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         slice_items,
         binding_loans,
         rows: out_rows,
+        promoted_operands,
         temps,
         notes,
         dead_lines,
