@@ -3081,6 +3081,24 @@ fn render_dot(
         if let Some(cases) = visualization_data.row_layout.fork_end_cases.get(&event.get_id()) {
             data.title.clone_from(cases);
         }
+        if let Some((title, restored)) = layout.joined_end_titles.get(&event.get_id()) {
+            data.title.clone_from(title);
+            if matches!(event, Event::StaticReacquire { .. } | Event::MutableReacquire { .. }) {
+                if let Some(restored) = restored {
+                    data.title.push_str(". ");
+                    data.title.push_str(restored);
+                }
+            }
+        }
+        if let Event::StaticReacquire { from: ResourceTy::Value(callee), id, .. }
+            | Event::MutableReacquire { from: ResourceTy::Value(callee), id, .. } = event
+        {
+            if callee.is_fn() {
+                if let Some(alt) = borrow_break_alt(*id, visualization_data) {
+                    data.title = hover_messages::with_break_alt_lend(&data.title, alt);
+                }
+            }
+        }
         if visualization_data.row_layout.reassigned_receivers.contains(&event.get_id()) {
             let name = styled_name_html(visualization_data.timelines[hash].resource_access_point.name());
             match event {
@@ -4335,14 +4353,18 @@ fn collect_closure_captures(
 // values reaching a loop's receiver (#657), or a call that loop is
 // the argument of (#662). The lend event doesn't carry it, so look up
 // the borrow it came from.
-fn borrow_break_alt<'v>(id: usize, visualization_data: &'v VisualizationData) -> Option<&'v BreakAlt> {
-    visualization_data.external_events.iter().find_map(|(_, ev)| match ev {
+fn borrow_break_alt(id: usize, visualization_data: &VisualizationData) -> Option<&BreakAlt> {
+    fn find(id: usize, events: &[(usize, ExternalEvent)]) -> Option<&BreakAlt> {
+        events.iter().find_map(|(_, ev)| match ev {
         ExternalEvent::StaticBorrow { id: i, break_alt: Some(alt), .. }
         | ExternalEvent::MutableBorrow { id: i, break_alt: Some(alt), .. }
         | ExternalEvent::PassByStaticReference { id: i, break_alt: Some(alt), .. }
         | ExternalEvent::PassByMutableReference { id: i, break_alt: Some(alt), .. } if *i == id => Some(alt),
-        _ => None,
-    })
+            ExternalEvent::Branch { branches, .. } => branches.iter().find_map(|arm| find(id, &arm.e_data)),
+            _ => None,
+        })
+    }
+    find(id, &visualization_data.external_events)
 }
 
 // Source-side dot of a closure capture that reborrows through a
@@ -7526,7 +7548,8 @@ fn render_generic_arrow(
 
     let projected = layout.projected_loan_places.get(&id)
         .map(|(_, place)| hover_messages::projected_place_html(place));
-    if let Some(end) = layout.fork_arrow_titles.get(&id) {
+    if let Some(end) = layout.joined_end_titles.get(&id).map(|(title, _)| title)
+        .or_else(|| layout.fork_arrow_titles.get(&id)) {
         title.clone_from(end);
     } else if let Some(operand) = layout.aggregate_titles.get(&id) {
         title.clone_from(operand);
@@ -10642,11 +10665,21 @@ fn render_branches(
             // Nested forks with separate arm rows can leave a dashed
             // stretch entirely between the code rows it would underline.
             let row_lines = (*fork_above && !path.is_empty()).then_some(visualization_data.row_lines.as_slice());
+            let owns_after_write = visualization_data.row_layout.fork_write_owners.contains(&(*id, i, *hash));
             for seg in &mut segs {
                 if let Some(arm) = &seg.inactive_arm {
                     if seg_underline_y(seg, own_y, split_row, row_lines).is_none() {
                         seg.title = hover_messages::state_inactive_arm_unlit(arm);
                     }
+                }
+                // The replacement may use the last row of a compact arm.
+                // Its dashed continuation still represents the owned value.
+                if owns_after_write && seg.rows.0 >= own_last
+                    && matches!(seg.state, State::FullPrivilege { s: LineState::Gray })
+                {
+                    let owned = State::FullPrivilege { s: LineState::Full };
+                    seg.title.push(' ');
+                    seg.title.push_str(&timeline_segment_title(&owned, rap, visualization_data, None));
                 }
             }
             if let Some(binding) = branch_history.iter().filter_map(|b| visualization_data.state_table.imaginary_arm(b.imaginary?))

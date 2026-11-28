@@ -1130,6 +1130,9 @@ mod tests {
         BodyFacts {
             scope_ends: Default::default(),
             value_flow: Default::default(),
+            joined_argument_loans: Default::default(),
+            exact_reborrow_parents: Default::default(),
+            usable_after_release: Default::default(),
             residual_drops: Vec::new(),
             skipped_residuals: BTreeSet::new(),
             short_call_borrows: Default::default(),

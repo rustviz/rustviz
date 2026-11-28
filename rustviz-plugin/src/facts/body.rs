@@ -3339,6 +3339,31 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
         let Some(place) = place else { continue };
         direct.issues.entry(taken_at(l.loan)).or_default().push((place, l.loan));
     }
+    let mut exact_reborrow_parents = BTreeMap::new();
+    for loan in loans.iter().filter(|l| l.runs && !l.issuance_path.is_empty() && l.through.is_some()) {
+        let Some(at) = loan.issue else { continue };
+        let Some(statement) = body[at.block].statements.get(at.statement_index) else { continue };
+        let StatementKind::Assign(assign) = &statement.kind else { continue };
+        let Rvalue::Ref(_, _, place) = assign.1 else { continue };
+        if place.projection.as_slice() != [ProjectionElem::Deref] { continue; }
+        let Some(issue) = stores.direct_borrow(at, place.local.into()) else { continue };
+        if let Some(id) = bwf.borrow_set.location_map().get_index_of(&issue) {
+            exact_reborrow_parents.insert(loan.loan, id);
+        }
+    }
+    let mut joined_argument_loans = BTreeMap::new();
+    for &bb in body.basic_blocks.reverse_postorder().iter().filter(|bb| runs.contains(bb)) {
+        let TerminatorKind::Call { args, target: Some(_), .. } = &body[bb].terminator().kind else { continue };
+        let at = body.terminator_loc(bb);
+        for (index, arg) in args.iter().enumerate() {
+            if !arg.node.ty(&body.local_decls, tcx).is_ref() { continue; }
+            let Some(place) = arg.node.place() else { continue };
+            let sources = direct.before(at, place);
+            if sources.loans.len() > 1 && !sources.unknown && !sources.unpictured && sources.calls.is_empty() {
+                joined_argument_loans.insert((at, index), sources.loans);
+            }
+        }
+    }
     let array_offsets = direct_holders::array_offsets(&stores);
     // Pick the drawn column after resolving the projected place. Array
     // elements and enum payloads share the containing value's column.
@@ -7590,6 +7615,9 @@ pub fn body_facts<'tcx>(tcx: TyCtxt<'tcx>, bwf: &BodyWithBorrowckFacts<'tcx>, fu
     BodyFacts {
         scope_ends,
         value_flow,
+        joined_argument_loans,
+        exact_reborrow_parents,
+        usable_after_release,
         residual_drops,
         skipped_residuals: residual_sites.into_iter().filter_map(|(site, runs)| (!runs).then_some(site)).collect(),
         short_call_borrows,

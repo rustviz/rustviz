@@ -1638,8 +1638,13 @@ pub struct RowLayout {
     pub(crate) retained_references: BTreeMap<usize, (String, String)>,
     pub(crate) reassigned_receivers: BTreeSet<usize>,
     arm_points: BTreeMap<usize, Point>,
+    pub(crate) arm_end_occurrences: BTreeMap<usize, crate::facts::Occurrence>,
     pub(crate) fork_arrow_titles: BTreeMap<usize, String>,
     pub(crate) fork_end_cases: BTreeMap<usize, String>,
+    /// Return-edge wording and the lender-only conclusion, when unrestricted.
+    pub(crate) joined_end_titles: BTreeMap<usize, (String, Option<String>)>,
+    /// Owned columns on the continuation of a replacement arm.
+    pub(crate) fork_write_owners: BTreeSet<(usize, usize, u64)>,
     /// Owner columns whose incoming loan cannot be present in the selected enum variant.
     pub(crate) fieldless_lenders: BTreeMap<(usize, usize, u64), u64>,
     pub(crate) scope_end_ids: BTreeSet<usize>,
@@ -1680,6 +1685,8 @@ impl RowLayout {
         self.scope_ends.append(&mut other.scope_ends);
         self.fork_arrow_titles.append(&mut other.fork_arrow_titles);
         self.fork_end_cases.append(&mut other.fork_end_cases);
+        self.joined_end_titles.append(&mut other.joined_end_titles);
+        self.fork_write_owners.append(&mut other.fork_write_owners);
         self.fieldless_lenders.append(&mut other.fieldless_lenders);
         self.scope_end_ids.append(&mut other.scope_end_ids);
         self.holder_handoff_titles.append(&mut other.holder_handoff_titles);
@@ -1731,6 +1738,7 @@ impl RowLayout {
 
     pub(crate) fn record_arm_point(&mut self, id: usize, edge: &Ev) {
         self.arm_points.insert(id, fact_point(edge));
+        self.arm_end_occurrences.insert(id, edge.occurrence);
     }
 
     pub(crate) fn has_arm_point(&self, id: usize) -> bool {
