@@ -13336,8 +13336,25 @@ pub fn print_out_of_scope(&mut self){
         _ => &current.rap,
       }.clone();
       let rd = slot.rd.clone();
+      let mut unused_field_rows = BTreeSet::new();
       let mut ends = Vec::new();
-      for (lender, end, loans) in std::mem::take(&mut decided[i]) {
+      for (lender, end, mut loans) in std::mem::take(&mut decided[i]) {
+        let unused: Vec<_> = loans.iter().filter_map(|&loan|
+          self.unused_shared_field_copy(&from_ro, loan)).collect();
+        if !unused.is_empty() {
+          for (row, _, _) in &unused { unused_field_rows.insert(*row); }
+          loans.retain(|loan| !unused.iter().any(|(_, field, place)| {
+            // The caller loan may be counted again for the entire
+            // aggregate. Its boundaries do not end this projected slot.
+            field.loan == *loan || matches!(lender, ResourceTy::Caller)
+              && field.made_through.contains(loan)
+              && facts.is_some_and(|facts| facts.loans.iter().any(|l| l.loan == *loan && l.source == "caller")
+                && !facts.rows.iter().flat_map(|r| &r.facts).any(|e|
+                  matches!(e.fact, crate::facts::Fact::BorrowEnd { loan: id, .. } | crate::facts::Fact::HoldEnd { loan: id, .. } if id == *loan)
+                    && e.end_places.contains(place)))
+          }));
+          if loans.is_empty() { continue; }
+        }
         let separate = from_ro.holds_borrow() && matches!(end, End::Arrow(_)) && loans.len() > 1
           && self.row_layout.stored_lender_loans.get(lender.hash()).is_some_and(|ids| loans.iter().all(|id|
             ids.contains(id) && facts.and_then(|f| f.loans.iter().find(|loan| loan.loan == *id))
@@ -13352,6 +13369,14 @@ pub fn print_out_of_scope(&mut self){
         } else {
           ends.push((lender, end, loans));
         }
+      }
+      for row in unused_field_rows {
+        let id = *self.unique_id;
+        let holder = crate::svg_generator::hover_messages::styled_name_html(from_ro.name());
+        self.row_layout.aggregate_titles.insert(id, format!(
+          "{holder} has no further use. The enclosing value can keep the shared borrow live."
+        ));
+        self.add_own_end(row, &from_ro, ResourceTy::Anonymous, k, &[]);
       }
       for (lender, end, loans) in ends {
         let to_ro = match &lender {
@@ -13683,6 +13708,7 @@ pub fn print_out_of_scope(&mut self){
     // both arms of a nested test. Otherwise it adds another at the join.
     self.place_let_else_ends();
     self.place_exit_ends(&empty_payloads);
+    self.attribute_projected_pattern_ends();
     self.describe_joined_argument_ends();
     mark_exhaustion_paths(self.preprocessed_events, &self.exit_scopes);
     self.print_out_of_scope();

@@ -25,6 +25,191 @@ struct RepresentedEnds {
 }
 
 impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
+  /// A projected pattern's reference and the loan of the scrutinee's
+  /// owner can end independently. Match each drawn endpoint to its MIR
+  /// edge before describing what ends.
+  pub(crate) fn attribute_projected_pattern_ends(&mut self) {
+    use crate::svg_generator::hover_messages::{loan_kind_word, styled_name_html};
+    use rustc_middle::mir::{BorrowKind, ProjectionElem, Rvalue, StatementKind};
+
+    let Some(facts) = self.body_facts else { return };
+    let switches = self.branch_switches();
+    let mut slots = Vec::new();
+    templates_in(self.preprocessed_events, &mut Vec::new(), None, &mut slots);
+    let mut proven = Vec::new();
+    for (line, event, path) in &slots {
+      let (ExternalEvent::StaticDie { slot, id, static_lender: None, still_borrowed_by, of_ref_var: false, exhaustion, .. }
+        | ExternalEvent::MutableDie { slot, id, static_lender: None, still_borrowed_by, of_ref_var: false, exhaustion, .. }) = event
+      else { continue };
+      if !still_borrowed_by.is_empty() || !exhaustion.is_empty() { continue; }
+      let (from, to) = endpoints(event);
+      let Some(holder_rap) = from.extract_rap() else { continue };
+      let Some(holder) = holder_rap.ref_local() else { continue };
+      let Some(owner) = to.extract_rap().and_then(|rap| rap.owner_local()) else { continue };
+      let body = &self.bwf.body;
+      let mut stores = facts.rows.iter().flat_map(|row| &row.facts).filter(|ev| {
+        ev.place_local == Some(holder) && matches!(ev.fact, Fact::Init { .. })
+      });
+      let Some(store) = stores.next().filter(|_| stores.next().is_none()) else { continue };
+      let Some(StatementKind::Assign(assign)) = body[store.location.block].statements
+        .get(store.location.statement_index).map(|s| &s.kind) else { continue };
+      let Rvalue::Ref(_, kind, place) = assign.1 else { continue };
+      if assign.0.as_local() != Some(holder)
+        || !place.projection.iter().any(|p| matches!(p, ProjectionElem::ConstantIndex { .. } | ProjectionElem::Subslice { .. }))
+      {
+        continue;
+      }
+      let mutable = matches!(kind, BorrowKind::Mut { .. });
+      let mut boundaries = facts.rows.iter().flat_map(|row| row.facts.iter().map(move |e| (row.line, e)))
+        .filter_map(|(row, ev)| {
+          let (loan, next, release) = match ev.fact {
+            Fact::BorrowEnd { loan, to_line, .. } => (loan, to_line, true),
+            Fact::HoldEnd { loan, to_line, .. } if ev.occurrence.at == store.location && !ev.continuing_places.is_empty() =>
+              (loan, to_line, false),
+            _ => return None,
+          };
+          if ev.drop_route != crate::facts::DropRoute::Normal || !dominates(body, store.location, ev.occurrence.at)
+            || self.end_loans.get(id).is_some_and(|ids| ids.as_slice() != [loan])
+          { return None; }
+          let [holder_place] = ev.end_places.as_slice() else { return None };
+          if holder_place.local != holder.index() || !holder_place.projection.is_empty() { return None; }
+          let (_, issued) = self.bwf.borrow_set.location_map().get_index(loan)?;
+          if issued.borrowed_place().as_local() != Some(owner) { return None; }
+          let mut site = Site { path: Vec::new(), before: None, row };
+          self.locate(self.preprocessed_events, &switches, ev.display_location, ev, next, &mut site);
+          if !release && site.path != *path {
+            // Pattern binding stores can be scoped to the if-let
+            // condition even though only its successful edge runs them.
+            let arms: Vec<_> = facts.switches.iter().filter_map(|exit| {
+              crate::event_order::edge_dominates_use(&body.basic_blocks, exit.edge.switch,
+                exit.edge.successor.start_location(), store.location)
+                .then_some(crate::facts::SourceArm { branch: exit.branch?, index: exit.arm? })
+            }).collect();
+            let mut declaration = Vec::new();
+            if !declared_at(self.preprocessed_events, holder_rap, &arms, &mut declaration)
+              || !declaration.starts_with(&site.path) { return None; }
+            site.path = declaration;
+          }
+          if site.path != *path || release && site.row != *line { return None; }
+          let exact = ev.exact_end_places.as_slice() == std::slice::from_ref(holder_place);
+          Some((Boundary { loan, fact: ev, release, row }, site, exact))
+        });
+      let Some((edge, site, exact)) = boundaries.next().filter(|_| boundaries.next().is_none()) else { continue };
+      if slots.iter().filter(|(_, other, other_path)| other_path == path
+        && endpoints(other).0 == from).count() != 1 { continue; }
+      let Some(info) = facts.loans.iter().find(|l| l.loan == edge.loan) else { continue };
+      let Some(kind) = loan_kind_word(info) else { continue };
+      let holder = styled_name_html(&from.name());
+      let place = styled_name_html(&to.name());
+      let title = if !edge.release {
+        format!("{holder} has no further use. Another reference keeps the borrow live.")
+      } else if exact && mutable == (kind == "mutable") {
+        format!("{holder}'s {kind} borrow of {place} ends. This borrow no longer restricts access to {place}.")
+      } else {
+        let projected = if mutable { "mutable" } else { "shared" };
+        format!("{holder} holds a {projected} reference into the matched value. The {kind} borrow of {place} ends here. This borrow no longer restricts access to {place}.")
+      };
+      let end = if !edge.release {
+        ExternalEvent::RefDie { slot: *slot, from: from.clone(), to: ResourceTy::Anonymous, num_curr_borrowers: 0, id: *id }
+      } else if kind == "mutable" {
+        ExternalEvent::MutableDie { slot: *slot, from: from.clone(), to: to.clone(), id: *id, static_lender: None,
+          still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
+      } else {
+        ExternalEvent::StaticDie { slot: *slot, from: from.clone(), to: to.clone(), id: *id, static_lender: None,
+          still_borrowed_by: Vec::new(), of_ref_var: false, exhaustion: Vec::new() }
+      };
+      let reordered = edge.release && !site.matches(self.preprocessed_events, path, *line, *id);
+      proven.push((end, edge, site, title, reordered));
+    }
+    for (event, edge, site, title, reordered) in proven {
+      let id = event.get_id();
+      self.row_layout.aggregate_titles.entry(id).or_insert(title);
+      self.end_loans.insert(id, vec![edge.loan]);
+      self.drawn_references.ends.insert(id, vec![edge]);
+      if edge.release {
+        replace_end(self.preprocessed_events, self.event_line_map, &event);
+        if reordered {
+          let ids = BTreeSet::from([id]);
+          remove_except_reserved(self.preprocessed_events, self.event_line_map, &ids, &ids);
+          insert(self.preprocessed_events, self.event_line_map, &site.path, site.before, (site.row, event), false);
+        }
+      } else {
+        remove_from(self.preprocessed_events, self.event_line_map, &BTreeSet::from([id]));
+        insert(self.preprocessed_events, self.event_line_map, &site.path, site.before, (site.row, event), false);
+      }
+    }
+  }
+
+  /// A shared reference staged into an unused field can have region ends
+  /// on both edges of a let-else because the aggregate is used. The field
+  /// itself never carries the reference beyond its initialization in the
+  /// drawing. Prove this from place uses, including uses of the enclosing
+  /// aggregate, before shortening the field's line.
+  pub(crate) fn unused_shared_field_copy(
+    &self, holder: &crate::svg_generator::data::ResourceAccessPoint, loan: usize,
+  ) -> Option<(usize, &'a LoanInfo, &'a crate::facts::EndPlace)> {
+    use rustc_middle::mir::{Local, Place, ProjectionElem, Statement, StatementKind};
+    use rustc_middle::mir::visit::{PlaceContext, Visitor};
+
+    if self.let_else_branches.is_empty() || !holder.is_member() || holder.is_mutref() {
+      return None;
+    }
+    let facts = self.body_facts?;
+    let info = facts.loans.iter().find(|info| info.loan == loan && info.kind == "shared" && info.source == "untracked")?;
+    if !info.made_through.iter().any(|parent| facts.loans.iter().any(|l| l.loan == *parent && l.source == "caller")) {
+      return None;
+    }
+    let [store] = info.holder_stores.as_slice() else { return None };
+    let local = Local::from_usize(store.place.local);
+    if !store.complete || store.place.projection.is_empty()
+      || !store.place.projection.iter().all(|p| matches!(p, crate::facts::EndProjection::Field(_)))
+      || self.raps.place(local, &store.place.name).is_none_or(|r| &r.rap != holder)
+    {
+      return None;
+    }
+    let body = &self.bwf.body;
+    if body.local_decls[local].ty.needs_drop(self.tcx, body.typing_env(self.tcx)) {
+      return None;
+    }
+    let ends = facts.rows.iter().flat_map(|row| &row.facts).filter(|e| {
+      matches!(e.fact, Fact::BorrowEnd { loan: id, .. } if id == loan) && e.end_places.contains(&store.place)
+    });
+    if ends.take(2).count() < 2 {
+      return None;
+    }
+    struct Uses<'p> {
+      store: Location,
+      local: Local,
+      projection: &'p [crate::facts::EndProjection],
+      used: bool,
+    }
+    impl<'tcx> Visitor<'tcx> for Uses<'_> {
+      fn visit_statement(&mut self, statement: &Statement<'tcx>, at: Location) {
+        if !matches!(statement.kind, StatementKind::FakeRead(_) | StatementKind::PlaceMention(_)) {
+          self.super_statement(statement, at);
+        }
+      }
+
+      fn visit_place(&mut self, place: &Place<'tcx>, context: PlaceContext, at: Location) {
+        if at == self.store || place.local != self.local || !context.is_use() {
+          return;
+        }
+        // An aggregate, the field, and everything reached through the
+        // field all use the stored reference. Sibling fields do not.
+        self.used |= self.projection.iter().zip(place.projection.iter()).all(|(slot, used)| {
+          matches!((slot, used), (crate::facts::EndProjection::Field(a), ProjectionElem::Field(b, _)) if *a == b.index())
+        });
+      }
+    }
+    let mut uses = Uses { store: store.occurrence.at, local, projection: &store.place.projection, used: false };
+    uses.visit_body(body);
+    if uses.used {
+      return None;
+    }
+    let row = facts.rows.iter().find(|row| row.facts.iter().any(|ev| ev.occurrence == store.occurrence))?;
+    Some((row.line, info, &store.place))
+  }
+
   /// The compiler loan issued by this expression. Equal-looking borrows
   /// in a single statement still have different MIR sites.
   pub(crate) fn loan_at_span(&self, span: Span) -> Option<&'a LoanInfo> {

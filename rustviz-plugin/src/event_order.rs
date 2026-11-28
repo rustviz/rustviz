@@ -31,7 +31,7 @@ fn fact_point(f: &Ev) -> Point {
 
 /// A switch dominates both arms. Its release on a particular edge can
 /// be replayed before a use only if that edge dominates the use.
-fn edge_dominates_use(blocks: &rustc_middle::mir::BasicBlocks<'_>, from: Location, to: Location, use_at: Location) -> bool {
+pub(crate) fn edge_dominates_use(blocks: &rustc_middle::mir::BasicBlocks<'_>, from: Location, to: Location, use_at: Location) -> bool {
     let dom = blocks.dominators();
     if !to.dominates(use_at, dom) { return false; }
     if from.statement_index < blocks[from.block].statements.len() { return true; }

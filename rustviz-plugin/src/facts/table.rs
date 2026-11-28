@@ -138,6 +138,7 @@ pub struct JoinCell {
     pub shared_ref_unchanged: Option<SharedReferenceJoin>,
     pub checked_only: bool,
     pub empty_at_runtime: bool,
+    pub checked_path_owns: bool,
 }
 
 type Cells = BTreeMap<String, Cell>;
@@ -239,6 +240,7 @@ struct BodyTable {
 
 #[derive(Debug)]
 struct ArmBoundaryCells {
+    entry_row: Option<usize>,
     entry: Option<Cells>,
     join: Option<Cells>,
 }
@@ -558,6 +560,13 @@ impl StateTable {
         let bounds = self.bodies.get(&function.body)?.arm_boundaries.get(&arm.branch)?.get(&arm.index)?;
         let cells = if joining { &bounds.join } else { &bounds.entry };
         cells.as_ref()?.get(column)
+    }
+
+    /// State where this specific arm starts, for a segment above its first MIR row.
+    pub fn before_arm_code(&self, function: FunctionStart, column: &str, arm: SourceArm, row: usize) -> Option<&Cell> {
+        let bounds = self.bodies.get(&function.body)?.arm_boundaries.get(&arm.branch)?.get(&arm.index)?;
+        (row < bounds.entry_row?).then_some(())?;
+        bounds.entry.as_ref()?.get(column)
     }
 
     /// A write that may be skipped and whose drop is conditional.
@@ -1090,6 +1099,7 @@ fn body_table(b: &BodyFacts) -> BodyTable {
     let branch_entries = b.branch_entries.iter().map(|(&branch, state)| (branch, cells_of(state))).collect();
     let arm_boundaries = b.arm_boundaries.iter().map(|(&branch, arms)| {
         (branch, arms.iter().map(|(&index, bounds)| (index, ArmBoundaryCells {
+            entry_row: bounds.entry_row,
             entry: bounds.entry.as_ref().map(cells_of),
             join: bounds.join.as_ref().map(cells_of),
         })).collect())
@@ -1116,7 +1126,8 @@ fn body_joins(b: &BodyFacts) -> BodyJoins {
             let maybe_empty_box = join.state.maybe_empty_box.contains(&name);
             let shared_ref_unchanged = cell.local.and_then(|local| join.unchanged_shared_refs.get(&local).copied());
             let empty_at_runtime = join.empty_at_runtime.contains(&name);
-            (name, JoinCell { cell, change, maybe_empty_box, shared_ref_unchanged, checked_only: join.checked_only, empty_at_runtime })
+            let checked_path_owns = join.incoming.iter().any(|edge| !edge.runs && edge.state.get(&name) == Some(&"own"));
+            (name, JoinCell { cell, change, maybe_empty_box, shared_ref_unchanged, checked_only: join.checked_only, empty_at_runtime, checked_path_owns })
         }).collect();
         (id, places)
     }).collect();

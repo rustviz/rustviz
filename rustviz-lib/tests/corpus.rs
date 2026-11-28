@@ -33852,6 +33852,150 @@ fn corpus_1907_geometry() {
 }
 
 #[test]
+fn issue_1935_match_initializers_own_their_values_at_the_join() {
+    // Both MIR arms assign the result local before its ForLet read.
+    for (fixture, column, row) in [
+        ("edition2024/rv3_1935_11", "s4", "7"),
+        ("rv3_1935_27", "s2", "14"),
+    ] {
+        let svg = render_cell(fixture).unwrap().timeline_panel_string();
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        assert!(doc.descendants().any(|node| {
+            node.attribute("data-rv-var") == Some(column)
+                && node.attribute("data-rv-line") == Some(row)
+                && node.attribute("data-rv-kind") == Some("line")
+                && node.attribute("data-rv-state") == Some("full_privilege")
+        }), "{fixture}: the completed initializer must have an ownership line");
+    }
+}
+
+#[test]
+fn issue_1935_slice_releases_follow_the_issuing_loan() {
+    let svg = render_cell("rv3_1935_17").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    let geometry = common::geometry::parse(&doc);
+    // MIR issues the shared indexing loan of v separately from the
+    // projected reborrows. The pattern stores identify the release edges
+    // but do not prove that either reference borrowed the entire Vec.
+    for (holder, row, arm) in [("x3", "8", "9 11"), ("rest", "10", "12 16")] {
+        let projected = format!("{holder} holds a shared reference into the matched value.");
+        let release = "The shared borrow of v ends here. This borrow no longer restricts access to v.";
+        let whole = format!("{holder}'s shared borrow of v ends");
+        check_review_tip(&svg, &format!("{holder}@L{row}:dot:static_die"), &[&projected, release], &[&whole]);
+        let pos = |name, clause: &str| {
+            let dots = drawn_clauses(&svg, name, row);
+            let (x, y, _) = dots.iter().find(|(_, _, text)| text.contains(clause))
+                .unwrap_or_else(|| panic!("{name} on row {row}: {dots:?}"));
+            (f64::from(*x), f64::from(*y))
+        };
+        let from = pos(holder, &projected);
+        let to = pos("v", &projected);
+        assert!(geometry.branch_segments("v").any(|(a, b, rows)| {
+            rows == Some(arm) && [a, b].into_iter().any(|p| common::geometry::near(p, to))
+        }), "{holder} must release the loan on its own arm");
+        assert!(geometry.arrow_connects(holder, "v", row, (from, to), |tip| {
+            tip.contains("holds a shared reference into the matched value.")
+        }), "{holder}: the release arrow must connect those two dots");
+    }
+    assert!(!drawn_clauses(&svg, "x31", "10").iter().any(|(_, _, tip)| tip.contains("borrow of v")));
+}
+
+#[test]
+fn issue_1935_moves_at_a_join_exclude_returning_paths() {
+    let svg = render_cell("rv3_1935_return_before_join").unwrap().timeline_panel_string();
+    for field in ["p.a", "p.b"] {
+        check_review_tip(&svg, &format!("{field}@L28:dot:branch_join"), &[
+            "has been moved on every runtime path that reaches this join.",
+            "The borrow checker also considers a path reaching this join that still owns it.",
+        ], &["has been moved on every path that runs"]);
+    }
+}
+
+#[test]
+fn issue_1935_box_column_reaches_the_allocation_drop() {
+    let svg = render_cell("rv3_1935_37").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    // Drop elaboration still drops the box allocation after the move of
+    // *b into p.b. The move and the allocation drop have different rows.
+    assert!(doc.descendants().any(|node| {
+        node.attribute("data-rv-var") == Some("b")
+            && node.attribute("data-rv-kind") == Some("line")
+            && node.attribute("data-rv-line") == Some("9")
+            && node.attribute("data-rv-line-end") == Some("10")
+    }));
+    assert!(timeline_tooltips(&svg).iter().any(|title| {
+        title.starts_with("b goes out of scope.") && title.contains("only its heap allocation")
+    }));
+}
+
+#[test]
+fn issue_1935_unused_field_copy_ends_once() {
+    let svg = render_cell("rv3_1935_38").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    // MIR stages the shared reference into h.r. The only subsequent
+    // place use of h is of h.n on the failed edge of the let-else.
+    let ends: Vec<_> = doc.descendants().filter(|node| {
+        node.attribute("data-rv-kind") == Some("dot")
+            && node.attribute("data-rv-var") == Some("h.r")
+            && node.attribute("data-rv-event").is_some_and(|event| {
+                event.split_whitespace().any(|word| matches!(word, "ref_die" | "static_die"))
+            })
+    }).collect();
+    assert_eq!(ends.len(), 1, "h.r has one holding to end");
+    assert_eq!(ends[0].attribute("data-rv-line"), Some("7"));
+    check_review_tip(&svg, "h.r@L7:dot:", &[
+        "h.r is initialized with a copy of r",
+        "h.r has no further use. The enclosing value can keep the shared borrow live.",
+    ], &["h.r's immutable borrow ends", "no longer restricts"]);
+}
+
+#[test]
+fn issue_1935_unused_field_copy_keeps_other_loan_ends() {
+    let svg = render_cell("rv3_1935_field_alternatives").unwrap().timeline_panel_string();
+    check_review_tip(&svg, "h.r@L8:dot:", &[
+        "h.r has no further use. The enclosing value can keep the shared borrow live.",
+    ], &["h.r's immutable borrow ends"]);
+    // A mutable use of s before the let-else is E0502. Its shared
+    // borrow ends on both outcomes of that test, after h.n on failure.
+    for row in [10, 12] {
+        check_review_tip(&svg, &format!("s@L{row}:dot:static_reacquire"), &[
+            "s's resource is no longer immutably borrowed",
+        ], &["no longer mutably borrowed"]);
+    }
+}
+
+#[test]
+fn issue_1935_successful_try_keeps_the_enclosing_loan() {
+    let svg = render_cell("rv3_1935_53").unwrap().timeline_panel_string();
+    let doc = roxmltree::Document::parse(&svg).unwrap();
+    // Rustc rejects a write to either field at else entry or before the
+    // print after ?. It accepts either write on the sibling arm.
+    for field in ["p.a", "p.b"] {
+        let entries: Vec<_> = doc.descendants().filter(|node| {
+            node.attribute("data-rv-var") == Some(field)
+                && node.attribute("data-rv-line") == Some("16")
+                && node.attribute("data-rv-kind") == Some("branch_line")
+                && node.attribute("data-tooltip-text").is_some()
+        }).collect();
+        let id = entries.iter().find(|node| {
+            node.attribute("data-rv-state") == Some("partial_privilege")
+                && node.parent().and_then(|arm| arm.attribute("data-arm-rows")) == Some("16 18")
+        }).and_then(|node| node.attribute("data-rv-id")).unwrap_or_else(|| panic!("{field} must be shared on else entry"));
+        check_review_tip(&svg, id, &[
+            &format!("{field} is the owner of the resource"),
+            &format!("{field} is immutably borrowed along with p"),
+            &format!("{field} stays borrowed while r2 is in use"),
+        ], &["can be mutably borrowed"]);
+        let sibling: Vec<_> = entries.iter().filter(|node| {
+            node.parent().and_then(|arm| arm.attribute("data-arm-rows")) == Some("16 16")
+        }).collect();
+        assert!(sibling.iter().any(|node| node.attribute("data-rv-state") == Some("full_privilege"))
+            && sibling.iter().all(|node| node.attribute("data-rv-state") != Some("partial_privilege")),
+            "{field} is usable on the sibling edge on the same source row");
+    }
+}
+
+#[test]
 fn issue_1915_arrows_cross_on_their_event_row() {
     // rustc's MIR takes a shared reference to o in the let-chain and
     // copies h.r into r2 in the first arm of the second fixture.
@@ -43636,12 +43780,18 @@ fn mir_review_straight_line_repoint() {
 #[test]
 fn mir_review_slice_bindings_end_once_before_return() {
     let svg = run_with_local_backend("rv3_issues/1606_two_bindings_one_arm_dot").timeline_panel_string();
-    for name in ["x", "rest"] {
-        let tips = drawn_clauses(&svg, name, "5");
-        assert_eq!(tips.iter().filter(|(_, _, t)| t == &format!("{name}'s immutable borrow ends")).count(), 1);
-        assert!(!tips.iter().any(|(_, _, t)| t.contains("still has no value")));
-        assert!(timeline_tooltips(&svg).iter().any(|t| t == &format!("{name}'s borrow has ended on this path")));
-    }
+    // The rest binding's MIR region stops at its subslice store. The
+    // original Vec loan survives along the successful edge until the
+    // is_empty call uses x.
+    check_review_tip(&svg, "rest@L3:dot:", &[
+        "rest has no further use. Another reference keeps the borrow live.",
+    ], &["rest's immutable borrow ends", "no longer restricts access to v"]);
+    let rest_later = drawn_clauses(&svg, "rest", "5");
+    assert!(rest_later.iter().all(|(_, _, tip)| !tip.contains("rest's immutable borrow ends")
+        && !tip.contains("still has no value")), "{rest_later:?}");
+    let ends = drawn_clauses(&svg, "x", "5");
+    assert_eq!(ends.iter().filter(|(_, _, tip)| tip.contains("The shared borrow of v ends here.")).count(), 1);
+    assert!(!ends.iter().any(|(_, _, tip)| tip.contains("x's shared borrow of v ends") || tip.contains("still has no value")));
 }
 
 #[test]

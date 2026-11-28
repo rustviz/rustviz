@@ -51,24 +51,8 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     // Geometric (`geometry.rs`), from here on.
     // Arrows fanned into one dot from below (#1312): one head still comes
     // in at 70-85 degrees along the column under the dot.
-    ("assign_branch_reborrow_holder_1482", "arrow-along-leg", 1542),
-    ("branch_holder_lenders_1404", "arrow-along-leg", 1542),
-    ("cond_holder_local_ref_1475", "arrow-along-leg", 1542),
-    ("cond_holder_moved_1464", "arrow-along-leg", 1542),
-    ("ctor_cond_assign_holder_1470", "arrow-along-leg", 1542),
-    ("ctor_cond_holder_1457", "arrow-along-leg", 1542),
-    ("fn_ret_ref_arg_lists", "arrow-along-leg", 1542),
-    ("holder_return_clear_of_leg_1476", "arrow-along-leg", 1542),
-    ("holder_tuple_literal_1459", "arrow-along-leg", 1542),
-    ("iter_mut_holder_1399", "arrow-along-leg", 1542),
-    ("let_else_holder_return_1458", "arrow-along-leg", 1542),
-    ("let_pattern_literal_unbound_moves", "arrow-along-leg", 1542),
-    ("pattern_ref_several_lenders", "arrow-along-leg", 1542),
-    ("store_through_mut_ref_1124", "arrow-along-leg", 1542),
-    ("tuple_scrutinee_nested", "arrow-along-leg", 1542),
     // Programs kept from the closed 2.x fix PRs (known_bugs/README.md); each is tracked by the issue named.
     ("known_bugs/1578_match_scrutinee_ref_repointed", "invalid-state", 1578),
-    ("known_bugs/1584_maybe_held_second_returning_if", "line-starts-nowhere", 1584),
     ("known_bugs/1585_unused_ref_binding_nested_return", "invalid-state", 1585),
     ("known_bugs/1585_unused_ref_binding_nested_return", "line-through-fork", 1585),
     ("known_bugs/1598_else_if_let_implicit_else_join", "fork-without-dot", 1598),
@@ -76,8 +60,6 @@ pub const KNOWN_INVARIANT_FAILURES: &[(&str, &str, u32)] = &[
     ("known_bugs/1625_repoint_live_reborrow", "invalid-state", 1625),
     ("known_bugs/1645_move_then_two_reassigns", "drop-of-moved-value-at-reassign", 1645),
     ("known_bugs/1662_arm_loan_kinds", "invalid-state", 1662),
-    ("known_bugs/1732_stored_loan_kinds", "arrow-along-leg", 1732),
-    ("known_bugs/1823_shared_ref_of_mut_hedge", "arrow-along-leg", 1823),
     ("known_bugs/1823_shared_ref_of_mut_kinds", "invalid-state", 1823),
     ("known_bugs/1823_shared_ref_of_mut_siblings", "invalid-state", 1823),
     // Ownership failures that predate the geometry fixes in #1907.
@@ -381,7 +363,15 @@ const MAYBE_PHRASES: &[&str] = &[
 /// A move of what a Box points to (`let s = *b;`): the Box itself stays,
 /// and the moved value is no longer its responsibility. Its dot names `*b`.
 fn contents_moved(d: &Dot) -> bool {
-    d.tip.starts_with('*')
+    // A standalone move can also describe a conditional payload move.
+    // On a compound dot, look for the payload-move clause among the
+    // preceding borrow and release clauses.
+    let payload = format!("{}'s ", d.var);
+    d.tip.starts_with('*') || d.tip.split(" / ").any(|part| {
+        let part = part.trim_start_matches("• ");
+        part.starts_with('*') && part.trim_start_matches('*').starts_with(&payload)
+            && part.contains(" is moved")
+    })
 }
 
 /// `b = Box::new(*b);` (#1423): the right-hand side moves what the Box
